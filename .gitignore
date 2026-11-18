@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime state written by the appliance / plugins (never commit)
+device.json
+*.local.json
+# standalone/gas runtime data
+price.json
+gasprice.json
+state.json
+pulses.csv
+pulses.csv.bad
+
+# Secrets / certs — bring-your-own, never commit
+.env
+*.pem
+*.key
+*.p12
+*.pfx
+mqtt.json
+secrets.*
+
+# OS / editor
+.DS_Store
+*.swp

@@ -1,0 +1,3 @@
+# gasmeter plugin runtime deps (Raspberry Pi)
+gpiod            # libgpiod v2 Python bindings — reed-switch pulse input on GPIO
+paho-mqtt        # publish usage/cost to the local broker / Home Assistant

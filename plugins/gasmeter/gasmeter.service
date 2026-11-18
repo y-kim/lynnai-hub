@@ -1,0 +1,14 @@
+# systemd unit for gasmeter.py. Install (edit User and paths first):
+#   sudo cp gasmeter.service /etc/systemd/system/ && sudo systemctl enable --now gasmeter
+[Unit]
+Description=lynnai-hub gas meter pulse counter (reed switch on GPIO17)
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/lynnai-hub/plugins/gasmeter
+ExecStart=/usr/bin/python3 -u /home/pi/lynnai-hub/plugins/gasmeter/gasmeter.py run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
