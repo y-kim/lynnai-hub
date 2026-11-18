@@ -85,6 +85,24 @@ def bootstrap_xml(broker_ip):
 
 
 # ---------- HTML ----------
+# 모든 암호칸(type=password)에 칸별 '눈' 버튼을 붙인다. 누르면 그 칸만 보기/숨기기.
+_EYE_OPEN = ('<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" '
+             'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+             '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>')
+_EYE_SHUT = ('<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" '
+             'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+             '<path d="M17.94 17.94A10.9 10.9 0 0 1 12 19c-7 0-11-7-11-7a20.3 20.3 0 0 1 5.06-5.94"/>'
+             '<path d="M9.9 4.24A10.4 10.4 0 0 1 12 4c7 0 11 7 11 7a20.4 20.4 0 0 1-3.17 4.19"/>'
+             '<path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>')
+EYE_JS = ("<script>(function(){var O='" + _EYE_OPEN + "',C='" + _EYE_SHUT + "';"
+          "document.querySelectorAll('input[type=password]').forEach(function(i){"
+          "var w=document.createElement('span');w.className='pwwrap';i.parentNode.insertBefore(w,i);w.appendChild(i);"
+          "var b=document.createElement('button');b.type='button';b.className='eye';b.innerHTML=O;"
+          "b.setAttribute('aria-label','암호 보기');"
+          "b.onclick=function(){var v=i.type==='password';i.type=v?'text':'password';b.innerHTML=v?C:O;"
+          "b.setAttribute('aria-label',v?'암호 숨기기':'암호 보기');i.focus();};w.appendChild(b);});})();</script>")
+
+
 def page(body, title="LYNNAI HUB"):
     return ("<!doctype html><html lang=ko><head><meta charset=utf-8>"
             "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -95,14 +113,26 @@ def page(body, title="LYNNAI HUB"):
             "border-radius:8px;border:1px solid #444;background:#1c1c1c;color:#eee}"
             "button{background:#c33;border:0;margin-top:14px;font-weight:600}.card{background:#191919;"
             "border:1px solid #333;border-radius:12px;padding:16px;margin:14px 0}.muted{color:#888;font-size:13px}"
-            "a{color:#6af}.warn{color:#f88}</style></head><body>%s</body></html>" % (title, body))
+            "a{color:#6af}.warn{color:#f88}"
+            ".pwwrap{position:relative;display:block}.pwwrap input{padding-right:48px}"
+            "button.eye{position:absolute;right:4px;top:50%%;transform:translateY(-50%%);width:40px;height:40px;"
+            "margin:0;padding:8px;background:transparent;border:0;color:#aaa;line-height:0}"
+            "button.eye:focus-visible{outline:2px solid #6af}"
+            "</style></head><body>%s%s</body></html>"
+            % (title, body, EYE_JS))
 
 
 class Handler(BaseHTTPRequestHandler):
     portal = None  # 주입
 
-    def log_message(self, *a):
-        pass  # 조용히
+    def log_message(self, fmt, *a):
+        pass  # 기본 접근 로그는 끔 — 대신 log_request 에서 한 줄 요약(암호·쿠키 안 남김)
+
+    def log_request(self, code="-", size="-"):
+        ua = (self.headers.get("User-Agent") or "-") if self.headers else "-"
+        print("[req] %s %s %s%s -> %s  ua=%s" % (
+            self.client_address[0], self.command, self.headers.get("Host", "-") if self.headers else "-",
+            urllib.parse.urlparse(self.path).path, code, ua[:60]), flush=True)
 
     # ---- 유틸 ----
     def _cookies(self):
@@ -204,19 +234,21 @@ class Handler(BaseHTTPRequestHandler):
                     " 그 네트워크로 <b>다시 연결</b>하면 됩니다.</p>"
                     "<form method=post action=/provision>"
                     "<label>전용 네트워크 이름 (SSID)</label><input name=ssid value=\"%s\" maxlength=32>"
-                    "<label>Wi-Fi 암호 (비우면 안전한 암호 자동 생성)</label>"
-                    "<input name=appw type=password placeholder=\"자동 생성\">"
-                    "<label>관리자 암호 (8자 이상)</label><input name=pw type=password>"
-                    "<label>관리자 암호 확인</label><input name=pw2 type=password>"
-                    "<button>설정하고 전용 네트워크로 전환</button></form>"
+                    "<label>Wi-Fi 암호 (8자 이상)</label>"
+                    "<input name=appw type=password class=pw id=appw oninput=_chk()>"
+                    "<label>관리자 암호 (8자 이상)</label><input name=pw type=password class=pw id=pw oninput=_chk()>"
+                    "<label>관리자 암호 확인</label><input name=pw2 type=password class=pw id=pw2 oninput=_chk()>"
+                    "<div id=pwmsg class=muted></div>"
+                    "<button id=pwbtn disabled>설정하고 전용 네트워크로 전환</button></form>"
+                    "<script>function _chk(){var w=document.getElementById('appw').value,a=document.getElementById('pw').value,b=document.getElementById('pw2').value,m=document.getElementById('pwmsg'),x=document.getElementById('pwbtn');if(w.length<8){m.textContent='Wi-Fi 암호는 8자 이상';m.className='muted';x.disabled=true;}else if(a.length<8){m.textContent='관리자 암호는 8자 이상';m.className='muted';x.disabled=true;}else if(a!==b){m.textContent='암호 확인 불일치';m.className='warn';x.disabled=true;}else{m.textContent='일치합니다 ✓';m.className='muted';x.disabled=false;}}</script>"
                     "<p class=muted>지금은 공개 설정용 네트워크입니다. 설정을 마치면 닫힙니다.</p></div>"
-                    % html.escape(st.data.get("device_id", "")))
+                    % html.escape(st.data.get("ap_ssid_default") or st.data.get("device_id", "")))
             return self._send(200, page(body, "초기 설정"))
         # 2) 로그인 필요
         sid = self._session()
         if not sid:
             body = ("<h1>로그인</h1><div class=card><form method=post action=/login>"
-                    "<label>관리자 암호</label><input name=pw type=password autofocus>"
+                    "<label>관리자 암호</label><input name=pw type=password class=pw autofocus>"
                     "<button>로그인</button></form></div>")
             return self._send(200, page(body, "로그인"))
         # 3) 대시보드
@@ -238,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
             "<button>이름 변경</button></form>"
             "<form method=post action=/ap-pass style=margin-top:10px>"
             "<input type=hidden name=csrf value=%s>"
-            "<label>새 Wi-Fi 암호 (8자 이상)</label><input name=pw type=password>"
+            "<label>새 Wi-Fi 암호 (8자 이상)</label><input name=pw type=password class=pw>"
             "<button>암호 변경</button></form></div>"
             "<div class=card><h3>동작 모드</h3><form method=post action=/mode>"
             "<input type=hidden name=csrf value=%s>"
@@ -298,19 +330,21 @@ class Handler(BaseHTTPRequestHandler):
             if f.get("pw") != f.get("pw2"):
                 return self._send(200, page("<h1>불일치</h1><p>관리자 암호가 다릅니다. <a href=/>뒤로</a></p>"))
             try:
-                genpw = P.st.provision(f.get("pw", ""), f.get("ssid", ""),
-                                       f.get("appw", "").strip() or None)
+                appw = f.get("appw", "").strip()
+                if len(appw) < 8:       # 완료 화면에 암호를 안 보여주므로 자동 생성 대신 필수
+                    raise ValueError("Wi-Fi 암호는 8자 이상")
+                genpw = P.st.provision(f.get("pw", ""), f.get("ssid", ""), appw)
             except (ValueError, RuntimeError) as e:
                 return self._send(200, page("<h1>오류</h1><p>%s <a href=/>뒤로</a></p>" % html.escape(str(e))))
             ssid = html.escape(P.st.data["ap_ssid"])
             body = ("<h1>설정 완료</h1><div class=card>"
-                    "<p>전용 네트워크로 전환합니다. 아래 정보로 <b>다시 연결</b>하세요.</p>"
-                    "<p>네트워크: <b>%s</b></p><p>Wi-Fi 암호: <b style=font-size:20px>%s</b></p>"
-                    "<p class=warn>이 암호는 지금만 표시됩니다. 적어두세요.</p>"
-                    "<p class=muted>잠시 후 이 설정용 네트워크는 닫힙니다. 재연결하면 바로 로그인됩니다.</p></div>"
-                    % (ssid, html.escape(genpw)))
-            # 세션 쿠키 발급(브라우저에 저장 → 생산망 재연결 후에도 로그인 유지)
-            self._send(200, page(body, "설정 완료"), cookie=self._mkcookie(P.make_session()))
+                    "<p>전용 네트워크로 전환합니다. <b>방금 설정한 Wi-Fi 암호</b>로 <b>다시 연결</b>하세요.</p>"
+                    "<p>네트워크: <b>%s</b></p>"
+                    "<p class=muted>잠시 후 이 설정용 네트워크는 닫히고 전용 네트워크가 뜹니다. 전용 네트워크에 연결한 뒤 http://192.168.50.1 에서 관리자 암호로 로그인하세요.</p></div>"
+                    % ssid)
+            # 세션 쿠키는 주지 않는다: 설정용 망에선 초기 설정 한 번이 끝. 관리는 전용망에서
+            # 관리자 암호로 로그인해야만 가능(설정망 = 관리 권한 없음).
+            self._send(200, page(body, "설정 완료"))
             self._apply_ap(delay=2.0)   # 응답 전송 후 hostapd를 생산 AP로 전환
             return
         if p == "/login":
@@ -357,7 +391,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/")
         if p == "/factory-reset":
             P.st.factory_reset()
-            return self._send(200, page("<h1>초기화됨</h1><p>재부팅/재프로비저닝 필요.</p>"))
+            self._send(200, page("<h1>초기화됨</h1><div class=card><p>모든 설정·비밀을 지웠습니다. "
+                                 "잠시 후 <b>새 기기 ID</b>로 설정용 네트워크(LYNNAI-SETUP-…)가 다시 뜹니다.</p></div>"))
+            # 응답을 보낸 뒤 종료 → 서비스 매니저(systemd Restart=always)가 다시 띄우며 새로 첫 부팅
+            import threading
+            threading.Timer(2.0, os._exit, (0,)).start()
+            return
         return self._send(404, page("<h1>404</h1>"))
 
     def _mkcookie(self, sid):
@@ -376,9 +415,17 @@ class Handler(BaseHTTPRequestHandler):
         threading.Timer(delay, lambda: hook(ssid, pw)).start()
 
 
-def serve(bind_ip, port, state_path, controller=None, broker_ip=None):
+def serve(bind_ip, port, state_path, controller=None, broker_ip=None, apply_cmd=None):
     st = state_mod.DeviceState(state_path).load()
     P = Portal(st, controller=controller, broker_ip=broker_ip or bind_ip)
+    if apply_cmd:
+        import subprocess
+        def _apply_hook(ssid, pw):
+            try:
+                subprocess.Popen([apply_cmd, ssid, pw or ""])
+            except Exception as e:
+                print("[portal] apply-cmd 실패:", e, flush=True)
+        P.on_apply_ap = _apply_hook
     Handler.portal = P
     httpd = ThreadingHTTPServer((bind_ip, port), Handler)
     print("[portal] http://%s:%d (AP 전용 바인드)" % (bind_ip, port), flush=True)
@@ -391,5 +438,6 @@ if __name__ == "__main__":
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--state", required=True)
+    ap.add_argument("--apply-cmd", help="AP 적용 스크립트: <cmd> <ssid> <pass> 로 호출(프로비저닝/AP 변경 시)")
     a = ap.parse_args()
-    serve(a.bind, a.port, a.state)
+    serve(a.bind, a.port, a.state, apply_cmd=a.apply_cmd)

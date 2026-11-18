@@ -5,19 +5,14 @@ identity.py -- 기기 개별화의 뿌리. "공유 비밀 0" 원칙의 핵심.
 (고유)과 HW RNG로 '자기만의' 비밀을 만든다. 따라서 이미지 한 장을 뜯어봐도
 다른 기기는 안전하다.
 
-초기 AP 암호는 '시리얼에서 결정적으로 파생' → 제조 시 시리얼만 알면 스티커를
-미리 인쇄할 수 있다(소유자가 첫 설정에서 교체 강제).
+기기 ID 는 첫 부팅 때 HW 난수로 뽑는다(시리얼에서 파생하지 않음). 공장초기화하면
+상태 파일과 함께 사라지고 다음 첫 부팅에 새로 뽑힌다 → 양도 후엔 다른 기기로 보이고,
+주인이 바뀌어도 방송되는 SSID 로 같은 기기를 추적할 수 없다.
 
-CPython / (대부분) MicroPython 공용을 지향. os.urandom / hashlib 만 사용.
+CPython / (대부분) MicroPython 공용을 지향. os.urandom 만 사용.
 """
-import hashlib
-import hmac
 import os
 import re
-
-# 이미지에 구워지는 '비-비밀' 앱 상수. device_id(=SSID 접미사) 파생용.
-# AP 암호 파생엔 쓰지 않는다(동일 이미지라 파생값은 비밀이 못 됨) — gen_ap_pass 참고.
-ID_DERIVE_SALT = b"rk-appliance/device-id/v1"
 
 # 혼동 문자(0/O, 1/l/I) 제거한 base32 유사 알파벳
 _ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -72,10 +67,9 @@ def read_cpu_serial():
     return os.urandom(8).hex()
 
 
-def device_id(serial):
-    """시리얼 → 짧고 안정적인 공개 기기 ID (SSID 접미사 등)."""
-    h = hmac.new(ID_DERIVE_SALT, serial.encode(), hashlib.sha256).digest()
-    return _b32(h, 6)
+def new_device_id():
+    """공개 기기 ID (SSID 접미사 등): HW 난수 6글자(30비트). 첫 부팅/공장초기화 때마다 새로."""
+    return _b32(os.urandom(8), 6)
 
 
 def gen_ap_pass(n=12):
@@ -90,15 +84,16 @@ def gen_secret(nbytes=16):
     return os.urandom(nbytes).hex()
 
 
-def ap_ssid(serial, base="LYNNAI"):
-    return "%s-%s" % (base, device_id(serial))
+def ap_ssid(did, base="LYNNAI-HUB"):
+    return "%s-%s" % (base, did)
 
 
 if __name__ == "__main__":
     s = read_cpu_serial()
     print("serial       :", s)
-    print("device_id    :", device_id(s))
-    print("ap_ssid      :", ap_ssid(s))
+    d = new_device_id()
+    print("device_id    :", d, "/ 다시:", new_device_id(), "(매번 달라야 함)")
+    print("ap_ssid      :", ap_ssid(d))
     print("gen_ap_pass  :", gen_ap_pass(), "(랜덤 — 첫 프로비저닝용, 매번 다름)")
     print("gen_ap_pass2 :", gen_ap_pass(), "(달라야 함)")
     print("gen_secret   :", gen_secret(), "(매번 달라야 함)")

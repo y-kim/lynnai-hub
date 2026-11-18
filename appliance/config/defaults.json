@@ -1,7 +1,7 @@
 {
   "_comment": "굽는 시점 비-비밀 기본값. 나중에 수정 가능. 디바이스 식별자는 전부 여기서 파생(lynnai).",
   "brand": "Lynnai",
-  "ap_ssid_base": "LYNNAI",
+  "ap_ssid_base": "LYNNAI-HUB",
   "setup_ssid_base": "LYNNAI-SETUP",
   "setup_pass": "",
   "default_mode": "standalone",

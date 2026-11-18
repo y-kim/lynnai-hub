@@ -11,7 +11,7 @@ import os
 # 내장 폴백(파일이 없거나 키가 빠졌을 때). 식별자는 전부 lynnai.
 BUILTIN = {
     "brand": "Lynnai",
-    "ap_ssid_base": "LYNNAI",
+    "ap_ssid_base": "LYNNAI-HUB",
     "setup_ssid_base": "LYNNAI-SETUP",
     "setup_pass": "",
     "default_mode": "standalone",

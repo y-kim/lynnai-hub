@@ -73,7 +73,7 @@ class DeviceState:
             self.load()
             return False
         serial = identity.read_cpu_serial()
-        did = identity.device_id(serial)
+        did = identity.new_device_id()
         self.data = {
             "schema": SCHEMA,
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -85,6 +85,7 @@ class DeviceState:
             "provisioned": False,
             "setup_ssid": "%s-%s" % (defaults.get("setup_ssid_base", "LYNNAI-SETUP"), did),
             "setup_pass": defaults.get("setup_pass", ""),        # "" = 개방, 아니면 공개 WPA2 기본값
+            "ap_ssid_default": "%s-%s" % (defaults.get("ap_ssid_base", "LYNNAI-HUB"), did),  # 폼 기본값
             "ap_ssid": None,                    # 생산 SSID — 프로비저닝서 유저가 정함
             "ap_pass": None,                    # 생산 WPA2 암호 — 랜덤 생성 or 유저 지정
             "admin": None,                      # 프로비저닝서 설정 강제
