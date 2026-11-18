@@ -1,0 +1,9 @@
+# Name,     Type, SubType, Offset, Size, Flags
+# 8MB 플래시. nvs 는 예제와 같은 위치·크기(0x9000, 24K) — Zigbee 참여 정보가 여기 있으므로 유지.
+# 앱은 OTA 두 칸(3MB씩): 새 펌웨어가 잘못돼도 이전 칸으로 돌아갈 수 있게.
+nvs,        data, nvs,     ,       0x6000,
+otadata,    data, ota,     ,       0x2000,
+phy_init,   data, phy,     ,       0x1000,
+ota_0,      app,  ota_0,   ,       3M,
+ota_1,      app,  ota_1,   ,       3M,
+zb_fct,     data, fat,     ,       1K,
