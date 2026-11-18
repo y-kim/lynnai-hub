@@ -1,0 +1,19 @@
+name: lynnai-gas
+components:
+  - id: main
+    capabilities:
+      - id: connectbook02461.boilerStatus
+        version: 1
+      - id: gasMeter
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: GasMeter
+  - id: flow
+    label: 유량
+    capabilities:
+      - id: connectbook02461.boilerStatus
+        version: 1
+    categories:
+      - name: GasMeter

@@ -39,6 +39,7 @@
 #include "driver/gpio.h"
 #include "hub_zigbee.h"
 #include "hub_rinnai.h"
+#include "hub_sensors.h"
 #include "hub_zb_rinnai.h"
 
 static const char *TAG = "TEMPERATURE_SENSOR";
@@ -324,6 +325,7 @@ void app_main(void)
     }
     hub_onboard_init(&s_hub);
     ESP_ERROR_CHECK(hub_portal_start(&s_hub));
+    hub_sensors_start();                    /* 온습도계 + 가스 계량기 */
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
     hub_heap_monitor_start();

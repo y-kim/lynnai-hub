@@ -3,9 +3,11 @@
 -- 허브(ESP32-C6)는 보일러(f06)·각방 조절기(f09)의 클라우드 연결을 중계하면서 상태를 엿보고,
 -- 전용 클러스터 0xFC31 로 SmartThings 와 주고받는다(펌웨어 hub_zb_rinnai.c 참고).
 --   허브 → ST  0x01 상태 [종류 6|9][EPC 70 블롭]   0x02 연결 [bit0 보일러, bit1 각방]
+--              0x03 온습도 int16 x2 (°C*100, %*100)  0x04 가스 u32 x5 (펄스, 계량기 L, 1시간 L, 24시간 L, 유량 L/h)
 --   ST → 허브  0x00 명령 "f06 b1=1" / "f09 a0=7,b1=1,d4=10" / "refresh" (여러 개는 ";")
 --
--- 허브 아래에 자식 기기를 만든다: 보일러(전원·난방·온수·예열) + 각방 3개.
+-- 허브 아래에 자식 기기를 만든다: 보일러(전원·난방·온수·예열) + 각방 3개
+-- + 허브에 꽂은 센서(다용도실 온습도, 가스 계량기) — 값이 처음 올 때 만든다.
 -- 화면 구성·문구는 예전 LAN 드라이버(rinnai-client/stdriver)와 같다.
 local capabilities = require "st.capabilities"
 local ZigbeeDriver = require "st.zigbee"
@@ -18,7 +20,7 @@ local zb_const = require "st.zigbee.constants"
 local log = require "log"
 
 local CLUSTER = 0xFC31
-local CMD_REQUEST, CMD_STATE, CMD_LINKS = 0x00, 0x01, 0x02
+local CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_ROOM, CMD_GAS = 0x00, 0x01, 0x02, 0x03, 0x04
 local HUB_EP = 10
 
 -- 자식 기기: 키 → 이름·프로필. 구역은 f09 상태 블롭의 슬롯(7바이트, 슬롯 s 는 byte[7s]).
@@ -259,6 +261,33 @@ local function on_state(_, parent, zb_rx)
   refresh_all(parent)
 end
 
+-- 허브에 직접 꽂은 센서
+local ROOM_KEY, GAS_KEY = "room", "gas"
+
+local function on_room(_, parent, zb_rx)
+  local t, h = string.unpack("<i2i2", zb_rx.body.zcl_body.body_bytes)
+  create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31")
+  local child = parent:get_child_by_parent_assigned_key(ROOM_KEY)
+  if not child then return end
+  child:online()
+  emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = math.floor(t / 10 + 0.5) / 10, unit = "C" }))
+  emit(child, "main", capabilities.relativeHumidityMeasurement.humidity({ value = math.floor(h / 100 + 0.5) }))
+end
+
+local function on_gas(_, parent, zb_rx)
+  local count, reading, hour, day, flow = string.unpack("<I4I4I4I4I4", zb_rx.body.zcl_body.body_bytes)
+  create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter")
+  local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
+  if not child then return end
+  child:online()
+  -- 계량기 숫자에 맞춘 적이 없으면 센 양만 보여 준다
+  local m3 = (reading ~= 0xFFFFFFFF) and reading / 1000 or count * 0.01
+  local function f(l) return string.format("%.2f㎥", l / 1000) end
+  emit(child, "main", capabilities.gasMeter.gasMeterVolume({ value = m3, unit = "m^3" }))
+  emit(child, "main", status_cap.status("1D " .. f(day) .. " · 1H " .. f(hour)))
+  emit(child, "flow", status_cap.status(flow > 0 and string.format("%.2f㎥/h", flow / 1000) or "사용 안 함"))
+end
+
 local function on_links(_, parent, zb_rx)
   local s = hub_state(parent)
   s.links = zb_rx.body.zcl_body.body_bytes:byte(1) or 0
@@ -371,6 +400,8 @@ local driver_template = {
       [CLUSTER] = {
         [CMD_STATE] = on_state,
         [CMD_LINKS] = on_links,
+        [CMD_ROOM] = on_room,
+        [CMD_GAS] = on_gas,
       },
     },
   },

@@ -20,6 +20,7 @@
 #include "hub_portal.h"
 #include "hub_wifi.h"
 #include "hub_events.h"
+#include "hub_sensors.h"
 #include "hub_proxy.h"
 #include "hub_zigbee.h"
 
@@ -315,6 +316,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
+    cfg.max_uri_handlers = 16;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
     cfg.stack_size = 6144;
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
@@ -330,6 +332,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &prov);
     const httpd_uri_t boot = { .uri = "/key/server", .method = HTTP_GET, .handler = hub_proxy_bootstrap_handler };
     httpd_register_uri_handler(srv, &boot);        /* 보일러 부트스트랩 중계(와일드카드보다 먼저) */
+    hub_sensors_register(srv);                     /* /api/gas, /api/gas/set */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */
     ESP_LOGI(TAG, "설정 포털 시작 (:80)");

@@ -4,6 +4,7 @@
  *   허브 → SmartThings (서버→클라이언트 명령, 허브 주소 0x0000 / 엔드포인트 1)
  *     0x01 상태:  [종류 6|9][EPC 70 블롭 바이트...]
  *     0x02 연결:  [비트 0 = 보일러 연결됨, 비트 1 = 각방 연결됨]
+ *     0x03 온습도, 0x04 가스 계량기 (hub_sensors.c)
  *   SmartThings → 허브 (클라이언트→서버)
  *     0x00 명령:  ASCII "f06 b1=1" / "f09 a0=7,b1=1,d4=16" / "refresh", 여러 개는 ";" 로
  */
@@ -18,6 +19,7 @@
 #include "temperature_sensor.h"
 #include "hub_rinnai.h"
 #include "hub_zb_rinnai.h"
+#include "hub_sensors.h"
 
 static const char *TAG = "HUB_ZB_RK";
 
@@ -28,6 +30,9 @@ static ezb_zcl_status_t cmd_handler(const ezb_zcl_cmd_hdr_t *h, const uint8_t *p
     }
     if (h->cmd_id == HUB_RK_CMD_REQUEST) {
         ESP_LOGI(TAG, "SmartThings 명령: %.*s", len, (const char *)payload);
+        if (len == 7 && !memcmp(payload, "refresh", 7)) {
+            hub_sensors_refresh();
+        }
         hub_rinnai_command((const char *)payload, len);
         return EZB_ZCL_STATUS_SUCCESS;
     }
@@ -68,7 +73,7 @@ ezb_zcl_cluster_desc_t hub_zb_rinnai_cluster_desc(void)
     return d;
 }
 
-static void send_cmd(uint8_t cmd_id, uint8_t *data, uint16_t n)
+void hub_zigbee_send_raw(uint8_t cmd_id, const uint8_t *data, uint16_t n)
 {
     esp_zigbee_lock_acquire(portMAX_DELAY);
     if (!ezb_bdb_dev_joined()) {
@@ -85,7 +90,7 @@ static void send_cmd(uint8_t cmd_id, uint8_t *data, uint16_t n)
         },
         .cmd_id = cmd_id,
         .data_length = n,
-        .data = data,
+        .data = (uint8_t *)data,
     };
     ezb_err_t e = ezb_zcl_custom_cluster_cmd_req(&req);
     esp_zigbee_lock_release();
@@ -103,11 +108,11 @@ void hub_zigbee_send_state(uint8_t kind, const uint8_t *blob, int n)
     buf[0] = kind;
     memcpy(buf + 1, blob, n);
     ESP_LOGI(TAG, "→ SmartThings f0%d 상태 %d바이트", kind, n);
-    send_cmd(HUB_RK_CMD_STATE, buf, n + 1);
+    hub_zigbee_send_raw(HUB_RK_CMD_STATE, buf, n + 1);
 }
 
 void hub_zigbee_send_links(uint8_t mask)
 {
     ESP_LOGI(TAG, "→ SmartThings 연결 상태 보일러=%d 각방=%d", mask & 1, (mask >> 1) & 1);
-    send_cmd(HUB_RK_CMD_LINKS, &mask, 1);
+    hub_zigbee_send_raw(HUB_RK_CMD_LINKS, &mask, 1);
 }
