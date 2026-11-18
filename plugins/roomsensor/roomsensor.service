@@ -1,0 +1,16 @@
+# systemd unit for roomsensor.py. Install (edit User, paths and --mqtt first):
+#   sudo cp roomsensor.service /etc/systemd/system/ && sudo systemctl enable --now roomsensor
+[Unit]
+Description=lynnai-hub SHT31-D temperature/humidity sensor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/lynnai-hub/plugins/roomsensor
+ExecStart=/usr/bin/python3 -u /home/pi/lynnai-hub/plugins/roomsensor/roomsensor.py run --mqtt /home/pi/sensor/mqtt.json
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

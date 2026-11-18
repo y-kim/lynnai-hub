@@ -1,0 +1,3 @@
+# roomsensor plugin runtime deps (Raspberry Pi)
+smbus2           # I2C access to the SHT31-D sensor
+paho-mqtt        # publish temperature/humidity to the local broker / Home Assistant

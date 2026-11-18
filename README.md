@@ -13,8 +13,9 @@ Home Assistant / SmartThings 로 중계한다.
 | 디렉터리 | 역할 |
 |---|---|
 | `standalone/` | 클라우드를 **대체**하는 로컬 MQTT 브로커 + DNS 하이재킹 + Wi-Fi AP. 기기가 린나이 클라우드 대신 여기에 붙는다. (Pi3 기준, Pico 포팅 지향) |
-| `appliance/` | 배포 이미지 **제품**: 첫 부팅 자가 개별화(공유 비밀 0 원칙), 프로비저닝/관리 웹 포털, 기기 레지스트리(보일러·각방·기타 린나이 기기), standalone/proxy 모드 전환 |
+| `appliance/` | 배포 이미지 **제품**: 첫 부팅 자가 개별화(공유 비밀 0 원칙), 프로비저닝/관리 웹 포털(설정 Wi-Fi 접속 시 설정 페이지 자동 표시 = **캡티브 포털**), 기기 레지스트리(보일러·각방·기타 린나이 기기), standalone/proxy 모드 전환 |
 | `plugins/gasmeter/` | *(선택 플러그인)* 가스 계량기 리드스위치 펄스 카운터 + 도시가스 요금 계산. HA Energy 대시보드로 사용량·요금 송신 |
+| `plugins/roomsensor/` | *(선택 플러그인)* SHT31-D 온습도계(I2C 0x44) → 로컬 MQTT + HA 자동 등록(온도 °C · 습도 %) |
 
 ## 동작 모드
 
@@ -49,5 +50,7 @@ on your own LAN and bridge them to Home Assistant / SmartThings.
   secrets), a provisioning/management web portal, a device registry, and standalone/proxy modes.
 - `plugins/gasmeter/` — *(optional)* a gas‑meter reed‑switch pulse counter + city‑gas pricing that
   reports usage and cost to the Home Assistant Energy dashboard.
+- `plugins/roomsensor/` — *(optional)* an SHT31‑D temperature/humidity sensor (I2C) that publishes to
+  the local broker and auto‑registers in Home Assistant.
 
 License: MIT (see `LICENSE`).

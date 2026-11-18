@@ -152,7 +152,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._home()
         if p == "/logout":
             return self._redirect("/", cookie="sid=; Max-Age=0; Path=/")
-        return self._send(404, page("<h1>404</h1>"))
+        # 그 외 모든 GET = OS 캡티브 감지 프로브 / 임의 호스트 → 설정 페이지로 유도
+        return self._captive()
+
+    # OS 캡티브 포털 감지 프로브(참고). 실제론 "미지의 모든 GET"을 포털로 돌린다:
+    #   Android/Chrome: /generate_204 /gen_204   Apple: /hotspot-detect.html
+    #   Windows: /connecttest.txt /ncsi.txt      Firefox: /success.txt  Ubuntu: /canonical.html
+    def _captive(self):
+        """설정 AP에 접속하면 단말 OS가 인터넷 확인용으로 아무 주소나 때린다.
+        DNS(dns_hijack)가 그 요청을 전부 이 서버로 보내고, 여기서 포털 루트로 302 →
+        OS가 '네트워크 로그인' 웹뷰를 자동으로 띄워 설정 페이지가 바로 뜬다."""
+        host_ip, port = self.server.server_address[:2]
+        loc = "http://%s%s/" % (host_ip, "" if port == 80 else ":%d" % port)
+        self.send_response(302)
+        self.send_header("Location", loc)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _bootstrap(self):
         """보일러의 GET /key/server. standalone=로컬 브로커 안내, proxy=실클라우드 중계."""
