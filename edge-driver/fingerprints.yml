@@ -1,0 +1,6 @@
+zigbeeManufacturer:
+  - id: "Lynnai/LYNNAI-HUB"
+    deviceLabel: LYNNAI Hub
+    manufacturer: Lynnai
+    model: LYNNAI-HUB
+    deviceProfileName: lynnai-hub
