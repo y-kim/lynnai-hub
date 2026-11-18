@@ -19,6 +19,8 @@
 #include "hub_dns.h"
 #include "hub_portal.h"
 #include "hub_wifi.h"
+#include "hub_events.h"
+#include "hub_proxy.h"
 #include "hub_zigbee.h"
 
 static const char *TAG = "HUB_PORTAL";
@@ -326,6 +328,9 @@ esp_err_t hub_portal_start(hub_state_t *st)
     const httpd_uri_t any = { .uri = "/*", .method = HTTP_GET, .handler = captive_get };
     httpd_register_uri_handler(srv, &root);
     httpd_register_uri_handler(srv, &prov);
+    const httpd_uri_t boot = { .uri = "/key/server", .method = HTTP_GET, .handler = hub_proxy_bootstrap_handler };
+    httpd_register_uri_handler(srv, &boot);        /* 보일러 부트스트랩 중계(와일드카드보다 먼저) */
+    hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */
     ESP_LOGI(TAG, "설정 포털 시작 (:80)");
     return ESP_OK;

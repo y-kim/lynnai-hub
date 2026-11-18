@@ -1,0 +1,403 @@
+/*
+ * hub_proxy.c -- proxy 모드: 내 보일러(와 각방 모듈)를 허브가 받아 제조사 클라우드로 그대로 이어준다.
+ * Pi 판 rkprobe/bridge.py + fakesrv.py 의 /key/server 중계를 옮긴 것. 공식 앱은 그대로 동작한다.
+ *
+ *   보일러 --TLS1.1(우리 인증서)--> 허브:8883 --TLS1.2/1.3--> 클라우드:8883
+ *   보일러 --HTTP GET /key/server--> 허브:80  --HTTP-->        클라우드:80   (접속 정보 XML)
+ *
+ * 보일러 모듈은 TLS 1.1 만 쓰므로 wolfSSL 을 쓴다(ESP-IDF 의 mbedTLS 3 은 TLS 1.1 이 없다).
+ * 클라우드 주소·인증서는 지금은 펌웨어에 고정(나중에 포털 설정으로 옮긴다).
+ */
+#include <string.h>
+#include "esp_http_server.h"
+#include <fcntl.h>
+#include <errno.h>
+#include "esp_netif.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "hub_events.h"
+#include "lwip/sockets.h"
+
+#include "wolfssl/wolfcrypt/settings.h"
+#include "wolfssl/ssl.h"
+
+#include "hub_proxy.h"
+
+static const char *TAG = "HUB_PROXY";
+
+extern const uint8_t srv_pem_start[] asm("_binary_srv_pem_start");
+extern const uint8_t srv_pem_end[]   asm("_binary_srv_pem_end");
+
+#define UPSTREAM_IP    "3.38.86.244"      /* www.rkiot.net (이름으로 찾으면 허브 DNS 가 자기 자신을 답함) */
+#define UPSTREAM_HOST  "www.rkiot.net"
+#define MQTT_PORT      8883
+#define MAX_LINKS      3                  /* 보일러 + 각방 모듈 + 재접속 여유 1 */
+#define IDLE_SEC       200                /* 이만큼 아무것도 안 오가면 죽은 연결로 보고 닫음 */
+
+static WOLFSSL_CTX *s_srv_ctx, *s_cli_ctx;
+static volatile int s_links;
+
+/* 집 Wi-Fi IP 가 생길 때까지 최대 wait_s 초 기다린다(부팅 직후 기기가 먼저 붙는 경우). */
+static bool sta_ready(int wait_s)
+{
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    for (int i = 0; i < wait_s * 10; i++) {
+        esp_netif_ip_info_t ip;
+        if (sta && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.ip.addr) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return false;
+}
+
+/* 제한시간 있는 연결. lwIP 의 blocking connect 는 경로가 없으면 ~60초 매달려(실측) 웹서버까지 멈췄다. */
+static int tcp_connect(const char *ip, uint16_t port, int timeout_s)
+{
+    if (!sta_ready(15)) {
+        return -1;
+    }
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) {
+        return -1;
+    }
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port) };
+    inet_aton(ip, &a.sin_addr);
+    int fl = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, fl | O_NONBLOCK);
+    int r = connect(s, (struct sockaddr *)&a, sizeof(a));
+    if (r < 0 && errno == EINPROGRESS) {
+        fd_set w;
+        FD_ZERO(&w);
+        FD_SET(s, &w);
+        struct timeval ct = { .tv_sec = 5 };
+        int err = 0;
+        socklen_t el = sizeof(err);
+        if (select(s + 1, NULL, &w, NULL, &ct) == 1 && getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) {
+            r = 0;
+        }
+    }
+    if (r < 0) {
+        close(s);
+        return -1;
+    }
+    fcntl(s, F_SETFL, fl);
+    struct timeval tv = { .tv_sec = timeout_s };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    return s;
+}
+
+static int peer_octet(int fd)
+{
+    struct sockaddr_storage a;
+    socklen_t l = sizeof(a);
+    if (getpeername(fd, (struct sockaddr *)&a, &l) < 0) {
+        return -1;
+    }
+    if (a.ss_family == AF_INET) {
+        return (int)(ntohl(((struct sockaddr_in *)&a)->sin_addr.s_addr) & 0xff);
+    }
+#if LWIP_IPV6
+    if (a.ss_family == AF_INET6) {               /* 웹서버는 IPv6 겸용 소켓: IPv4-mapped 주소의 마지막 바이트 */
+        return ((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr[15];
+    }
+#endif
+    return -1;
+}
+
+static const char *mqtt_name(uint8_t b0)
+{
+    static const char *const n[16] = { "?", "CONNECT", "CONNACK", "PUBLISH", "PUBACK", "?", "?", "?", "SUBSCRIBE",
+                                       "SUBACK", "UNSUB", "UNSUBACK", "PINGREQ", "PINGRESP", "DISCONNECT", "?" };
+    return n[b0 >> 4];
+}
+
+/* 한쪽에서 읽어 다른 쪽으로 쓴다. 0 이하면 연결 종료. */
+static int pump(WOLFSSL *from, WOLFSSL *to, const char *arrow, char *buf, int cap)
+{
+    int n = wolfSSL_read(from, buf, cap);
+    if (n <= 0) {
+        return n;
+    }
+    if ((buf[0] >> 4) != 12 && (buf[0] >> 4) != 13) {          /* 핑은 로그 생략 */
+        ESP_LOGI(TAG, "%s %s %d바이트", arrow, mqtt_name((uint8_t)buf[0]), n);
+    }
+    return wolfSSL_write(to, buf, n) == n ? n : -1;
+}
+
+/* 클라우드 쪽 연결(TCP+TLS)을 보일러 쪽 TLS 와 '동시에' 진행한다.
+ * 순서대로 하면 보일러 TLS(~4초) 뒤 클라우드 TLS(~4.5초)가 이어져, 보일러가 CONNECT 후
+ * CONNACK 을 못 받고 끊는다(실측: CONNECT 0.1초 뒤 Wi-Fi 해제). */
+typedef struct {
+    int fd;
+    WOLFSSL *ssl;
+    bool ok;
+    int dev;                    /* 기기 IP 끝자리(이벤트용) */
+    SemaphoreHandle_t done;
+} up_job_t;
+
+/* 우선순위는 link_task(5)보다 낮게(4): 각방 모듈은 TLS 가 ~4.5초를 넘으면 포기하므로(실측 4.87초 실패,
+ * 4.15초 성공) 기기 쪽 핸드셰이크가 CPU 를 먼저 쓰고, 클라우드 쪽은 그 틈에 진행한다. */
+static void up_task(void *arg)
+{
+    up_job_t *j = arg;
+    j->fd = tcp_connect(UPSTREAM_IP, MQTT_PORT, 10);
+    j->ssl = j->fd >= 0 ? wolfSSL_new(s_cli_ctx) : NULL;
+    if (!j->ssl) {
+        ESP_LOGW(TAG, "클라우드 연결 실패 (집 Wi-Fi/인터넷 확인)");
+        hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, -2);
+    } else {
+        wolfSSL_set_fd(j->ssl, j->fd);
+#ifdef HAVE_SNI
+        wolfSSL_UseSNI(j->ssl, WOLFSSL_SNI_HOST_NAME, UPSTREAM_HOST, strlen(UPSTREAM_HOST));
+#endif
+        int64_t t0 = esp_log_timestamp();
+        if (wolfSSL_connect(j->ssl) == WOLFSSL_SUCCESS) {
+            j->ok = true;
+            ESP_LOGI(TAG, "클라우드 쪽 TLS 성공 (%lld ms)", (long long)(esp_log_timestamp() - t0));
+            hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, (int32_t)(esp_log_timestamp() - t0));
+        } else {
+            ESP_LOGW(TAG, "클라우드 쪽 TLS 실패: err %d", wolfSSL_get_error(j->ssl, -1));
+            hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, wolfSSL_get_error(j->ssl, -1) < 0 ? wolfSSL_get_error(j->ssl, -1) : -1);
+        }
+    }
+    xSemaphoreGive(j->done);
+    vTaskDelete(NULL);
+}
+
+static void link_task(void *arg)
+{
+    int down_fd = (int)(intptr_t)arg, up_fd = -1;
+    WOLFSSL *down = NULL, *up = NULL;
+    char *buf = malloc(2048);
+    up_job_t *job = calloc(1, sizeof(*job));
+    bool up_waited = false;
+    int dev = peer_octet(down_fd), closer = 0;
+    int64_t t_up = 0;
+    if (job) {
+        job->fd = -1;
+        job->dev = dev;
+        job->done = xSemaphoreCreateBinary();
+    }
+    if (!job || !job->done || xTaskCreate(up_task, "hub_up", 16384, job, 4, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "클라우드 연결 작업 생성 실패");
+        if (job && job->done) {
+            vSemaphoreDelete(job->done);
+        }
+        free(job);
+        job = NULL;
+        goto done;
+    }
+
+    struct timeval tv = { .tv_sec = 30 };
+    setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    down = wolfSSL_new(s_srv_ctx);
+    if (!buf || !down) {
+        ESP_LOGE(TAG, "메모리 부족으로 세션 생성 실패");
+        goto done;
+    }
+    wolfSSL_set_fd(down, down_fd);
+    int64_t t0 = esp_log_timestamp();
+    if (wolfSSL_accept(down) != WOLFSSL_SUCCESS) {
+        ESP_LOGW(TAG, "보일러 쪽 TLS 실패: err %d", wolfSSL_get_error(down, -1));
+        hub_event(EV_LINK_DEV_TLS, NULL, dev, wolfSSL_get_error(down, -1) < 0 ? wolfSSL_get_error(down, -1) : -1);
+        goto done;
+    }
+    ESP_LOGI(TAG, "보일러 쪽 TLS 성공: %s / %s (%lld ms)", wolfSSL_get_version(down), wolfSSL_get_cipher(down),
+             (long long)(esp_log_timestamp() - t0));
+    hub_event(EV_LINK_DEV_TLS, NULL, dev, (int32_t)(esp_log_timestamp() - t0));
+
+    xSemaphoreTake(job->done, portMAX_DELAY);       /* 클라우드 쪽은 이미 같이 진행 중 */
+    up_waited = true;
+    up_fd = job->fd;
+    up = job->ssl;
+    job->fd = -1;
+    job->ssl = NULL;
+    if (!job->ok) {
+        goto done;
+    }
+    ESP_LOGI(TAG, "연결됨: 보일러(%s) <-> 클라우드(%s)", wolfSSL_get_version(down), wolfSSL_get_version(up));
+    hub_event(EV_LINK_UP, NULL, dev, 0);
+    t_up = esp_timer_get_time();
+
+    tv.tv_sec = 0;                                   /* 중계 중엔 select 로 기다리므로 읽기 제한시간 해제 */
+    setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(up_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    for (;;) {
+        if (!wolfSSL_pending(down) && !wolfSSL_pending(up)) {
+            fd_set rd;
+            FD_ZERO(&rd);
+            FD_SET(down_fd, &rd);
+            FD_SET(up_fd, &rd);
+            struct timeval idle = { .tv_sec = IDLE_SEC };
+            int r = select((down_fd > up_fd ? down_fd : up_fd) + 1, &rd, NULL, NULL, &idle);
+            if (r < 0) {
+                break;
+            }
+            if (r == 0) {
+                ESP_LOGW(TAG, "%d초간 오간 데이터 없음 — 죽은 연결로 보고 닫음", IDLE_SEC);
+                closer = 3;
+                break;
+            }
+            if (FD_ISSET(down_fd, &rd) && pump(down, up, "보일러→클라우드", buf, 2048) <= 0) {
+                closer = 1;
+                break;
+            }
+            if (FD_ISSET(up_fd, &rd) && pump(up, down, "클라우드→보일러", buf, 2048) <= 0) {
+                closer = 2;
+                break;
+            }
+        } else {
+            if (wolfSSL_pending(down) && pump(down, up, "보일러→클라우드", buf, 2048) <= 0) {
+                closer = 1;
+                break;
+            }
+            if (wolfSSL_pending(up) && pump(up, down, "클라우드→보일러", buf, 2048) <= 0) {
+                closer = 2;
+                break;
+            }
+        }
+    }
+    ESP_LOGI(TAG, "연결 종료 (%s)", closer == 1 ? "기기가 닫음" : closer == 2 ? "클라우드가 닫음" : closer == 3 ? "유휴" : "오류");
+
+done:
+    if (job) {
+        if (!up_waited) {                           /* 보일러 쪽이 먼저 실패: 클라우드 작업 끝날 때까지 */
+            xSemaphoreTake(job->done, portMAX_DELAY);
+            up = job->ssl;
+            up_fd = job->fd;
+        }
+        vSemaphoreDelete(job->done);
+        free(job);
+    }
+    if (up) {
+        wolfSSL_free(up);
+    }
+    if (down) {
+        wolfSSL_free(down);
+    }
+    if (up_fd >= 0) {
+        close(up_fd);
+    }
+    close(down_fd);
+    free(buf);
+    {
+        uint8_t who[6] = { (uint8_t)closer };
+        hub_event(EV_LINK_CLOSE, who, dev, t_up ? (int32_t)((esp_timer_get_time() - t_up) / 1000) : 0);
+    }
+    s_links--;
+    vTaskDelete(NULL);
+}
+
+static void listen_task(void *arg)
+{
+    wolfSSL_Init();
+    s_srv_ctx = wolfSSL_CTX_new(wolfSSLv23_server_method());
+    s_cli_ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
+    long len = srv_pem_end - srv_pem_start;
+    if (!s_srv_ctx || !s_cli_ctx ||
+        wolfSSL_CTX_SetMinVersion(s_srv_ctx, WOLFSSL_TLSV1_1) != WOLFSSL_SUCCESS ||
+        wolfSSL_CTX_use_certificate_buffer(s_srv_ctx, srv_pem_start, len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS ||
+        wolfSSL_CTX_use_PrivateKey_buffer(s_srv_ctx, srv_pem_start, len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) {
+        ESP_LOGE(TAG, "TLS 준비 실패");
+        vTaskDelete(NULL);
+        return;
+    }
+    wolfSSL_CTX_set_cipher_list(s_srv_ctx, "ALL");
+    wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_NONE, NULL);   /* Pi 판과 동일(클라우드가 사설 CA) */
+
+    int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(MQTT_PORT), .sin_addr.s_addr = htonl(INADDR_ANY) };
+    if (bind(ls, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(ls, 2) < 0) {
+        ESP_LOGE(TAG, "%d 포트 열기 실패", MQTT_PORT);
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "proxy 대기 :%d -> %s:%d", MQTT_PORT, UPSTREAM_IP, MQTT_PORT);
+    for (;;) {
+        struct sockaddr_in from;
+        socklen_t fl = sizeof(from);
+        int c = accept(ls, (struct sockaddr *)&from, &fl);
+        if (c < 0) {
+            continue;
+        }
+        char ip[16];
+        inet_ntoa_r(from.sin_addr, ip, sizeof(ip));
+        if (s_links >= MAX_LINKS) {
+            ESP_LOGW(TAG, "%s 접속 거절(동시 연결 %d개 초과)", ip, MAX_LINKS);
+            hub_event(EV_LINK_REJECT, NULL, (int)(ntohl(from.sin_addr.s_addr) & 0xff), 0);
+            close(c);
+            continue;
+        }
+        ESP_LOGI(TAG, "%s 접속", ip);
+        hub_event(EV_LINK_OPEN, NULL, (int)(ntohl(from.sin_addr.s_addr) & 0xff), 0);
+        s_links++;
+        if (xTaskCreate(link_task, "hub_link", 20480, (void *)(intptr_t)c, 5, NULL) != pdPASS) {
+            s_links--;
+            close(c);
+        }
+    }
+}
+
+void hub_proxy_start(void)
+{
+    xTaskCreate(listen_task, "hub_proxy", 6144, NULL, 5, NULL);
+}
+
+/* 보일러의 GET /key/server 를 클라우드에 그대로 다시 물어 답을 돌려준다. */
+esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
+{
+    char svc[32] = "", mac[32] = "";
+    httpd_req_get_hdr_value_str(req, "Ck-Service", svc, sizeof(svc));
+    httpd_req_get_hdr_value_str(req, "Ck-Mac", mac, sizeof(mac));
+    ESP_LOGI(TAG, "부트스트랩 요청 (Ck-Mac %s)", mac);
+
+    char *buf = malloc(2048);
+    int s = buf ? tcp_connect(UPSTREAM_IP, 80, 8) : -1;
+    if (s < 0) {
+        free(buf);
+        ESP_LOGW(TAG, "부트스트랩: 클라우드 연결 실패");
+        hub_event(EV_BOOTSTRAP, NULL, peer_octet(httpd_req_to_sockfd(req)), 0);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "upstream");
+    }
+    int n = snprintf(buf, 2048, "GET /key/server HTTP/1.0\r\nHost: " UPSTREAM_HOST "\r\nCk-Service: %s\r\nCk-Mac: %s\r\n\r\n",
+                     svc, mac);
+    send(s, buf, n, 0);
+    int got = 0, r;
+    while (got < 2047 && (r = recv(s, buf + got, 2047 - got, 0)) > 0) {
+        got += r;
+    }
+    close(s);
+    buf[got] = '\0';
+    char *body = strstr(buf, "\r\n\r\n");
+    if (!body) {
+        free(buf);
+        ESP_LOGW(TAG, "부트스트랩: 클라우드 응답 이상");
+        hub_event(EV_BOOTSTRAP, NULL, peer_octet(httpd_req_to_sockfd(req)), 0);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "upstream");
+    }
+    body += 4;
+    ESP_LOGI(TAG, "부트스트랩 중계 완료 (%d바이트)", (int)strlen(body));
+    hub_event(EV_BOOTSTRAP, NULL, peer_octet(httpd_req_to_sockfd(req)), 1);
+    /* Pi fakesrv 처럼 헤더+본문을 '한 번에' 보낸다. httpd_resp_send 는 헤더와 본문을 따로 보내서
+     * (TCP 조각 2개) GainSpan 이 첫 조각만 읽고 실패 처리하는 것으로 의심됨. */
+    int bl = (int)strlen(body);
+    char *out = malloc(bl + 160);
+    esp_err_t e = ESP_FAIL;
+    if (out) {
+        int ol = snprintf(out, bl + 160,
+                          "HTTP/1.1 200 OK\r\nContent-Type: application/xml; charset=utf-8\r\n"
+                          "Content-Length: %d\r\n\r\n%s", bl, body);
+        e = httpd_send(req, out, ol) == ol ? ESP_OK : ESP_FAIL;
+        free(out);
+    }
+    free(buf);
+    /* 다 보낸 뒤 연결을 닫아 응답 끝을 알린다(Pi fakesrv 와 동일). */
+    httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+    return e;
+}

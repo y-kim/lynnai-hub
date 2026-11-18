@@ -16,6 +16,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "hub_events.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -28,6 +29,7 @@ static const char *TAG = "HUB_WIFI";
 #define STA_RETRY_US         (10 * 1000 * 1000)
 
 static esp_netif_t *s_ap_netif;
+static esp_netif_t *s_sta_netif;
 static bool s_sta_on;
 static esp_timer_handle_t s_retry_timer;
 
@@ -38,6 +40,29 @@ static void retry_cb(void *arg)
     }
 }
 
+/* AP 기기별 접속 시각(유지 시간 계산용) */
+static struct { uint8_t mac[6]; int64_t t; } s_join[8];
+
+static int64_t *join_slot(const uint8_t *mac, bool create)
+{
+    for (int i = 0; i < 8; i++) {
+        if (!memcmp(s_join[i].mac, mac, 6)) {
+            return &s_join[i].t;
+        }
+    }
+    if (!create) {
+        return NULL;
+    }
+    int old = 0;
+    for (int i = 1; i < 8; i++) {
+        if (s_join[i].t < s_join[old].t) {
+            old = i;
+        }
+    }
+    memcpy(s_join[old].mac, mac, 6);
+    return &s_join[old].t;
+}
+
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT) {
@@ -45,11 +70,15 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         case WIFI_EVENT_AP_STACONNECTED: {
             const wifi_event_ap_staconnected_t *e = data;
             ESP_LOGI(TAG, "AP 접속: " MACSTR " (aid %d)", MAC2STR(e->mac), e->aid);
+            *join_slot(e->mac, true) = esp_timer_get_time();
+            hub_event(EV_AP_JOIN, e->mac, 0, 0);
             break;
         }
         case WIFI_EVENT_AP_STADISCONNECTED: {
             const wifi_event_ap_stadisconnected_t *e = data;
-            ESP_LOGI(TAG, "AP 해제: " MACSTR " (aid %d)", MAC2STR(e->mac), e->aid);
+            ESP_LOGI(TAG, "AP 해제: " MACSTR " (aid %d, 사유 %d)", MAC2STR(e->mac), e->aid, e->reason);
+            int64_t *t = join_slot(e->mac, false);
+            hub_event(EV_AP_LEAVE, e->mac, e->reason, t && *t ? (int32_t)((esp_timer_get_time() - *t) / 1000) : -1);
             break;
         }
         case WIFI_EVENT_STA_START:
@@ -60,11 +89,13 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         case WIFI_EVENT_STA_CONNECTED: {
             const wifi_event_sta_connected_t *e = data;
             ESP_LOGI(TAG, "집 Wi-Fi 연결됨: 채널 %d (허브 AP 도 이 채널로)", e->channel);
+            hub_event(EV_STA_UP, e->bssid, e->channel, 0);
             break;
         }
         case WIFI_EVENT_STA_DISCONNECTED: {
             const wifi_event_sta_disconnected_t *e = data;
             ESP_LOGW(TAG, "집 Wi-Fi 끊김(사유 %d) — 10초 뒤 재시도", e->reason);
+            hub_event(EV_STA_DOWN, e->bssid, e->reason, 0);
             if (s_sta_on) {
                 esp_timer_stop(s_retry_timer);
                 esp_timer_start_once(s_retry_timer, STA_RETRY_US);
@@ -88,7 +119,7 @@ esp_err_t hub_wifi_init(void)
         return err;
     }
     s_ap_netif = esp_netif_create_default_wifi_ap();
-    esp_netif_create_default_wifi_sta();
+    s_sta_netif = esp_netif_create_default_wifi_sta();
 
     /* 허브 AP 주소는 사설 대역(10/8, 172.16/12, 192.168/16)이 아닌 198.18.0.1 (RFC 2544 시험용 대역).
      * Android 는 인터넷 확인용 이름이 '사설 IP'로 풀리면 로그인 망이 아니라 '인터넷 없음'으로 판정하고
@@ -162,6 +193,64 @@ uint32_t hub_wifi_ap_ip(void)
         return ip.ip.addr;
     }
     return 0;
+}
+
+/* ---- 보일러 온보딩 보조: 스캔 / 임시 STA 전환 / 복귀 ---- */
+
+/* prefix 로 시작하는 AP SSID 를 찾아 out 에 채운다(대소문자 무시). 스캔 중 AP/Zigbee 가 잠깐 끊길 수 있다. */
+esp_err_t hub_wifi_scan_prefix(const char *prefix, char *out, size_t len)
+{
+    wifi_scan_config_t sc = { 0 };
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    if (n == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    wifi_ap_record_t *r = calloc(n, sizeof(*r));
+    if (!r) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_wifi_scan_get_ap_records(&n, r);
+    esp_err_t res = ESP_ERR_NOT_FOUND;
+    size_t pl = strlen(prefix);
+    for (int i = 0; i < n; i++) {
+        if (strncasecmp((char *)r[i].ssid, prefix, pl) == 0) {
+            strlcpy(out, (char *)r[i].ssid, len);
+            res = ESP_OK;
+            break;
+        }
+    }
+    free(r);
+    return res;
+}
+
+/* STA 를 개방 AP(ssid)로 잠깐 옮겨 붙이고 DHCP IP 를 기다린다(자동 재시도는 끈다). */
+esp_err_t hub_wifi_sta_temp_open(const char *ssid, uint32_t *ip_out)
+{
+    s_sta_on = false;
+    esp_timer_stop(s_retry_timer);
+    esp_wifi_disconnect();
+    wifi_config_t sta = { 0 };
+    strlcpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid));
+    sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    if (esp_wifi_set_config(WIFI_IF_STA, &sta) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    esp_wifi_connect();
+    for (int i = 0; i < 150; i++) {        /* 최대 15초 */
+        esp_netif_ip_info_t info;
+        if (esp_netif_get_ip_info(s_sta_netif, &info) == ESP_OK && info.ip.addr) {
+            if (ip_out) {
+                *ip_out = info.ip.addr;
+            }
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return ESP_ERR_TIMEOUT;
 }
 
 static void heap_monitor_task(void *arg)

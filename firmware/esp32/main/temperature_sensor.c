@@ -31,6 +31,12 @@
 #include "hub_state.h"
 #include "hub_dns.h"
 #include "hub_portal.h"
+#include "hub_proxy.h"
+#include "hub_onboard.h"
+#include "hub_led.h"
+#include "hub_events.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
 #include "hub_zigbee.h"
 
 static const char *TAG = "TEMPERATURE_SENSOR";
@@ -52,32 +58,28 @@ static void esp_app_temp_sensor_handler(float temperature)
     esp_zigbee_lock_release();
 }
 
+/* 버튼: 드라이버가 눌린 동안 0.2초마다 다시 부르므로, 여기서 뗄 때까지 기다려 길이를 잰다.
+ *   짧게(3초 미만) = 보일러 온보딩, 길게(3초 이상) = Zigbee 가입 시도(SmartThings 기기 추가 중일 때) */
 static void button_event_handler(switch_driver_handle_t handle)
 {
     ESP_RETURN_ON_FALSE(handle != SWITCH_INV_HANDLE, , TAG, "Invalid switch handle");
-
-    ezb_err_t ret = EZB_ERR_NONE;
-    ezb_zcl_report_attr_cmd_t report_attr_cmd = {
-        .cmd_ctrl =
-            {
-                .fc.direction       = EZB_ZCL_CMD_DIRECTION_TO_CLI,
-                .dst_addr.addr_mode = EZB_ADDR_MODE_NONE,
-                .src_ep             = ESP_ZIGBEE_HA_TEMPERATURE_SENSOR_EP_ID,
-                .cluster_id         = EZB_ZCL_CLUSTER_ID_TEMPERATURE_MEASUREMENT,
-            },
-        .payload =
-            {
-                .attr_id = EZB_ZCL_ATTR_TEMPERATURE_MEASUREMENT_MEASURED_VALUE_ID,
-            },
-    };
-    esp_zigbee_lock_acquire(portMAX_DELAY);
-    ret = ezb_zcl_report_attr_cmd_req(&report_attr_cmd);
-    esp_zigbee_lock_release();
-    if (ret == EZB_ERR_NONE) {
-        ESP_LOGI(TAG, "Sent ZCL Report Attribute request");
-    } else {
-        ESP_LOGE(TAG, "Failed to send ZCL Report Attribute request with error(0x%04x)", ret);
+    int ms = 0;
+    while (gpio_get_level(CONFIG_GPIO_BOOT_ON_DEVKIT) == 0 && ms < 3000) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        ms += 50;
     }
+    if (ms < 3000) {
+        ESP_LOGI(TAG, "버튼 짧게 → 보일러 온보딩");
+        hub_onboard_trigger();
+        return;
+    }
+    ESP_LOGI(TAG, "버튼 길게 → Zigbee 가입 시도");
+    hub_led_set(HUB_LED_BLUE);
+    hub_zigbee_join_now();
+    while (gpio_get_level(CONFIG_GPIO_BOOT_ON_DEVKIT) == 0) {   /* 뗄 때까지(다시 불리지 않게) */
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    hub_led_set(HUB_LED_OFF);
 }
 
 static esp_err_t deferred_driver_init(void)
@@ -113,6 +115,27 @@ static void esp_zigbee_alarm_bdb_commissioning(alarm_timer_arg_t arg)
  * 찾는 동안 라디오가 Zigbee 채널 16개를 훑어 설정용 AP 가 흔들리고, 폰이 IP 를 못 받는다(실측).
  * 실제 사용 순서도 'Wi-Fi 설정 → SmartThings 에서 기기 추가'다. */
 static volatile bool s_steer_allowed;
+static uint32_t s_backoff_ms = 10000;       /* 가입 실패 시 재시도 간격(점점 늘림) */
+static int64_t s_fast_until_us;             /* 이 시각까지는 10초마다 빠르게 재시도(기기 추가 창) */
+
+/* 지금 바로 Zigbee 가입 시도 + 3분간 10초마다 재시도. 버튼 길게 / GET /api/zigbee/join */
+void hub_zigbee_join_now(void)
+{
+    if (!s_steer_allowed) {
+        ESP_LOGW(TAG, "Wi-Fi 설정 전이라 Zigbee 가입 보류");
+        return;
+    }
+    if (!ezb_bdb_is_factory_new()) {
+        ESP_LOGI(TAG, "이미 Zigbee 망에 가입돼 있음");
+        return;
+    }
+    s_fast_until_us = esp_timer_get_time() + 180LL * 1000000;
+    s_backoff_ms = 10000;
+    ESP_LOGI(TAG, "Zigbee 가입 시도 시작(3분간 10초마다)");
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+    esp_zigbee_lock_release();
+}
 
 void hub_zigbee_allow_steering(void)
 {
@@ -168,9 +191,22 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ezb_nwk_get_extended_panid(&extended_pan_id);
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
+            hub_event(EV_ZB_JOINED, NULL, ezb_nwk_get_panid(), ezb_nwk_get_current_channel());
+            s_backoff_ms = 10000;
+            s_fast_until_us = 0;
+            hub_led_set(HUB_LED_GREEN);
         } else {
-            ESP_LOGW(TAG, "Failed to join network with status(0x%02x) — 10초 뒤 다시", status);
-            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 10000);
+            /* 채널 스캔은 Wi-Fi AP 를 몇 초씩 비워 보일러가 끊긴다(실측). 실패가 이어지면 간격을 늘린다.
+             * 단 가입 시도 창(버튼 길게/API 후 3분)에는 10초마다. */
+            bool fast = esp_timer_get_time() < s_fast_until_us;
+            uint32_t wait = fast ? 10000 : s_backoff_ms;
+            ESP_LOGW(TAG, "Failed to join network with status(0x%02x) — %lu초 뒤 다시", status,
+                     (unsigned long)(wait / 1000));
+            hub_event(EV_ZB_JOIN_FAIL, NULL, status, (int32_t)wait);
+            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, wait);
+            if (!fast && s_backoff_ms < 600000) {
+                s_backoff_ms *= 2;
+            }
         }
     } break;
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE: {
@@ -180,6 +216,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     case EZB_ZDO_SIGNAL_LEAVE: {
         const ezb_zdo_signal_leave_params_t *leave_params = ezb_app_signal_get_params(app_signal);
         ESP_LOGI(TAG, "Left network successfully with type(0x%02x)", leave_params->leave_type);
+        hub_event(EV_ZB_LEAVE, NULL, leave_params->leave_type, 0);
     } break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t duration = *(uint8_t *)ezb_app_signal_get_params(app_signal);
@@ -268,6 +305,8 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
 void app_main(void)
 {
+    hub_led_init();          /* 부팅 직후 바로 LED 끄기(초기 밝은 플래시 최소화) */
+    hub_event(EV_BOOT, NULL, esp_reset_reason(), 0);
     ESP_ERROR_CHECK(nvs_flash_init());
 
     /* 허브: 설정 상태 → Wi-Fi(미설정이면 설정 AP, 설정 후엔 집 Wi-Fi + 전용 AP) → DNS → 설정 포털 */
@@ -279,7 +318,9 @@ void app_main(void)
     if (s_hub.provisioned) {
         hub_zigbee_allow_steering();
     }
+    hub_onboard_init(&s_hub);
     ESP_ERROR_CHECK(hub_portal_start(&s_hub));
+    hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
     hub_heap_monitor_start();
     ESP_LOGI(TAG, "Start ESP Zigbee Stack");
     xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);

@@ -9,6 +9,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.1.0
+  espressif/led_strip:
+    component_hash: 027f68f2b57b0dca1d68dff6cc1139d9093825aa808c2bc3ca42bb2ce530fce9
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 3.1.1
   example_common:
     dependencies: []
     source:
@@ -31,12 +41,21 @@ dependencies:
       path: /home/ubuntu/lynnai-hub/firmware/esp32/components/temp_sensor_driver
       type: local
     version: '*'
+  wolfssl/wolfssl:
+    component_hash: 4d619e882c19d967bbaa53302e3bd2bdb8c611b5efb13302171aace809fccfdf
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 5.8.2~1
 direct_dependencies:
 - espressif/esp-zigbee-lib
+- espressif/led_strip
 - example_common
 - idf
 - switch_driver
 - temp_sensor_driver
-manifest_hash: fd6502bd8fa4f849fa7b2976231bf248d3d65f7c4d7818e5ba8196c115d368fb
+- wolfssl/wolfssl
+manifest_hash: b2ab049cf39143abc6858d5849e89a44fa9a9fea292698261fced86dcb97f48c
 target: esp32c6
 version: 2.0.0
