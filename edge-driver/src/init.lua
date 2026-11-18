@@ -264,21 +264,28 @@ end
 -- 허브에 직접 꽂은 센서
 local ROOM_KEY, GAS_KEY = "room", "gas"
 
-local function on_room(_, parent, zb_rx)
-  local t, h = string.unpack("<i2i2", zb_rx.body.zcl_body.body_bytes)
-  create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31")
+-- 첫 값은 자식 기기를 만드는 동안 도착하므로 기억해 뒀다가 기기가 생기면(device_init) 보낸다
+local function show_room(parent)
   local child = parent:get_child_by_parent_assigned_key(ROOM_KEY)
-  if not child then return end
+  local v = hub_state(parent).room
+  if not child or not v then return end
+  local t, h = v[1], v[2]
   child:online()
   emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = math.floor(t / 10 + 0.5) / 10, unit = "C" }))
   emit(child, "main", capabilities.relativeHumidityMeasurement.humidity({ value = math.floor(h / 100 + 0.5) }))
 end
 
-local function on_gas(_, parent, zb_rx)
-  local count, reading, hour, day, flow = string.unpack("<I4I4I4I4I4", zb_rx.body.zcl_body.body_bytes)
-  create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter")
+local function on_room(_, parent, zb_rx)
+  hub_state(parent).room = { string.unpack("<i2i2", zb_rx.body.zcl_body.body_bytes) }
+  create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31")
+  show_room(parent)
+end
+
+local function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
-  if not child then return end
+  local v = hub_state(parent).gas
+  if not child or not v then return end
+  local count, reading, hour, day, flow = table.unpack(v)
   child:online()
   -- 계량기 숫자에 맞춘 적이 없으면 센 양만 보여 준다
   local m3 = (reading ~= 0xFFFFFFFF) and reading / 1000 or count * 0.01
@@ -286,6 +293,12 @@ local function on_gas(_, parent, zb_rx)
   emit(child, "main", capabilities.gasMeter.gasMeterVolume({ value = m3, unit = "m^3" }))
   emit(child, "main", status_cap.status("1D " .. f(day) .. " · 1H " .. f(hour)))
   emit(child, "flow", status_cap.status(flow > 0 and string.format("%.2f㎥/h", flow / 1000) or "사용 안 함"))
+end
+
+local function on_gas(_, parent, zb_rx)
+  hub_state(parent).gas = { string.unpack("<I4I4I4I4I4", zb_rx.body.zcl_body.body_bytes) }
+  create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter")
+  show_gas(parent)
 end
 
 local function on_links(_, parent, zb_rx)
@@ -383,7 +396,11 @@ end
 local function device_init(_, device)
   if is_child(device) then
     local parent = device:get_parent_device()
-    if parent then refresh_all(parent) end
+    if parent then
+      refresh_all(parent)
+      show_room(parent)
+      show_gas(parent)
+    end
     return
   end
   -- 허브: 지금 상태를 다시 보내 달라고 한다(드라이버 재시작 후 자식 기기 갱신)
