@@ -17,3 +17,9 @@ CONFIG_ZB_ZED=y
 #
 CONFIG_IDF_TARGET="esp32c6"
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# 설정 포털(esp_http_server): 폰 브라우저 요청 헤더가 기본 512B 를 넘는 경우가 흔하다
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+# DNS + 포털(최대 5연결) + 443/853 끊기 리스너에 소켓이 더 필요
+CONFIG_LWIP_MAX_SOCKETS=16

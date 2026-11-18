@@ -28,6 +28,10 @@
 
 #include "temperature_sensor.h"
 #include "hub_wifi.h"
+#include "hub_state.h"
+#include "hub_dns.h"
+#include "hub_portal.h"
+#include "hub_zigbee.h"
 
 static const char *TAG = "TEMPERATURE_SENSOR";
 
@@ -105,6 +109,28 @@ static void esp_zigbee_alarm_bdb_commissioning(alarm_timer_arg_t arg)
     esp_zigbee_lock_release();
 }
 
+/* Zigbee 망 찾기(steering)는 Wi-Fi 설정이 끝난 뒤에만 한다.
+ * 찾는 동안 라디오가 Zigbee 채널 16개를 훑어 설정용 AP 가 흔들리고, 폰이 IP 를 못 받는다(실측).
+ * 실제 사용 순서도 'Wi-Fi 설정 → SmartThings 에서 기기 추가'다. */
+static volatile bool s_steer_allowed;
+
+void hub_zigbee_allow_steering(void)
+{
+    s_steer_allowed = true;
+}
+
+static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg)
+{
+    if (!s_steer_allowed) {
+        alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);   /* 스캔 없이 5초 뒤 다시 확인 */
+        return;
+    }
+    ESP_LOGI(TAG, "Zigbee 망 찾기 시작 (Wi-Fi 설정 완료됨)");
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+    esp_zigbee_lock_release();
+}
+
 static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
 {
     ezb_app_signal_type_t signal_type = ezb_app_signal_get_type(app_signal);
@@ -121,7 +147,12 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
             if (ezb_bdb_is_factory_new()) {
-                ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+                if (s_steer_allowed) {
+                    ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+                } else {
+                    ESP_LOGI(TAG, "Zigbee 망 찾기 보류: Wi-Fi 설정 먼저");
+                    alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);
+                }
             } else {
                 ESP_LOGI(TAG, "Device reboot");
             }
@@ -138,8 +169,8 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
         } else {
-            ESP_LOGW(TAG, "Failed to join network with status(0x%02x)", status);
-            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 1000);
+            ESP_LOGW(TAG, "Failed to join network with status(0x%02x) — 10초 뒤 다시", status);
+            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 10000);
         }
     } break;
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE: {
@@ -238,7 +269,17 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(hub_wifi_start_ap());   /* Wi-Fi 설정용 AP (Zigbee 와 라디오 공존) */
+
+    /* 허브: 설정 상태 → Wi-Fi(미설정이면 설정 AP, 설정 후엔 집 Wi-Fi + 전용 AP) → DNS → 설정 포털 */
+    static hub_state_t s_hub;
+    ESP_ERROR_CHECK(hub_state_load(&s_hub));
+    ESP_ERROR_CHECK(hub_wifi_init());
+    ESP_ERROR_CHECK(hub_wifi_start(&s_hub));
+    hub_dns_start(hub_wifi_ap_ip(), !s_hub.provisioned);
+    if (s_hub.provisioned) {
+        hub_zigbee_allow_steering();
+    }
+    ESP_ERROR_CHECK(hub_portal_start(&s_hub));
     hub_heap_monitor_start();
     ESP_LOGI(TAG, "Start ESP Zigbee Stack");
     xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
