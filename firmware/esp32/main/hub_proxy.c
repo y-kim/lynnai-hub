@@ -25,6 +25,7 @@
 #include "wolfssl/ssl.h"
 
 #include "hub_proxy.h"
+#include "hub_rinnai.h"
 
 static const char *TAG = "HUB_PROXY";
 
@@ -116,8 +117,8 @@ static const char *mqtt_name(uint8_t b0)
     return n[b0 >> 4];
 }
 
-/* 한쪽에서 읽어 다른 쪽으로 쓴다. 0 이하면 연결 종료. */
-static int pump(WOLFSSL *from, WOLFSSL *to, const char *arrow, char *buf, int cap)
+/* 한쪽에서 읽어 다른 쪽으로 쓴다. 0 이하면 연결 종료. 지나가는 바이트는 hub_rinnai 가 엿본다(상태·패킷 경계). */
+static int pump(WOLFSSL *from, WOLFSSL *to, const char *arrow, char *buf, int cap, hub_link_tap_t *tap, bool down)
 {
     int n = wolfSSL_read(from, buf, cap);
     if (n <= 0) {
@@ -125,6 +126,11 @@ static int pump(WOLFSSL *from, WOLFSSL *to, const char *arrow, char *buf, int ca
     }
     if ((buf[0] >> 4) != 12 && (buf[0] >> 4) != 13) {          /* 핑은 로그 생략 */
         ESP_LOGI(TAG, "%s %s %d바이트", arrow, mqtt_name((uint8_t)buf[0]), n);
+    }
+    if (down) {
+        hub_rinnai_tap_down(tap, (const uint8_t *)buf, n);
+    } else {
+        hub_rinnai_tap_up(tap, (const uint8_t *)buf, n);
     }
     return wolfSSL_write(to, buf, n) == n ? n : -1;
 }
@@ -178,6 +184,7 @@ static void link_task(void *arg)
     bool up_waited = false;
     int dev = peer_octet(down_fd), closer = 0;
     int64_t t_up = 0;
+    hub_link_tap_t *tap = NULL;
     if (job) {
         job->fd = -1;
         job->dev = dev;
@@ -227,44 +234,62 @@ static void link_task(void *arg)
     tv.tv_sec = 0;                                   /* 중계 중엔 select 로 기다리므로 읽기 제한시간 해제 */
     setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(up_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    tap = hub_rinnai_link_open();
+    int64_t last_io = esp_timer_get_time();
     for (;;) {
+        /* SmartThings 명령: 클라우드→기기 패킷 사이에만 끼워 넣는다 */
+        int cn;
+        while ((cn = hub_rinnai_take_cmd(tap, (uint8_t *)buf, 2048)) > 0) {
+            if (wolfSSL_write(down, buf, cn) != cn) {
+                closer = 1;
+                goto out;
+            }
+            ESP_LOGI(TAG, "SmartThings 명령 → 기기 %d바이트", cn);
+        }
         if (!wolfSSL_pending(down) && !wolfSSL_pending(up)) {
             fd_set rd;
             FD_ZERO(&rd);
             FD_SET(down_fd, &rd);
             FD_SET(up_fd, &rd);
-            struct timeval idle = { .tv_sec = IDLE_SEC };
-            int r = select((down_fd > up_fd ? down_fd : up_fd) + 1, &rd, NULL, NULL, &idle);
+            struct timeval tick = { .tv_sec = 0, .tv_usec = 300000 };   /* 명령 확인 주기 */
+            int r = select((down_fd > up_fd ? down_fd : up_fd) + 1, &rd, NULL, NULL, &tick);
             if (r < 0) {
                 break;
             }
             if (r == 0) {
-                ESP_LOGW(TAG, "%d초간 오간 데이터 없음 — 죽은 연결로 보고 닫음", IDLE_SEC);
-                closer = 3;
-                break;
+                if (esp_timer_get_time() - last_io > (int64_t)IDLE_SEC * 1000000) {
+                    ESP_LOGW(TAG, "%d초간 오간 데이터 없음 — 죽은 연결로 보고 닫음", IDLE_SEC);
+                    closer = 3;
+                    break;
+                }
+                continue;
             }
-            if (FD_ISSET(down_fd, &rd) && pump(down, up, "보일러→클라우드", buf, 2048) <= 0) {
+            last_io = esp_timer_get_time();
+            if (FD_ISSET(down_fd, &rd) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) <= 0) {
                 closer = 1;
                 break;
             }
-            if (FD_ISSET(up_fd, &rd) && pump(up, down, "클라우드→보일러", buf, 2048) <= 0) {
+            if (FD_ISSET(up_fd, &rd) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) <= 0) {
                 closer = 2;
                 break;
             }
         } else {
-            if (wolfSSL_pending(down) && pump(down, up, "보일러→클라우드", buf, 2048) <= 0) {
+            last_io = esp_timer_get_time();
+            if (wolfSSL_pending(down) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) <= 0) {
                 closer = 1;
                 break;
             }
-            if (wolfSSL_pending(up) && pump(up, down, "클라우드→보일러", buf, 2048) <= 0) {
+            if (wolfSSL_pending(up) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) <= 0) {
                 closer = 2;
                 break;
             }
         }
     }
+out:
     ESP_LOGI(TAG, "연결 종료 (%s)", closer == 1 ? "기기가 닫음" : closer == 2 ? "클라우드가 닫음" : closer == 3 ? "유휴" : "오류");
 
 done:
+    hub_rinnai_link_close(tap);
     if (job) {
         if (!up_waited) {                           /* 보일러 쪽이 먼저 실패: 클라우드 작업 끝날 때까지 */
             xSemaphoreTake(job->done, portMAX_DELAY);

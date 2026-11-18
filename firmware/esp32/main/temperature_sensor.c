@@ -38,6 +38,8 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include "hub_zigbee.h"
+#include "hub_rinnai.h"
+#include "hub_zb_rinnai.h"
 
 static const char *TAG = "TEMPERATURE_SENSOR";
 
@@ -261,6 +263,8 @@ esp_err_t esp_zigbee_create_zha_temperature_sensor_device(void)
     ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);
     ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)ESP_MODEL_IDENTIFIER);
 
+    ESP_ERROR_CHECK(ezb_af_endpoint_add_cluster_desc(ep_desc, hub_zb_rinnai_cluster_desc()));   /* 보일러·각방 */
+
     ESP_ERROR_CHECK(ezb_af_device_add_endpoint_desc(dev_desc, ep_desc));
     ESP_ERROR_CHECK(ezb_af_device_desc_register(dev_desc));
 
@@ -320,6 +324,7 @@ void app_main(void)
     }
     hub_onboard_init(&s_hub);
     ESP_ERROR_CHECK(hub_portal_start(&s_hub));
+    hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
     hub_heap_monitor_start();
     ESP_LOGI(TAG, "Start ESP Zigbee Stack");

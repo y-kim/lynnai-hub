@@ -1,0 +1,34 @@
+name: lynnai-boiler
+components:
+  - id: main
+    label: 전원
+    capabilities:
+      - id: connectbook02461.boilerStatus
+        version: 1
+      - id: switch
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Boiler
+  - id: heat
+    label: 난방
+    capabilities:
+      - id: mode
+        version: 1
+      - id: connectbook02461.heatType
+        version: 1
+      - id: thermostatHeatingSetpoint
+        version: 1
+  - id: hotwater
+    label: 온수
+    capabilities:
+      - id: switch
+        version: 1
+      - id: connectbook02461.hotWaterSetpoint
+        version: 1
+  - id: preheat
+    label: 온수 예열
+    capabilities:
+      - id: switch
+        version: 1
