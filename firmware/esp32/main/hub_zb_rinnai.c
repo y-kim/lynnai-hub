@@ -1,6 +1,7 @@
 /*
  * hub_zb_rinnai.c -- 보일러·각방 상태/명령을 실어 나르는 Zigbee 전용 클러스터(0xFC31).
  *
+ * 메시지 번호·내용은 hub_uplink.h (LAN 과 같다). 여기는 Zigbee 그릇만.
  *   허브 → SmartThings (서버→클라이언트 명령, 허브 주소 0x0000 / 엔드포인트 1)
  *     0x01 상태:  [종류 6|9][EPC 70 블롭 바이트...]
  *     0x02 연결:  [비트 0 = 보일러 연결됨, 비트 1 = 각방 연결됨]
@@ -17,9 +18,7 @@
 #include "ezbee/zcl/cluster/custom.h"
 
 #include "hub_main.h"
-#include "hub_rinnai.h"
 #include "hub_zb_rinnai.h"
-#include "hub_sensors.h"
 
 static const char *TAG = "HUB_ZB_RK";
 
@@ -29,11 +28,7 @@ static ezb_zcl_status_t cmd_handler(const ezb_zcl_cmd_hdr_t *h, const uint8_t *p
         return EZB_ZCL_STATUS_UNSUP_CMD;
     }
     if (h->cmd_id == HUB_RK_CMD_REQUEST) {
-        ESP_LOGI(TAG, "SmartThings 명령: %.*s", len, (const char *)payload);
-        if (len == 7 && !memcmp(payload, "refresh", 7)) {
-            hub_sensors_refresh();
-        }
-        hub_rinnai_command((const char *)payload, len);
+        hub_uplink_on_request((const char *)payload, len);
         return EZB_ZCL_STATUS_SUCCESS;
     }
     return EZB_ZCL_STATUS_UNSUP_CMD;
@@ -73,8 +68,16 @@ ezb_zcl_cluster_desc_t hub_zb_rinnai_cluster_desc(void)
     return d;
 }
 
+static volatile bool s_zb_ready;    /* Zigbee 스택 초기화 전엔 ezb_* 호출 금지(부팅 극초기 센서 전송 대비) */
+
+void hub_zigbee_mark_ready(void) { s_zb_ready = true; }
+bool hub_zigbee_is_ready(void) { return s_zb_ready; }
+
 void hub_zigbee_send_raw(uint8_t cmd_id, const uint8_t *data, uint16_t n)
 {
+    if (!s_zb_ready) {
+        return;
+    }
     esp_zigbee_lock_acquire(portMAX_DELAY);
     if (!ezb_bdb_dev_joined()) {
         esp_zigbee_lock_release();
@@ -97,22 +100,4 @@ void hub_zigbee_send_raw(uint8_t cmd_id, const uint8_t *data, uint16_t n)
     if (e != EZB_ERR_NONE) {
         ESP_LOGW(TAG, "Zigbee 전송 실패 cmd 0x%02x (%d바이트): %d", cmd_id, n, e);
     }
-}
-
-void hub_zigbee_send_state(uint8_t kind, const uint8_t *blob, int n)
-{
-    uint8_t buf[1 + 64];
-    if (n <= 0 || n > 64) {
-        return;
-    }
-    buf[0] = kind;
-    memcpy(buf + 1, blob, n);
-    ESP_LOGI(TAG, "→ SmartThings f0%d 상태 %d바이트", kind, n);
-    hub_zigbee_send_raw(HUB_RK_CMD_STATE, buf, n + 1);
-}
-
-void hub_zigbee_send_links(uint8_t mask)
-{
-    ESP_LOGI(TAG, "→ SmartThings 연결 상태 보일러=%d 각방=%d", mask & 1, (mask >> 1) & 1);
-    hub_zigbee_send_raw(HUB_RK_CMD_LINKS, &mask, 1);
 }

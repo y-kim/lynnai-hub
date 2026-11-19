@@ -40,6 +40,8 @@
 #include "hub_zigbee.h"
 #include "hub_rinnai.h"
 #include "hub_sensors.h"
+#include "hub_uplink.h"
+#include "hub_lan.h"
 #include "hub_zb_rinnai.h"
 
 static const char *TAG = "TEMPERATURE_SENSOR";
@@ -62,7 +64,7 @@ static void esp_app_temp_sensor_handler(float temperature)
 }
 
 /* 버튼: 드라이버가 눌린 동안 0.2초마다 다시 부르므로, 여기서 뗄 때까지 기다려 길이를 잰다.
- *   짧게(3초 미만) = 보일러 온보딩, 길게(3초 이상) = Zigbee 가입 시도(SmartThings 기기 추가 중일 때) */
+ *   짧게(3초 미만) = 보일러 온보딩, 길게(3초 이상) = Zigbee 가입 시도 + LAN 새 드라이버 페어링(3분) */
 static void button_event_handler(switch_driver_handle_t handle)
 {
     ESP_RETURN_ON_FALSE(handle != SWITCH_INV_HANDLE, , TAG, "Invalid switch handle");
@@ -76,8 +78,9 @@ static void button_event_handler(switch_driver_handle_t handle)
         hub_onboard_trigger();
         return;
     }
-    ESP_LOGI(TAG, "버튼 길게 → Zigbee 가입 시도");
+    ESP_LOGI(TAG, "버튼 길게 → Zigbee 가입 시도 + LAN 페어링 3분");
     hub_led_set(HUB_LED_BLUE);
+    hub_lan_pairing_open(180);
     hub_zigbee_join_now();
     while (gpio_get_level(CONFIG_GPIO_BOOT_ON_DEVKIT) == 0) {   /* 뗄 때까지(다시 불리지 않게) */
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -300,6 +303,7 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
     ezb_nwk_set_keepalive_interval(2000);
 
     ESP_ERROR_CHECK(esp_zigbee_start(false));
+    hub_zigbee_mark_ready();              /* 이제 ezb_* 안전 — 이 전의 센서 전송은 무시됨 */
 
     esp_zigbee_launch_mainloop();
 
@@ -325,6 +329,10 @@ void app_main(void)
     }
     hub_onboard_init(&s_hub);
     ESP_ERROR_CHECK(hub_portal_start(&s_hub));
+    hub_uplink_load();                      /* Zigbee / LAN (/ Matter) 중 무엇을 쓸지 */
+    if (hub_uplink_mask() & HUB_UPLINK_LAN) {
+        hub_lan_start(s_hub.device_id);     /* SSDP + TCP 8484 */
+    }
     hub_sensors_start();                    /* 온습도계 + 가스 계량기 */
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
