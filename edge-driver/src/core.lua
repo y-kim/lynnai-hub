@@ -564,6 +564,8 @@ local function on_expose(parent, b)
       sync(zkey(mac, id), shown(parent, KIND_F09, mac, ZONES[id].n), s.thermos[mac][id] ~= nil,
         function() create_zone(parent, mac, id) end)
     end
+    local vc = parent:get_child_by_parent_assigned_key(vbkey(mac))   -- 가상 보일러도 보일러 컨트롤 노출을 따름
+    if vc then apply_caps(parent, vc) end
   end
   sync(ROOM_KEY, visible(parent, BIT.room), s.room ~= nil, function() create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31") end)
   sync(GAS_KEY, visible(parent, BIT.gas), s.gas ~= nil, function() create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter") end)

@@ -306,7 +306,7 @@ reset()
 links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
 state(6, "a1b2c3", F06); state(9, "d4e5f6", F09)
 check(created["ba1b2c3"] and created["td4e5f6_z1"] and created["td4e5f6_z3"], "처음엔 다 보임")
-local function expose(mask, entries)
+function expose(mask, entries)
   local b = { string.pack("<I4", mask) }
   for _, e in ipairs(entries) do b[#b + 1] = string.char(e[1]) .. mac3(e[2]) .. string.char(e[3]) end
   msg(CMD.EXPOSE, table.concat(b))
@@ -326,6 +326,17 @@ check(hub._fields["expose2"] and #hub._fields["expose2"] == 8 + 20, "노출을 �
 created = {}
 expose(0x7FFFFFFF, {})
 check(created["ba1b2c3"] and created["td4e5f6_z3"], "숨김 풀면 보일러·거실 다시 생김")
+
+print("[12] 노출: 가상 보일러도 보일러 컨트롤 마스크를 바로 따름")
+reset()
+links({ { 9, "d4e5f6" } })
+state(9, "d4e5f6", F09)
+local vb = driver._children["vd4e5f6"]
+check(vb ~= nil, "단독 써머스탯 → 가상 보일러 있음")
+expose(0x7FFFFFFF & ~(1 << 1) & ~(1 << 7), {})       -- 전원(1)·예열(7) 숨김
+local vcaps = vb._caps or {}
+check(vcaps.main == nil and vcaps.preheat == nil and vcaps.heat and vcaps.heat["mode"],
+  "가상 보일러: 전원·예열 숨김, 난방 모드는 보임")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)
