@@ -8,7 +8,8 @@ SmartThings 명령을 기기 쪽 MQTT 로 조립한다. ESP32 펌웨어 hub_rinn
 NAS 엔 허브에 꽂는 센서(온습도계·가스)가 없으므로 0x03~0x06 은 쓰지 않는다.
 
 단독 모드(standalone=True, 클라우드 없음)에서는 클라우드가 하던 일을 코어가 한다(ESP32 와 같음):
-  - 기기가 <base>/get 을 구독하면 곧바로, 그 뒤 30초마다 상태 요청(fa)
+  - 기기가 <base>/get 을 구독하면 곧바로 상태 요청(fa)
+30초마다 상태 요청(fa)은 두 모드 다 한다(ESP32 poll_status 와 같음 — 보일러가 상태를 자주 안 올려 외출 등을 빨리 반영).
   - 기기의 시간 요청(<base>/stg, 약 1시간마다)에 <base>/set 72 = 현재 한국 시각으로 답함
 """
 import re
@@ -23,6 +24,7 @@ POLL_S = 30
 _STATE_RE = re.compile(rb'"id":"70","data":"([0-9a-fA-F]+)"')
 _TOK = re.compile(r"[0-9a-z]{1,2}")
 _VAL = re.compile(r"[0-9a-z]{1,16}")
+_TOPIC = re.compile(r"[\x21-\x7e]{1,128}")   # 배울 토픽: 짧은 출력 가능 ASCII 만(깨진 UTF-8·긴 토픽은 무시). '+','#' 는 아래서
 
 
 def _mqtt_len(n):
@@ -43,7 +45,7 @@ def mqtt_publish(topic, payload):
 
 
 def _mac3(base):
-    """base 토픽 끝 세그먼트(MAC "34:5f:45:00:00:01")에서 끝 3바이트."""
+    """base 토픽 끝 세그먼트(MAC "34:5F:45:00:00:01" 꼴)에서 끝 3바이트."""
     seg = base.rsplit("/", 1)[-1]
     try:
         b = bytes(int(x, 16) for x in seg.split(":"))
@@ -71,8 +73,7 @@ class HubCore:
         self.senders = []     # 내보내기 대상(LAN uplink 등): fn(cmd_id, data_bytes)
         self._last_mask = None
         threading.Thread(target=self._heartbeat, daemon=True).start()
-        if standalone:
-            threading.Thread(target=self._poll_loop, daemon=True).start()
+        threading.Thread(target=self._poll_loop, daemon=True).start()   # 두 모드 다(ESP32 와 같음)
 
     # ---- 내보내기 대상 등록(LAN uplink) ----
     def add_sender(self, fn):
@@ -121,6 +122,8 @@ class HubCore:
 
     def _learn(self, ln, topic):
         """이 링크의 기기 토픽(base = 마지막 '/' 앞)과 종류를 배운다."""
+        if not _TOPIC.fullmatch(topic) or "+" in topic or "#" in topic:
+            return 0
         seg = topic.rsplit("/", 1)
         kind = KIND_F06 if "/f06/" in topic else KIND_F09 if "/f09/" in topic else 0
         if kind and ln.kind != kind:
@@ -153,7 +156,10 @@ class HubCore:
             with self.lock:
                 links = list(self.links)
             for ln in links:
-                self.poll(ln)
+                try:                                  # 링크 하나의 오류로 이 스레드가 죽지 않게
+                    self.poll(ln)
+                except Exception as e:
+                    self.log(f"[core] 상태 요청 오류: {e}")
 
     def _answer_time(self, ln):
         """단독: 기기의 시간 요청(stg)에 set 72 = 현재 한국 시각(YYYYMMDDTHHMMSS)."""
@@ -179,7 +185,8 @@ class HubCore:
         m = _STATE_RE.search(payload)
         if not m:
             return
-        blob = bytes.fromhex(m.group(1).decode()[:128])
+        hx = m.group(1).decode()[:128]
+        blob = bytes.fromhex(hx[:len(hx) & ~1])           # 홀수 자리면 마지막 자리 버림
         key = (kind, bytes(ln.mac3))
         with self.lock:
             changed = self.state.get(key) != blob
@@ -244,8 +251,11 @@ class HubCore:
     def _heartbeat(self):
         while True:
             time.sleep(HEARTBEAT_S)
-            with self.lock:
-                items = list(self.state.items())
-            self._send_links()
-            for (kind, mac), blob in items:
-                self._emit(CMD_STATE, bytes([kind]) + mac + blob)
+            try:
+                with self.lock:
+                    items = list(self.state.items())
+                self._send_links()
+                for (kind, mac), blob in items:
+                    self._emit(CMD_STATE, bytes([kind]) + mac + blob)
+            except Exception as e:
+                self.log(f"[core] 하트비트 오류: {e}")

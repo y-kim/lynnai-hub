@@ -20,11 +20,11 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | `hub_proxy.py` | `hub_proxy.c` (원본 Pi `bridge.py`) | :8883 기기 TLS 종단 → 클라우드 재연결 중계(proxy) 또는 직접 응답(standalone) |
 | `upstream.py` | `hub_proxy.c`(`resolve_up`) | 클라우드 주소: `UPSTREAM_IP` 또는 `www.rkiot.net` DNS 조회 |
 | `hub_rinnai.py` | `hub_rinnai.c` + `hub_uplink.c` | 상태 스눕(EPC70)·명령 조립(J07 `sum`=rpc수)·내보내기 |
-| `hub_lan.py` | `hub_lan.c` | SSDP 찾기 + TCP 8484 통로(hello 토큰, ping) |
+| `hub_lan.py` | `hub_lan.c` | SSDP 찾기 + TCP 8484 통로(hello 토큰, 페어링 창, ping) |
 | `hub_api.py` | `hub_api.c`, `hub_proxy.c`(`/key/server`) | `/api/v1/state`·`/metrics`, 부트스트랩(기기별 저장·단독 응답) |
 | `hub_bootstrap.py` | `hub_proxy.c`(`boot_fetch`) | 부트스트랩을 진짜 클라우드에 다시 묻기 |
 | `nas_hub.py` | `hub_main.c`(`app_main`) | 위를 공용 코어 하나로 조립(두 모드의 진입점) |
-| `standalone/dns_hijack.py` | `hub_dns.c` | 등록된 기기의 rkiot 만 가로챔(`only_src`) |
+| `standalone/dns_hijack.py` | `hub_dns.c` | 등록된 기기의 rkiot.net(과 하위 이름)만 가로챔(`only_src`) |
 
 ## standalone 모드 (클라우드 없이 NAS 가 직접, ESP32 단독 모드와 동일)
 
@@ -33,7 +33,7 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 클라우드가 하던 일은 허브가 대신한다(MITM 캡처로 확인한 것):
 
 - CONNECT/SUBSCRIBE/PUBLISH/PING 에 CONNACK·SUBACK·PUBACK·PINGRESP 로 답한다(아이디·암호는 따지지 않음).
-- 기기가 `<base>/get` 을 구독하면 곧바로, 그 뒤 30초마다 상태 요청(`fa`)을 보낸다.
+- 기기가 `<base>/get` 을 구독하면 곧바로 상태 요청(`fa`)을 보낸다(30초마다 보내는 것은 두 모드 공통, ESP32 와 같음).
 - 기기의 시간 요청(`<base>/stg`, 약 1시간마다)에 `<base>/set` 의 `72` = 현재 한국 시각(`YYYYMMDDTHHMMSS`)으로 답한다.
 - `/key/server` 는 그 기기의 저장된 답(프록시로 쓰던 때 받은 것), 없으면 허브가 만든 답을 준다.
 
@@ -47,7 +47,8 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 3. `.env` 를 만든다:
    ```
    NAS_IP=192.168.0.10            # 이 NAS 의 LAN 주소
-   RINNAI_IPS=192.168.0.20,192.168.0.21   # 보일러, 각방 조절기
+   RINNAI_IPS=192.168.0.20,192.168.0.21   # 보일러, 각방 조절기 — 꼭 채울 것(아래)
+   API_TOKEN=...                  # (선택) /api·/metrics 토큰, 16자 이상(짧으면 API 를 막음)
    # FORWARD=none                 # (선택) 완전 독립: 다른 도메인도 안 넘김
    ```
 4. 레포 루트에서:
@@ -55,8 +56,18 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
    docker compose -f server/lynnai-nas/docker-compose.yml up -d --build
    ```
 5. 보일러·각방 전원을 껐다 켜서 새 DNS 를 받게 한다.
-6. SmartThings 앱에서 "기기 추가 → 주변 검색" → `edge-driver-lan`(LYNNAI Hub (LAN))이 NAS 를 찾는다.
-   처음 붙는 드라이버는 자동 등록. 나중에 다른 드라이버를 붙이려면 `LAN_PAIR=1` 로 잠깐 열어 둔다.
+6. `.env` 에 `LAN_PAIR=1` 을 넣고 다시 띄운다(`up -d`). 시작 후 600초 동안만 새 LAN 드라이버를 등록한다
+   (첫 설치도 같음 — 집 LAN 의 아무 기기나 먼저 붙어 등록되지 않게. ESP32 의 버튼 페어링 창과 같은 뜻).
+7. 그 사이 SmartThings 앱에서 "기기 추가 → 주변 검색" → `edge-driver-lan`(LYNNAI Hub (LAN))이 NAS 를 찾아 붙는다.
+   등록이 끝나면 `.env` 에서 `LAN_PAIR` 를 지우고 다시 띄운다(켜 두면 재시작마다 600초 열림).
+   등록 안 된 드라이버는 `denied` 를 받는다(1초 늦게). 토큰은 `data/lan_tokens.json`(최대 4개, 넘으면 오래된 것부터).
+
+### `RINNAI_IPS` 는 꼭 채운다
+
+비워 두면(기본) `:8883` 에 붙는 **집 LAN 의 아무 기기**나 린나이 기기로 받아들인다. 그 기기가 가짜 상태를 올리면
+SmartThings 에 가짜 기기가 생기거나 실제 상태가 덮이고, 드라이버 자동화가 그 상태로 실제 난방을 켜고 끌 수 있다.
+`/key/server`(기기 계정이 든 부트스트랩)도 누구에게나 답하고, DNS 도 모든 기기의 rkiot.net 질의를 가로챈다.
+비어 있으면 시작할 때 경고 로그가 남는다. 보일러·각방 IP 를 공유기에서 고정하고 여기에 적는다.
 
 `network_mode: host` 를 쓰는 이유: `:53`/`:8883` 가 집 LAN 에 직접 보여야 하고, DNS 가 **질의한 기기의
 진짜 IP**를 봐야 `ONLY_SRC` 로 걸러낼 수 있기 때문이다(브리지 네트워크면 출발지가 다 도커 IP 로 보인다).
@@ -66,13 +77,20 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | 변수 | 뜻 | 기본 |
 |---|---|---|
 | `NAS_IP` | 이 NAS 의 LAN 주소(DNS 가 답할 값) | (필수) |
-| `RINNAI_IPS` / `ONLY_SRC` | 가로챌 기기 IP(쉼표). 비우면 모든 기기의 rkiot 질의 | 비움 |
-| `HIJACK_NAMES` | 가로챌 도메인(쉼표, 부분일치) | `rkiot.net` |
+| `RINNAI_IPS` / `ONLY_SRC` | 린나이 기기 IP(쉼표). DNS 가로채기·`:8883` 종단·`/key/server` 를 이 기기들에게만. 비우면 아무 기기나(경고) — **채울 것** | 비움 |
+| `HIJACK_NAMES` | 가로챌 도메인(쉼표, 그 이름과 하위 이름) | `rkiot.net` |
+| `API_TOKEN` | `/api`·`/metrics` Bearer 토큰. 16자 미만이면 API 를 막음 | 비움(LAN 에 열림) |
+| `LAN_PAIR` | `1` 이면 시작 후 600초 동안 새 LAN 드라이버 등록(첫 설치 포함). 등록 뒤 지울 것 | 꺼짐 |
+| `MAX_CONN` | `:8883` 동시 연결 상한(출발지당 4) | `16` |
 | `FORWARD` | 목록 밖 질의를 넘길 상위 DNS. `none`=안 넘김 | 기본 게이트웨이 |
 | `MODE` | `proxy`(클라우드 중계) / `standalone`(클라우드 없이) | `proxy` |
 | `UPSTREAM_IP` | 진짜 클라우드 주소. 비우면 `www.rkiot.net` 을 DNS 로 조회(10분 재사용) | 비움 |
 | `GATE_TEST` | 값이 있으면 TLS 핸드셰이크 성사/거부만 확인 | 꺼짐 |
-| `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"). 없거나 비우면 클라우드에 붙지 않음 | `cloud_ca.crt`(이 폴더) |
+| `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"), 컨테이너 안 경로(바꾸려면 `/data/…`). 파일이 없으면 클라우드에 붙지 않음 | `/app/lynnai-nas/cloud_ca.crt`(이 폴더) |
 | `UPSTREAM_CN` | 클라우드 인증서에 있어야 하는 이름(CN) | `dev2.ckpush.com` |
 
 > MAC 기반 제한은 도커에서 ARP 조회가 필요해 지금은 IP 기반이다. 기기 IP 를 공유기에서 고정하면 같은 효과.
+
+> 컨테이너는 root 로 돌지만 capability 는 `NET_BIND_SERVICE`(53·80 바인드)만 남기고 다 뺀다(`cap_drop: ALL`,
+> `no-new-privileges`). 그래서 `./data` 는 root 소유여야 한다(직접 만들었다면 `sudo chown -R root: data`).
+> `init: true` 로 `docker stop` 의 SIGTERM 이 바로 먹는다.

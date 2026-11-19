@@ -21,7 +21,7 @@ IDLE_SEC = 200
 UP_SNI = os.environ.get("UPSTREAM_SNI", "www.rkiot.net")
 # 린나이 클라우드의 사설 CA "ckstack"(2123년까지). 서버 인증서 CN 이 dev2.ckpush.com(접속 이름과 다름)이라 체인 + 그 CN 을 고정.
 UP_CA = os.environ.get("UPSTREAM_CA", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_ca.crt"))
-UP_CN = os.environ.get("UPSTREAM_CN", "dev2.ckpush.com")   # 클라우드 인증서의 실제 이름(SAN 없이 CN 만) — 체인에 더해 이름도 고정
+UP_CN = os.environ.get("UPSTREAM_CN") or "dev2.ckpush.com"   # 클라우드 인증서의 실제 이름(SAN 없이 CN 만) — 체인에 더해 이름도 고정
 DEBUG_MQTT = os.environ.get("DEBUG_MQTT", "") not in ("", "0")   # payload 에 비밀값이 있어 기본 끔
 TYPES = {1:"CONNECT",2:"CONNACK",3:"PUBLISH",4:"PUBACK",8:"SUBSCRIBE",9:"SUBACK",
          10:"UNSUBSCRIBE",12:"PINGREQ",13:"PINGRESP",14:"DISCONNECT"}
@@ -30,76 +30,101 @@ def log(m, f=None):
     import datetime
     print(f"{datetime.datetime.now().isoformat(timespec='seconds')} [relay] {m}", flush=True)
 
+MAX_PKT = 64 * 1024        # MQTT 패킷 하나의 상한(실제 기기·클라우드는 수백 바이트). 넘으면 연결을 끊는다
+MAX_CONN = int(os.environ.get("MAX_CONN", "16"))   # :8883 동시 연결 상한(스레드 2~3개씩)
+MAX_PER_IP = 4             # 한 출발지당 — LAN 기기 하나가 슬롯을 다 잡아 진짜 기기를 막지 못하게
+MAX_PENDING = 32           # 기기에 끼워 넣을 명령 대기 상한
+RELAY_READ_SEC = 1         # 중계 중 한 번 읽기의 최대 대기(넘으면 다음 바퀴로 — TLS 1.3 세션 티켓처럼 앱 데이터가 없는 기록 때문)
+
+class FrameError(ValueError):
+    pass
+
+def frame(buf, i):
+    """buf[i:] 의 MQTT 패킷 하나: (b0, 본문 시작, 끝) / 덜 왔으면 None / 길이 필드가 깨졌거나 MAX_PKT 초과면 FrameError."""
+    if len(buf) - i < 2: return None
+    mult = 1; val = 0; j = i + 1
+    while True:
+        if j >= len(buf): return None
+        if j - i > 4: raise FrameError("길이 필드 깨짐")
+        enc = buf[j]; val += (enc & 0x7f) * mult; j += 1
+        if not enc & 0x80: break
+        mult *= 128
+    if val > MAX_PKT: raise FrameError(f"패킷이 너무 큼({val}B)")
+    if len(buf) - j < val: return None
+    return buf[i], j, j + val
+
+def _show(b0, body, arrow, on_publish):
+    ptype = b0 >> 4
+    name = TYPES.get(ptype, f"?{ptype}")
+    if ptype == 3:  # PUBLISH
+        tl = (body[0] << 8) | body[1]; topic = body[2:2+tl].decode("utf-8","replace")[:200]
+        rest = body[2+tl:]
+        if (b0 >> 1) & 3 > 0: rest = rest[2:]   # strip packet id if QoS>0
+        if DEBUG_MQTT:
+            log(f"{arrow} PUBLISH {topic}  {rest.decode('utf-8','replace')}")   # 비밀값 포함 — DEBUG_MQTT 일 때만
+        else:
+            log(f"{arrow} PUBLISH {topic}  ({len(rest)}B)")
+        if on_publish:
+            try: on_publish(topic, rest)
+            except Exception as e: log(f"{arrow} on_publish 오류: {e}")
+    elif ptype == 8:  # SUBSCRIBE
+        rest = body[2:]; topics = []
+        while len(rest) >= 2:
+            tl = (rest[0] << 8) | rest[1]; topics.append(rest[2:2+tl].decode("utf-8","replace")[:200]); rest = rest[2+tl+1:]
+        log(f"{arrow} SUBSCRIBE {topics}")
+    elif ptype == 1:  # CONNECT -- variable header: proto name(2+len) + level(1) + flags(1) + keepalive(2), then payload: clientId(2+len)
+        pl = (body[0] << 8) | body[1]
+        off = 2 + pl + 1 + 1 + 2   # skip proto name, level, flags, keepalive
+        cl = (body[off] << 8) | body[off+1]
+        log(f"{arrow} CONNECT clientId={body[off+2:off+2+cl].decode('utf-8', 'replace')[:100]!r}")
+    elif ptype == 14:
+        log(f"{arrow} {name}")
+
 def parse(buf, arrow, on_publish=None):
-    """Pull whole MQTT packets out of buf; return leftover. Log PUBLISH/SUBSCRIBE.
-    on_publish(topic, payload_bytes) 가 있으면 PUBLISH 마다 부른다(상태 스눕용)."""
+    """buf 에서 다 온 MQTT 패킷을 꺼내 로그/스눕하고 남은 것(덜 온 패킷)을 돌려준다.
+    on_publish(topic, payload_bytes) 가 있으면 PUBLISH 마다 부른다(상태 스눕용). 틀(길이)이 깨지면 FrameError,
+    패킷 안쪽이 이상한 것은 그 패킷만 건너뛴다."""
     i = 0
-    while i < len(buf):
-        if len(buf) - i < 2: break
-        b0 = buf[i]; ptype = b0 >> 4
-        # remaining length varint
-        mult = 1; val = 0; j = i + 1; ok = False
-        while j < len(buf):
-            enc = buf[j]; val += (enc & 0x7f) * mult; j += 1
-            if enc & 0x80 == 0: ok = True; break
-            mult *= 128
-            if mult > 128**3: ok = True; break
-        if not ok: break
-        if len(buf) - j < val: break           # packet not fully arrived
-        body = buf[j:j+val]; i = j + val
-        name = TYPES.get(ptype, f"?{ptype}")
-        if ptype == 3:  # PUBLISH
-            tl = (body[0] << 8) | body[1]; topic = body[2:2+tl].decode("utf-8","replace")
-            rest = body[2+tl:]
-            if (b0 >> 1) & 3 > 0: rest = rest[2:]   # strip packet id if QoS>0
-            if DEBUG_MQTT:
-                try: payload = rest.decode("utf-8","replace")
-                except Exception: payload = rest.hex()
-                log(f"{arrow} PUBLISH {topic}  {payload}")   # 비밀값 포함 — DEBUG_MQTT 일 때만
-            else:
-                log(f"{arrow} PUBLISH {topic}  ({len(rest)}B)")
-            if on_publish:
-                try: on_publish(topic, rest)
-                except Exception as e: log(f"{arrow} on_publish 오류: {e}")
-        elif ptype == 8:  # SUBSCRIBE
-            rest = body[2:]; topics = []
-            while len(rest) >= 2:
-                tl = (rest[0] << 8) | rest[1]; topics.append(rest[2:2+tl].decode("utf-8","replace")); rest = rest[2+tl+1:]
-            log(f"{arrow} SUBSCRIBE {topics}")
-        elif ptype == 1:  # CONNECT -- variable header: proto name(2+len) + level(1) + flags(1) + keepalive(2), then payload: clientId(2+len)
-            try:
-                pl = (body[0] << 8) | body[1]
-                off = 2 + pl + 1 + 1 + 2   # skip proto name, level, flags, keepalive
-                cl = (body[off] << 8) | body[off+1]
-                client_id = body[off+2:off+2+cl].decode("utf-8", "replace")
-                log(f"{arrow} CONNECT clientId={client_id!r}")
-            except Exception as e:
-                log(f"{arrow} CONNECT (clientId parse failed: {e})")
-        elif ptype == 14:
-            log(f"{arrow} {name}")
+    while True:
+        f = frame(buf, i)
+        if f is None: break
+        b0, j, i = f
+        try: _show(b0, buf[j:i], arrow, on_publish)
+        except Exception as e: log(f"{arrow} 패킷 해석 실패({TYPES.get(b0 >> 4, b0 >> 4)}): {e}")
     return buf[i:]
 
-def pump(src, dst, arrow, decode=True, on_publish=None, drain=None):
-    """src → dst 로 포워딩. decode 면 MQTT 로 로그/스눕. drain(dst) 는 패킷 경계마다 불러
-    기기 쪽에 명령을 끼워 넣는다(cloud→device 방향에서만. 흐름 한가운데 끼면 깨진다)."""
+def pump(src, dst, arrow, decode=True, on_publish=None, wlock=None, act=None):
+    """src → dst 로 포워딩. decode 면 MQTT 로 로그/스눕.
+    wlock 이 있으면 다 온 패킷만 그 락을 쥐고 보낸다 → dst 쪽 흐름이 늘 패킷 경계라 다른 스레드가
+    같은 락으로 명령을 끼워 넣어도 안전(cloud→device 방향). act=[마지막 활동 시각]: 양쪽이 같이 쓰고,
+    둘 다 IDLE_SEC 동안 조용하면 끝낸다(소켓 제한시간은 IDLE_SEC)."""
     buf = b""; why = "?"
     try:
         while True:
-            d = src.recv(4096)
+            try:
+                d = src.recv(4096)
+            except socket.timeout:
+                if act is not None and time.monotonic() - act[0] < IDLE_SEC: continue
+                why = "유휴"; break
             if not d: why = "EOF(peer FIN)"; break
-            dst.sendall(d)
-            if decode:
+            if act is not None: act[0] = time.monotonic()
+            if not decode:
+                dst.sendall(d); continue
+            if wlock is None:
+                dst.sendall(d)
+                buf = parse(buf + d, arrow, on_publish)
+            else:
                 buf += d
-                try: buf = parse(buf, arrow, on_publish)
-                except Exception: buf = b""
-                if drain and not buf:          # 패킷 경계: 지금 끼워 넣어도 안전
-                    try: drain(dst)
-                    except Exception as e: log(f"{arrow} drain 오류: {e}")
+                left = parse(buf, arrow, on_publish)
+                whole = buf[:len(buf) - len(left)]; buf = left
+                if whole:
+                    with wlock: dst.sendall(whole)
     except Exception as e:
         why = f"{type(e).__name__}:{e}"
     finally:
         log(f"{arrow} pump end: {why}")
-        try: dst.shutdown(socket.SHUT_WR)
+        # SSLSocket.shutdown 은 TLS 객체를 떼어 내 다른 스레드의 송수신이 평문으로 새므로 소켓 쪽 shutdown 을 직접 부른다
+        try: socket.socket.shutdown(dst, socket.SHUT_WR)
         except Exception: pass
 
 # 중계(TLS 종단)할 기기 = 등록된 린나이 기기. 비우면 모두 중계. 그 밖의 클라이언트는 passthrough.
@@ -115,9 +140,12 @@ def passthrough(raw, addr):
         try: raw.close()
         except Exception: pass
         return
-    t1 = threading.Thread(target=pump, args=(raw, up, "P>"), kwargs={"decode": False}, daemon=True)
-    t2 = threading.Thread(target=pump, args=(up, raw, "P<"), kwargs={"decode": False}, daemon=True)
-    t1.start(); t2.start(); t1.join(); t2.join()
+    act = [time.monotonic()]
+    raw.settimeout(IDLE_SEC); up.settimeout(IDLE_SEC)
+    t1 = threading.Thread(target=pump, args=(raw, up, "P>"), kwargs={"decode": False, "act": act}, daemon=True)
+    t1.start()
+    pump(up, raw, "P<", decode=False, act=act)                 # 한쪽은 이 스레드에서(스레드 수 줄이기)
+    t1.join()
     for sck in (raw, up):
         try: sck.close()
         except Exception: pass
@@ -135,7 +163,11 @@ def handle(raw, addr):
     sctx.load_cert_chain(CERT, KEY)
     raw.settimeout(30)
     try: down = sctx.wrap_socket(raw, server_side=True)
-    except Exception as e: log(f"{addr[0]} down TLS fail: {e}"); return
+    except Exception as e:
+        log(f"{addr[0]} down TLS fail: {e}")
+        try: raw.close()
+        except Exception: pass
+        return
     if STANDALONE:
         return broker(down, addr)
     if not UP_CA or not os.path.exists(UP_CA):
@@ -143,8 +175,7 @@ def handle(raw, addr):
     cctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     cctx.check_hostname = False                    # 접속 이름(www.rkiot.net)과 인증서 이름이 달라 아래에서 직접 비교
     cctx.verify_mode = ssl.CERT_REQUIRED; cctx.load_verify_locations(UP_CA)   # 가짜 클라우드 차단
-    try: cctx.minimum_version = ssl.TLSVersion.TLSv1; cctx.set_ciphers("DEFAULT@SECLEVEL=0")
-    except Exception: pass
+    cctx.minimum_version = ssl.TLSVersion.TLSv1_2   # 클라우드는 TLS 1.3 — 옛 버전으로 내려가지 않게(기기 쪽만 1.0 허용)
     try:
         up = cctx.wrap_socket(socket.create_connection((upstream.ip(log), UP_PORT), timeout=10), server_hostname=UP_SNI)
     except Exception as e:
@@ -152,33 +183,70 @@ def handle(raw, addr):
     cn = dict(x[0] for x in (up.getpeercert() or {}).get("subject", ())).get("commonName")
     if cn != UP_CN:
         log(f"{addr[0]} 클라우드 인증서 이름 다름({cn!r} ≠ {UP_CN!r}) — 연결 안 함"); up.close(); down.close(); return
-    down.settimeout(None); up.settimeout(None)
     log(f"{addr[0]} bridged  module({down.version()}) <-> cloud({up.version()})")
+    relay(down, up, addr)
 
-    # 상태 스눕 + 명령 주입(core 가 있을 때). 명령은 C->M(클라우드→기기) 경계에서만 down 에 쓴다.
-    link = None; pending = []; plock = threading.Lock()
-    on_pub = drain = None
+
+def relay(down, up, addr):
+    """기기(down) ↔ 클라우드(up) 중계 — 한 스레드가 select 로 양쪽을 다 읽고 쓴다(펌웨어 hub_proxy.c 와 같은 구조).
+    파이썬 SSL 소켓은 한 객체를 두 스레드가 동시에 읽고 쓰면 TLS 기록이 깨질 수 있어(실측: 클라우드 쪽
+    'wrong version number') 스레드를 나누지 않는다. 클라우드→기기는 다 온 패킷만 보내므로 기기 쪽 흐름은 늘 패킷
+    경계 — 그 사이에 명령(주입 대기열)을 끼워 넣는다. 대기열은 0.3초마다 확인한다."""
+    import select
+    down.settimeout(RELAY_READ_SEC); up.settimeout(RELAY_READ_SEC)   # select 뒤 읽기가 오래 매달리지 않게(쓰기도 이 제한)
+    link = None; on_pub = None
+    pending = []; plock = threading.Lock()
     if CORE is not None:
         def inject(pkt):
-            with plock: pending.append(pkt)
+            with plock:
+                if len(pending) >= MAX_PENDING:
+                    log(f"{addr[0]} 주입 대기 꽉 참 — 버림"); return
+                pending.append(pkt)
         link = CORE.link_open(inject)
         def on_pub(topic, payload): CORE.on_device_publish(link, topic, payload)
-        def drain(dst):
+    bm = bc = b""; last = time.monotonic(); why = "?"
+    try:
+        while True:
             with plock:
                 q, pending[:] = pending[:], []
             for pkt in q:
-                dst.sendall(pkt)
+                down.sendall(pkt)
                 log(f"{addr[0]} 명령 주입 {len(pkt)}B")
-
-    t1 = threading.Thread(target=pump, args=(down, up, "M->C"), kwargs={"on_publish": on_pub}, daemon=True)
-    t2 = threading.Thread(target=pump, args=(up, down, "C->M"), kwargs={"drain": drain}, daemon=True)
-    t1.start(); t2.start(); t1.join(); t2.join()
-    if link is not None:
-        CORE.link_close(link)
-    for s in (down, up):
-        try: s.close()
-        except Exception: pass
-    log(f"{addr[0]} closed")
+            ready = [s for s in (down, up) if s.pending()]
+            if not ready:
+                ready, _, _ = select.select([down, up], [], [], 0.3)
+                if not ready:
+                    if time.monotonic() - last > IDLE_SEC:
+                        why = "유휴"; break
+                    continue
+            last = time.monotonic()
+            for s in ready:
+                try:
+                    d = s.recv(4096)
+                except (socket.timeout, ssl.SSLWantReadError):
+                    continue                                 # 앱 데이터 없는 기록(티켓 등)·덜 온 기록: 다음 바퀴에
+                if not d:
+                    why = "기기가 닫음" if s is down else "클라우드가 닫음"; raise EOFError
+                if s is down:                                # 기기 → 클라우드: 그대로 넘기고 엿보기
+                    up.sendall(d)
+                    bm = parse(bm + d, "M->C", on_pub)
+                else:                                        # 클라우드 → 기기: 다 온 패킷만(주입 경계 유지)
+                    bc += d
+                    left = parse(bc, "C->M")
+                    whole = bc[:len(bc) - len(left)]; bc = left
+                    if whole:
+                        down.sendall(whole)
+    except EOFError:
+        pass
+    except Exception as e:
+        why = f"{type(e).__name__}:{e}"
+    finally:
+        if link is not None:
+            CORE.link_close(link)
+        for s in (down, up):
+            try: s.close()
+            except Exception: pass
+        log(f"{addr[0]} closed ({why})")
 
 # ---------------------------------------------------------------- 단독 모드: 허브가 MQTT 상대
 def _reply(b0, body):
@@ -223,7 +291,8 @@ def broker(down, addr):
     link = None; pending = []; plock = threading.Lock()
     if CORE is not None:
         def inject(pkt):
-            with plock: pending.append(pkt)
+            with plock:
+                if len(pending) < MAX_PENDING: pending.append(pkt)
         link = CORE.link_open(inject)
     log(f"{addr[0]} 연결됨: 기기({down.version()}) <-> 허브(단독 모드)")
     down.settimeout(0.3)
@@ -242,32 +311,29 @@ def broker(down, addr):
                 continue
             if not d: why = "기기가 닫음"; break
             last = time.time(); buf += d
-            while len(buf) >= 2:                 # 다 모인 패킷마다
-                mult, val, j, ok = 1, 0, 1, False
-                while j < len(buf) and j <= 4:
-                    enc = buf[j]; val += (enc & 0x7f) * mult; j += 1
-                    if not enc & 0x80: ok = True; break
-                    mult *= 128
-                if not ok:
-                    if j > 4: raise ValueError("길이 필드 깨짐")
-                    break
-                if len(buf) - j < val: break
-                b0, body, buf = buf[0], buf[j:j + val], buf[j + val:]
+            while True:                          # 다 모인 패킷마다(길이 필드 깨짐·MAX_PKT 초과는 FrameError 로 끊음)
+                f = frame(buf, 0)
+                if f is None: break
+                b0, j, end = f
+                body, buf = buf[j:end], buf[end:]
                 t = b0 >> 4
                 if t == 3 and CORE is not None:
                     tl = (body[0] << 8) | body[1]
                     topic = body[2:2 + tl].decode("utf-8", "replace")
                     rest = body[2 + tl + (2 if (b0 >> 1) & 3 else 0):]
-                    log(f"{addr[0]} 기기→허브 PUBLISH {topic.rsplit('/', 1)[-1]} {len(rest)}B")
-                    CORE.on_device_publish(link, topic, rest)
+                    log(f"{addr[0]} 기기→허브 PUBLISH {topic.rsplit('/', 1)[-1][:40]} {len(rest)}B")
+                    try: CORE.on_device_publish(link, topic, rest)
+                    except Exception as e: log(f"{addr[0]} 상태 해석 오류: {e}")
                 r = _reply(b0, body)
                 if r is None: why = "DISCONNECT"; raise StopIteration
                 if r: down.sendall(r)
                 if t == 1: log(f"{addr[0]} CONNECT → CONNACK")
                 if t == 8:
                     for tp in _topics(t, body):
-                        log(f"{addr[0]} SUBSCRIBE {tp} → SUBACK")
-                        if CORE is not None: CORE.on_device_subscribe(link, tp)
+                        log(f"{addr[0]} SUBSCRIBE {tp[:200]} → SUBACK")
+                        if CORE is not None:
+                            try: CORE.on_device_subscribe(link, tp)
+                            except Exception as e: log(f"{addr[0]} 구독 처리 오류: {e}")
     except StopIteration:
         pass
     except Exception as e:
@@ -277,6 +343,26 @@ def broker(down, addr):
         try: down.close()
         except Exception: pass
         log(f"{addr[0]} 연결 종료 ({why})")
+
+_slots = {}; _slock = threading.Lock()
+
+def _take(ip):
+    with _slock:
+        if sum(_slots.values()) >= MAX_CONN or _slots.get(ip, 0) >= MAX_PER_IP: return False
+        _slots[ip] = _slots.get(ip, 0) + 1; return True
+
+def _give(ip):
+    with _slock:
+        _slots[ip] -= 1
+        if not _slots[ip]: del _slots[ip]
+
+def _serve(c, a):
+    try: handle(c, a)
+    except Exception as e: log(f"{a[0]} 처리 오류: {type(e).__name__}:{e}")
+    finally:
+        try: c.close()
+        except Exception: pass
+        _give(a[0])
 
 def run(core=None):
     global CORE
@@ -288,10 +374,21 @@ def run(core=None):
     elif not STANDALONE and not os.path.exists(UP_CA):
         log(f"오류: UPSTREAM_CA 파일 없음({UP_CA}) — 클라우드에 붙지 않음")
     log(f"기기 대기 :{LISTEN[1]}  {'단독 모드(클라우드 없음)' if STANDALONE else '프록시 -> ' + upstream.ip(log) + ':' + str(UP_PORT)}"
-        f"  대상={DEVICE_IP or '모든 기기'}")
+        f"  대상={DEVICE_IP or '모든 기기'}  동시 연결 {MAX_CONN}(출발지당 {MAX_PER_IP})")
+    if not DEVICE_IP:
+        log("경고: RINNAI_IPS 가 비어 있음 — 집 LAN 의 아무 기기나 린나이 기기로 받아들임(가짜 상태·명령 가로채기 가능)")
     while True:
-        c, a = s.accept()
-        threading.Thread(target=handle, args=(c, a), daemon=True).start()
+        try:
+            c, a = s.accept()
+        except OSError as e:                         # 파일 핸들 부족 등: 죽지 말고 잠깐 쉬었다 계속
+            log(f"accept 오류: {e}"); time.sleep(1); continue
+        if not _take(a[0]):
+            log(f"{a[0]} 연결 상한 — 거절")
+            c.close(); continue
+        try:
+            threading.Thread(target=_serve, args=(c, a), daemon=True).start()
+        except RuntimeError as e:
+            log(f"{a[0]} 스레드 못 만듦: {e}"); c.close(); _give(a[0])
 
 if __name__ == "__main__":
     run()

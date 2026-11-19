@@ -9,17 +9,28 @@ services:
     container_name: lynnai-nas
     restart: unless-stopped
     network_mode: host          # :53/:8883 를 LAN 에 직접. 출발지 IP 보존(only_src 필터)
+    init: true                  # PID 1 은 tini — SIGTERM 을 파이썬에 넘겨 docker stop 이 바로 끝나게
+    # root 로 돈다: :53/:80 바인드(host 네트워크라 sysctl 로 못 낮춤)와 기존 /data(root 소유, 0600 키·토큰) 때문.
+    # 대신 capability 는 전부 빼고 1024 미만 바인드만 남긴다(iptables·raw 소켓 안 씀). /data 는 root 소유여야 한다.
+    cap_drop:
+      - ALL
     cap_add:
-      - NET_BIND_SERVICE        # 53 번(1024 미만) 바인드
+      - NET_BIND_SERVICE        # 53·80 번(1024 미만) 바인드
+    security_opt:
+      - no-new-privileges:true
     environment:
       - MODE=${MODE:-proxy}      # proxy = 클라우드 중계(앱 유지) / standalone = 클라우드 없이 허브가 직접(ESP32 와 동일)
       - NAS_IP=${NAS_IP:?NAS_IP 를 .env 에}        # 이 NAS 의 LAN 주소
       - ONLY_SRC=${RINNAI_IPS:-}                   # 보일러/각방 IP(쉼표). 공유기에서 고정 권장 — DNS 하이재킹 대상
       - RINNAI_IPS=${RINNAI_IPS:-}                 # 같은 목록 — MQTT(:8883) 종단·/key/server 를 이 기기들에게만
-      - API_TOKEN=${API_TOKEN:-}                   # /api·/metrics Bearer 토큰(.env). 비우면 LAN 에 열림
+      - API_TOKEN=${API_TOKEN:-}                   # /api·/metrics Bearer 토큰(.env, 16자 이상). 비우면 LAN 에 열림
       - HIJACK_NAMES=rkiot.net
       - FORWARD=${FORWARD:-}                       # 비우면 기본 게이트웨이(공유기), none 이면 완전독립
       - UPSTREAM_IP=${UPSTREAM_IP:-}               # 진짜 린나이 클라우드 IP. 비우면 www.rkiot.net 을 DNS 로 조회(proxy 모드)
       - DEBUG_MQTT=${DEBUG_MQTT:-}                 # 1이면 복호화 payload 로그(비밀값 포함)
+      - LAN_PAIR=${LAN_PAIR:-}                     # 1이면 시작 후 600초 동안 새 LAN 드라이버 등록(첫 설치 포함). 끝나면 지울 것
+      - GATE_TEST=${GATE_TEST:-}                   # 값이 있으면 TLS 관문 시험만
+      - UPSTREAM_CA=${UPSTREAM_CA:-/app/lynnai-nas/cloud_ca.crt}   # 클라우드 CA(컨테이너 안 경로, 바꾸려면 /data 아래에)
+      - UPSTREAM_CN=${UPSTREAM_CN:-dev2.ckpush.com}                # 클라우드 인증서 CN
     volumes:
       - ./data:/data

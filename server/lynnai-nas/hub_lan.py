@@ -5,13 +5,16 @@ hub_lan.py (대응 ESP32: hub_lan.c) -- SmartThings LAN Edge 드라이버가 붙
 찾기(SSDP): 239.255.255.250:1900 의 M-SEARCH(ST: urn:lynnai-com:device:hub:1 / ssdp:all)에
   HTTP/1.1 200 OK + LYNNAI-ID + LYNNAI-PORT 로 답한다.
 연결(TCP 8484, 줄 단위):
-  드라이버 → "hello <토큰32hex>"   허브 → "ok <id>" | "denied" | "busy"
+  드라이버 → "hello <토큰32hex>"   허브 → "ok <id>" | "denied"(1초 늦게) | "busy"
   이후 양쪽 "<명령 16진 2자리> <내용 16진>\n",  허브는 30초마다 "ping"
-토큰: 저장된 게 없으면 처음 붙는 드라이버를 믿고 저장(첫 설치). 그 뒤 새 드라이버는 pairing_open() 창에서만.
+토큰: 새 드라이버는 페어링 창(pairing_open, NAS 는 LAN_PAIR=1 로 시작하면 처음 600초)에서만 등록(첫 설치도 같음).
+  최대 4개, 꽉 차면 가장 오래 전에 등록한 것부터 바꾼다. 토큰 파일을 못 읽으면(없는 것 말고) 등록도 안 받는다.
+인증 전 연결은 동시에 MAX_PREAUTH 개, 5초 안에 hello 없으면 끊음. 보내기는 기다리지 않는다(읽지 않는 상대는 끊음).
 """
+import hmac
 import json
 import os
-import secrets
+import select
 import socket
 import struct
 import threading
@@ -19,6 +22,16 @@ import time
 
 SSDP_ST = "urn:lynnai-com:device:hub:1"
 MAX_CLIENTS = 2
+MAX_TOKENS = 4
+MAX_PREAUTH = 2
+HELLO_SEC = 5
+DENY_DELAY = 1.0
+MAX_LINE = 512                  # 인증 전엔 넘으면 끊고, 뒤엔 버림
+_HEX = set("0123456789abcdef")
+
+
+def _token_ok(t):
+    return isinstance(t, str) and len(t) == 32 and all(c in _HEX for c in t)
 
 
 class LanUplink:
@@ -29,108 +42,163 @@ class LanUplink:
         self.port = port
         self.log = log
         self.tok_path = os.path.join(data_dir, "lan_tokens.json")
+        self.tok_bad = False        # 파일이 있는데 못 읽음 → 등록 막음(덮어써서 기존 토큰을 잃지 않게)
         self.tokens = self._load_tokens()
         self.pair_until = 0
-        self.clients = []           # 인증된 writer(파일류)
+        self.clients = []           # 인증된 소켓
+        self.preauth = 0
         self.lock = threading.Lock()
 
     # ---- 토큰 ----
     def _load_tokens(self):
         try:
-            return set(json.load(open(self.tok_path)))
-        except Exception:
-            return set()
+            with open(self.tok_path) as f:
+                v = json.load(f)
+            if not isinstance(v, list) or not all(_token_ok(t) for t in v):
+                raise ValueError("형식이 다름")
+            self.tok_bad = False
+            return list(dict.fromkeys(v))[-MAX_TOKENS:]
+        except FileNotFoundError:
+            self.tok_bad = False
+            return []
+        except Exception as e:
+            if not self.tok_bad:
+                self.log(f"[lan] 토큰 파일을 못 읽음({e}) — 고치거나 지울 때까지 모든 드라이버 거절")
+            self.tok_bad = True
+            return []
 
-    def _save_tokens(self):
+    def _save_tokens(self, toks):
+        tmp = self.tok_path + ".tmp"
         try:
-            json.dump(sorted(self.tokens), open(self.tok_path, "w"))
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(toks, f)
+            os.replace(tmp, self.tok_path)
+            return True
         except Exception as e:
             self.log(f"[lan] 토큰 저장 실패: {e}")
+            return False
 
     def pairing_open(self, seconds=180):
-        self.pair_until = time.time() + seconds
+        self.pair_until = time.monotonic() + seconds
         self.log(f"[lan] 페어링 {seconds}초 열림")
 
     def _accept_token(self, tok):
-        if len(tok) != 32 or not all(c in "0123456789abcdef" for c in tok):
+        if not _token_ok(tok):
             return False
         with self.lock:
-            if tok in self.tokens:
+            if self.tok_bad:
+                self.tokens = self._load_tokens()     # 파일을 고쳤거나 지웠으면 다시
+                if self.tok_bad:
+                    return False
+            known = False
+            for t in self.tokens:                     # 하나 맞아도 끝까지(시간 차이 줄이기)
+                known |= hmac.compare_digest(t, tok)
+            if known:
                 return True
-            if not self.tokens or time.time() < self.pair_until:
-                self.tokens.add(tok)
-                self._save_tokens()
-                self.log("[lan] 새 드라이버 등록(%s)" % ("첫 설치" if len(self.tokens) == 1 else "페어링"))
-                return True
-        return False
+            if time.monotonic() >= self.pair_until:
+                return False
+            toks = (self.tokens + [tok])[-MAX_TOKENS:]
+            if not self._save_tokens(toks):            # 저장 못 하면 등록 안 함(재시작 뒤 사라지지 않게)
+                return False
+            self.tokens = toks
+            self.log("[lan] 새 드라이버 등록(페어링)")
+            return True
 
     # ---- 내보내기(core → 모든 드라이버) ----
+    @staticmethod
+    def _send_now(conn, b):
+        """기다리지 않고 보낸다. 다 못 보내면(상대가 안 읽어 버퍼 참) 끊는다 — 받는 스레드가 정리."""
+        try:   # 제한시간 있는 소켓은 버퍼가 꽉 차면 send 가 기다리므로, 쓸 자리가 있는지 먼저 본다
+            if select.select([], [conn], [], 0)[1] and conn.send(b, socket.MSG_DONTWAIT) == len(b):
+                return True
+        except (OSError, ValueError):
+            pass
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        return False
+
     def send(self, cmd_id, data):
-        line = ("%02x " % cmd_id) + data.hex() + "\n"
-        b = line.encode()
+        b = (("%02x " % cmd_id) + data.hex() + "\n").encode()
         with self.lock:
-            dead = []
-            for w in self.clients:
-                try:
-                    w.sendall(b)
-                except Exception:
-                    dead.append(w)
-            for w in dead:
-                self.clients.remove(w)
+            for w in list(self.clients):
+                if not self._send_now(w, b):
+                    self.clients.remove(w)
 
     # ---- TCP ----
+    def _hello(self, conn, addr, line):
+        """인증 전 첫 줄. 통과하면 clients 에 넣고 True."""
+        if line.startswith("hello ") and self._accept_token(line[6:]):
+            with self.lock:
+                if len(self.clients) >= MAX_CLIENTS:
+                    self._send_now(conn, b"busy\n")
+                    return False
+                self._send_now(conn, ("ok %s\n" % self.id).encode())   # 등록 전에 보내 다른 줄과 섞이지 않게
+                self.clients.append(conn)
+            self.log(f"[lan] 드라이버 연결 {addr[0]}")
+            return True
+        time.sleep(DENY_DELAY)                       # 토큰 맞히기 늦추기
+        self._send_now(conn, b"denied\n")
+        self.log(f"[lan] 토큰 거절 {addr[0]} (페어링 필요: LAN_PAIR=1 로 재시작)")
+        return False
+
     def _client(self, conn, addr):
-        conn.settimeout(5)
-        authed = False
+        conn.settimeout(1)                           # 인증 전엔 1초마다 깨어 5초 기한을 본다
+        authed, pre = False, True                    # pre = 인증 전 연결 수에 들어가 있음
         buf = b""
-        last_ping = time.time()
+        t0 = last_ping = time.monotonic()
         try:
             while True:
+                if not authed and time.monotonic() - t0 > HELLO_SEC:   # 조금씩 흘려 보내도 5초면 끝
+                    break
                 try:
                     data = conn.recv(512)
                     if not data:
                         break
                     buf += data
                 except socket.timeout:
-                    data = b""
+                    pass
                 except OSError:
                     break
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     line = line.strip().decode("latin1")
                     if not authed:
-                        if line.startswith("hello ") and self._accept_token(line[6:]):
-                            with self.lock:
-                                if len(self.clients) >= MAX_CLIENTS:
-                                    conn.sendall(b"busy\n")
-                                    return
-                                conn.sendall(("ok %s\n" % self.id).encode())
-                                self.clients.append(conn)
-                            authed = True
-                            conn.settimeout(30)
-                            self.log(f"[lan] 드라이버 연결 {addr[0]}")
-                            self.core.command("refresh")      # 지금 상태 바로
-                        else:
-                            conn.sendall(b"denied\n")
-                            self.log(f"[lan] 토큰 거절 {addr[0]} (페어링 필요)")
+                        if not self._hello(conn, addr, line):
                             return
+                        authed = True
+                        with self.lock:
+                            self.preauth -= 1
+                        pre = False
+                        conn.settimeout(30)
+                        self.core.command("refresh")      # 지금 상태 바로
                     else:
                         parts = line.split(" ", 1)
-                        if len(parts) == 2 and all(c in "0123456789abcdef" for c in parts[0]):
+                        if len(parts) == 2 and len(parts[0]) == 2 and all(c in _HEX for c in parts[0]):
                             cmd = int(parts[0], 16)
-                            body = bytes.fromhex(parts[1]) if parts[1] else b""
+                            try:
+                                body = bytes.fromhex(parts[1]) if parts[1] else b""
+                            except ValueError:
+                                continue
                             if cmd == 0x00:                   # CMD_REQUEST
                                 self.core.command(body.decode("latin1"))
-                if authed and time.time() - last_ping > 30:
-                    last_ping = time.time()
-                    try:
-                        conn.sendall(b"ping\n")
-                    except OSError:
+                if len(buf) >= MAX_LINE:                 # 너무 긴 줄: 인증 전이면 끊고, 뒤면 버림
+                    if not authed:
                         break
+                    buf = b""
+                if authed and time.monotonic() - last_ping > 30:
+                    last_ping = time.monotonic()
+                    with self.lock:
+                        if not self._send_now(conn, b"ping\n"):
+                            break
         finally:
             with self.lock:
                 if conn in self.clients:
                     self.clients.remove(conn)
+                if pre:
+                    self.preauth -= 1
             try:
                 conn.close()
             except Exception:
@@ -145,8 +213,26 @@ class LanUplink:
         s.listen(4)
         self.log(f"[lan] 통로 대기 TCP {self.port}")
         while True:
-            c, a = s.accept()
-            threading.Thread(target=self._client, args=(c, a), daemon=True).start()
+            try:
+                c, a = s.accept()
+            except OSError as e:
+                self.log(f"[lan] accept 오류: {e}")
+                time.sleep(1)
+                continue
+            with self.lock:
+                room = self.preauth < MAX_PREAUTH
+                if room:
+                    self.preauth += 1
+            if not room:                                 # 인증 전 연결이 꽉 참: 바로 끊음
+                c.close()
+                continue
+            try:
+                threading.Thread(target=self._client, args=(c, a), daemon=True).start()
+            except RuntimeError as e:
+                with self.lock:
+                    self.preauth -= 1
+                c.close()
+                self.log(f"[lan] 스레드 못 만듦: {e}")
 
     # ---- SSDP ----
     def _ssdp_server(self):

@@ -15,6 +15,7 @@ import json
 import os
 import random
 import select
+import signal
 import string
 import sys
 import threading
@@ -67,11 +68,16 @@ def start_dns(core_log):
 
 
 def main():
+    # 컨테이너 PID 1 이면 SIGTERM 기본 동작이 무시되므로 직접 받아 끝낸다(docker stop 이 10초 기다리지 않게)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     hid = hub_id()
     nas_ip = os.environ.get("NAS_IP", "")
     token = os.environ.get("API_TOKEN", "").strip()
     standalone = os.environ.get("MODE", "proxy") == "standalone"
     log(f"lynnai-nas {'단독' if standalone else '프록시'} 모드 시작  id={hid}  NAS_IP={nas_ip or '(미지정)'}")
+    if not os.environ.get("RINNAI_IPS", "").strip():
+        log("경고: RINNAI_IPS 가 비어 있음 — 집 LAN 의 아무 기기나 :8883 에 린나이 기기로 붙어 가짜 상태를 올리고 "
+            "/key/server 를 받을 수 있음. 보일러·각방 IP 를 고정하고 RINNAI_IPS 에 적을 것")
 
     core = HubCore(log=lambda *a: log(*a), standalone=standalone)
 
@@ -79,8 +85,11 @@ def main():
     if nas_ip:
         lan = LanUplink(core, hid, nas_ip, DATA, port=int(os.environ.get("LAN_PORT", "8484")), log=lambda *a: log(*a))
         lan.start()
-        if os.environ.get("LAN_PAIR"):        # 처음 설치 외에 새 드라이버를 붙일 때
+        if os.environ.get("LAN_PAIR", "") not in ("", "0"):   # 새 드라이버(첫 설치 포함)는 이 창에서만 등록
             lan.pairing_open(600)
+            log("[lan] LAN_PAIR 켜짐 — 등록이 끝나면 .env 에서 지울 것(켜 두면 재시작마다 600초 열림)")
+        elif not lan.tokens and not lan.tok_bad:
+            log("[lan] 등록된 드라이버 없음 — LAN_PAIR=1 로 다시 시작해 페어링")
     else:
         log("[lan] NAS_IP 가 없어 LAN 통로를 끕니다(SmartThings 연동 불가)")
 

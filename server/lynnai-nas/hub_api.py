@@ -5,16 +5,19 @@ lynnai-hub-watch·Prometheus 가 NAS 든 ESP32 든 똑같이 읽는다.
   GET /api/v1/state   지금 상태(JSON): 보일러(해독+raw), 각방, 연결, time
   GET /metrics        Prometheus 텍스트(lynnai_*)
   GET /api/stats      부팅 id·up(watch 호환)   GET /api/events  (NAS 는 이벤트 링이 없어 빈 목록)
-토큰(API_TOKEN) 있으면 Authorization: Bearer 필요.
+토큰(API_TOKEN) 있으면 Authorization: Bearer 필요. 16자 미만이면 약해서 /api·/metrics 를 막는다(경고 로그).
 
 GET /key/server(기기 부트스트랩, 인증 없음) — ESP32 hub_proxy_bootstrap_handler 와 같은 규칙:
   proxy      : 클라우드에 다시 묻고, 정상(200 + 성공 XML)이면 (서비스, MAC)별로 DATA_DIR/boot/ 에 저장해 그대로.
                클라우드 오류는 그 상태·본문 그대로(저장 안 함), 응답이 없으면 이 기기의 저장분, 없으면 502.
+               성공 응답이라도 <ip> 가 rkiot.net 이름이 아니거나 MQTT 포트가 다르면(변조) 버린다 — 응답 없음과 같게.
   standalone : 허브가 만든 답만(uid/pass 는 자리 표시 — 단독 브로커는 무엇이든 받는다). 저장한 클라우드 계정은 안 내준다.
   RINNAI_IPS 가 있으면 그 기기들의 요청만 받는다(나머지 403).
 """
+import hmac
 import json
 import os
+import re
 import random
 import threading
 import time
@@ -40,6 +43,24 @@ def _boot_key(svc, mac):
 
 def _boot_valid(body):
     return all(t in body for t in (b"<result>", b"</result>", b"<error>S000001</error>", b"<uid>", b"<pass>", b"<ip>"))
+
+
+BOOT_HOST = os.environ.get("UPSTREAM_SNI", "www.rkiot.net").lower()
+BOOT_DOMAIN = "rkiot.net"            # 우리 DNS 가 가로채는 이름(HIJACK_NAMES 기본) — 기기가 이 이름으로 와야 우리에게 온다
+BOOT_MQTT = os.environ.get("MQTT_PORT", "8883")
+
+
+def _boot_sane(body):
+    """성공 응답의 접속 정보가 우리에게 오는 값인가: <ip> 는 rkiot.net(또는 그 하위 이름)·UPSTREAM_SNI, <mqtt> 는 우리 포트.
+    평문 HTTP 로 받으므로 중간에서 바꾼 <ip>(다른 서버로 보내기)를 저장·전달하지 않게."""
+    ips = re.findall(rb"<ip>([^<]*)</ip>", body)
+    if len(ips) != 1:
+        return False
+    host = ips[0].strip().decode("ascii", "replace").lower()
+    if not (host == BOOT_HOST or host == BOOT_DOMAIN or host.endswith("." + BOOT_DOMAIN)):
+        return False
+    ports = re.findall(rb"<mqtt>([^<]*)</mqtt>", body)
+    return all(p.strip().decode("ascii", "replace") == BOOT_MQTT for p in ports)
 # 각방 슬롯(드라이버 core.lua ZONES·ESP32 hub_api.c 와 같다): (id, 이름, 상태, 현재, 설정) — z3 = 거실은 옛 배치 유지
 ZONES = [("z1", "방1", 0, 3, 4), ("z2", "방2", 7, 10, 11), ("z4", "방3", 14, 17, 18), ("z5", "방4", 21, 24, 25),
          ("z6", "방5", 28, 31, 32), ("z7", "방6", 35, 38, 39), ("z3", "거실", 42, 45, 46)]
@@ -149,7 +170,15 @@ def build_metrics(core, hub_id):
     return "\n".join(L) + "\n"
 
 
+MIN_TOKEN = 16
+
+
 def serve(core, hub_id, port, token, log=print):
+    weak = bool(token) and len(token) < MIN_TOKEN
+    if weak:
+        log(f"[api] 경고: API_TOKEN 이 {MIN_TOKEN}자 미만 — /api·/metrics 를 막습니다(더 긴 토큰으로 바꿀 것)")
+    tok_b = ("Bearer " + token).encode() if token else b""
+
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -157,8 +186,8 @@ def serve(core, hub_id, port, token, log=print):
         def _auth(self):
             if not token:
                 return True
-            h = self.headers.get("Authorization", "")
-            if h == "Bearer " + token:
+            h = self.headers.get("Authorization", "").encode("utf-8", "replace")
+            if not weak and hmac.compare_digest(h, tok_b):
                 return True
             self.send_response(401)
             self.send_header("WWW-Authenticate", "Bearer")
@@ -191,7 +220,7 @@ def serve(core, hub_id, port, token, log=print):
             try:
                 with open(path, "rb") as f:
                     cached = f.read()
-                if not _boot_valid(cached):
+                if not (_boot_valid(cached) and _boot_sane(cached)):
                     cached = None
             except OSError:
                 pass
@@ -205,6 +234,9 @@ def serve(core, hub_id, port, token, log=print):
                 status, _hdrs, body = hub_bootstrap.fetch_real_bootstrap(req)
             except Exception as e:
                 log(f"[api] /key/server 클라우드 응답 없음: {e}")
+            if status == 200 and _boot_valid(body) and not _boot_sane(body):
+                log("[api] /key/server 클라우드 응답의 접속 주소(<ip>/<mqtt>)가 예상과 다름 — 버림(변조 의심)")
+                status = body = None
             if status == 200 and _boot_valid(body):
                 try:
                     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -247,5 +279,5 @@ def serve(core, hub_id, port, token, log=print):
                 self.end_headers()
 
     httpd = ThreadingHTTPServer(("0.0.0.0", port), H)
-    log(f"[api] 서버 인터페이스 :{port} (토큰 {'있음' if token else '없음'})")
+    log(f"[api] 서버 인터페이스 :{port} (토큰 {'약함 — 막음' if weak else '있음' if token else '없음 — LAN 에 열림'})")
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
