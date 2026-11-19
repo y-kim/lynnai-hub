@@ -1,5 +1,5 @@
 /*
- * hub_onboard.c -- 버튼 짧게 누름 → 보일러(GainSpan)를 허브 AP 로 자동 온보딩.
+ * hub_onboard.c -- 버튼 길게(3초) 누름 → 보일러(GainSpan)를 허브 AP 로 자동 온보딩.
  *
  * 절차(실측): 보일러를 Wi-Fi 리셋 버튼으로 SoftAP(개방, 게이트웨이 192.168.4.1)에 진입시킨 뒤
  *   1) 허브가 'Rinnai…' AP 를 스캔해 찾고

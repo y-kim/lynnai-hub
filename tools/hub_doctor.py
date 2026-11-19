@@ -126,7 +126,7 @@ def check_stats(host, token):
         detail = f"가동 {up_min:.0f}분 · 가입 실패 {c.get('zb_join_fail', 0)}회 · 성공 {c.get('zb_joined', 0)}회"
         if s.get("zb_factory_new"):
             add("ERR", "Zigbee 가입정보가 없음(초기 상태) — ST 기기가 전부 오프라인", detail,
-                "SmartThings 앱 → 기기 추가 → 주변 기기 검색을 켠 뒤, 허브 버튼 길게(3초) 또는 "
+                "SmartThings 앱 → 기기 추가 → 주변 기기 검색을 켠 뒤, 허브 버튼 짧게 또는 "
                 f"http://{host}/api/zigbee/join 호출(3분간 빠른 가입)")
         else:
             add("ERR", "Zigbee 미가입(가입정보는 있음 — 재가입 실패 중)", detail,
@@ -218,7 +218,7 @@ def check_rinnai(host, token):
     boilers, thermos = st.get("boilers", []), st.get("thermostats", [])
     if not boilers and not thermos:
         add("ERR", "린나이 기기 상태가 하나도 없음", "보일러·온도 조절기가 허브 AP 에 안 붙었거나 상태를 아직 못 받음",
-            "기기 전원·허브 AP(LYNNAI-HUB-…) 접속 확인, 필요하면 온보딩(버튼 짧게)")
+            "기기 전원·허브 AP(LYNNAI-HUB-…) 접속 확인, 필요하면 온보딩(버튼 길게 3초)")
         return
     for kind, lst in (("보일러 조절기", boilers), ("온도 조절기", thermos)):
         for d in lst:
@@ -334,10 +334,10 @@ def check_diag_block(txt):
         add("OK", f"[USB] Zigbee 가입 (PAN {kv.get('pan')}, 채널 {kv.get('ch')})")
     elif "joined" in kv:
         add("ERR", "[USB] Zigbee 미가입" + (" — 가입정보 없음(초기 상태)" if kv.get("factory_new") == "1" else ""),
-            f"nvs_reset={kv.get('nvs_reset')}", "SmartThings 기기 추가 켜고 허브 버튼 길게(3초)")
+            f"nvs_reset={kv.get('nvs_reset')}", "SmartThings 기기 추가 켜고 허브 버튼 짧게")
     for kind, mac, ok in devs:
         add("OK" if ok else "WARN", f"[USB] {kind} {mac} {'연결됨' if ok else '끊김'}", "",
-            "" if ok else "기기 전원·허브 AP 접속(ap_clients) 확인, 필요하면 허브 버튼 짧게(온보딩)")
+            "" if ok else "기기 전원·허브 AP 접속(ap_clients) 확인, 필요하면 허브 버튼 길게 3초(온보딩)")
     sb = int(kv.get("store_bad", "0"))
     if sb:
         add("ERR", f"[USB] 저장 데이터 오류 {sb}건", kv.get("errors", ""), "해당 설정을 관리 화면에서 다시 저장 후 재부팅")

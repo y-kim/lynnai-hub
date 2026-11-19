@@ -9,7 +9,7 @@
  *   이후 양쪽 다     "<명령 16진 2자리> <내용 16진>"   (명령 번호·내용은 hub_uplink.h, Zigbee 와 같음)
  *   허브 → 드라이버  "ping" 30초마다(드라이버가 끊김을 알아채게)
  * 토큰(페어링): 저장된 토큰이 하나도 없으면 처음 붙는 드라이버를 믿고 저장한다(첫 설치).
- *   그 뒤 새 드라이버는 버튼 길게(3초) 누른 뒤 3분 안에만 등록된다. 최대 4개.
+ *   그 뒤 새 드라이버는 버튼을 짧게 누른 뒤 3분 안에만 등록된다. 최대 4개.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -234,7 +234,7 @@ static void client_task(void *arg)
                         hub_uplink_on_request("refresh", 7);   /* 지금 상태를 곧바로 */
                     } else {
                         send_line(fd, "denied\n", 7);
-                        ESP_LOGW(TAG, "토큰 거절(페어링하려면 버튼 3초)");
+                        ESP_LOGW(TAG, "토큰 거절(페어링하려면 버튼 짧게)");
                         goto out;
                     }
                 } else {

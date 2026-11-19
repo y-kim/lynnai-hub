@@ -94,7 +94,9 @@ static void esp_app_temp_sensor_handler(float temperature)
 }
 
 /* 버튼: 드라이버가 눌린 동안 0.2초마다 다시 부르므로, 여기서 뗄 때까지 기다려 길이를 잰다.
- *   짧게(3초 미만) = 보일러 온보딩, 길게(3초 이상) = Zigbee 가입 시도 + LAN 새 드라이버 페어링(3분) */
+ *   짧게(3초 미만) = 스마트홈 허브와 붙기: Zigbee 가입 시도(3분) + LAN 새 드라이버 페어링(3분)
+ *   길게(3초 이상) = 새 기기 Wi-Fi 페어링: 보일러/온도 조절기를 허브 AP 에 등록(온보딩)
+ * 주의: USB-UART 의 DTR 이 이 버튼(GPIO9)에 물려 있어, 시리얼 포트를 열 때 '짧게'로 눌릴 수 있다. */
 static void button_event_handler(switch_driver_handle_t handle)
 {
     ESP_RETURN_ON_FALSE(handle != SWITCH_INV_HANDLE, , TAG, "Invalid switch handle");
@@ -104,18 +106,19 @@ static void button_event_handler(switch_driver_handle_t handle)
         ms += 50;
     }
     if (ms < 3000) {
-        ESP_LOGI(TAG, "버튼 짧게 → 보일러 온보딩");
-        hub_onboard_trigger();
+        ESP_LOGI(TAG, "버튼 짧게 → Zigbee 가입 시도 + LAN 페어링 3분");
+        hub_led_set(HUB_LED_BLUE);                 /* 눌림 확인용 짧은 파랑 */
+        vTaskDelay(pdMS_TO_TICKS(300));
+        hub_led_set(HUB_LED_OFF);
+        hub_lan_pairing_open(180);
+        hub_zigbee_join_now();
         return;
     }
-    ESP_LOGI(TAG, "버튼 길게 → Zigbee 가입 시도 + LAN 페어링 3분");
-    hub_led_set(HUB_LED_BLUE);
-    hub_lan_pairing_open(180);
-    hub_zigbee_join_now();
+    ESP_LOGI(TAG, "버튼 길게 → 새 기기 Wi-Fi 페어링(온보딩)");
     while (gpio_get_level(CONFIG_GPIO_BOOT_ON_DEVKIT) == 0) {   /* 뗄 때까지(다시 불리지 않게) */
         vTaskDelay(pdMS_TO_TICKS(50));
     }
-    hub_led_set(HUB_LED_OFF);
+    hub_onboard_trigger();                         /* 온보딩이 LED 를 직접 바꾼다(파랑=검색, 노랑=전송, 초록/빨강=결과) */
 }
 
 static esp_err_t deferred_driver_init(void)

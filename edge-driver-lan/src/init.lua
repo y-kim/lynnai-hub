@@ -2,7 +2,7 @@
 --
 -- 찾기: SSDP M-SEARCH (ST: urn:lynnai-com:device:hub:1) → 허브가 LYNNAI-ID / LYNNAI-PORT 로 답한다.
 -- 연결: TCP 줄 단위(펌웨어 hub_lan.c)
---   → "hello <토큰>"   ← "ok <id>" | "denied"(허브 버튼 3초 누른 뒤 3분 안에 다시)
+--   → "hello <토큰>"   ← "ok <id>" | "denied"(허브 버튼 짧게 누른 뒤 3분 안에 다시)
 --   ← "<명령 16진 2자리> <내용 16진>"   → "00 <명령 텍스트 16진>"   ← "ping"(30초마다)
 -- 토큰은 기기마다 한 번 만들어 저장한다. 허브는 처음 붙는 드라이버를 믿고 기억한다.
 local Driver = require "st.driver"
@@ -131,8 +131,8 @@ local function run(device)
         core.hub_lost(device)
         show(device, "연결 끊김")
       elseif first == "denied" then
-        log.warn("허브가 거절함: 허브 버튼을 3초 눌러 페어링 창을 연 뒤 새로고침")
-        show(device, "페어링 필요: 허브 버튼 3초")
+        log.warn("허브가 거절함: 허브 버튼을 짧게 눌러 페어링 창을 연 뒤 새로고침")
+        show(device, "페어링 필요: 허브 버튼 짧게")
         backoff = 30
       end
       c:close()
