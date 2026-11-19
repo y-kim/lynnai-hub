@@ -35,6 +35,7 @@
 #include "hub_uplink.h"
 #include "hub_zb_rinnai.h"
 #include "hub_proxy.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "diag";
 static const hub_state_t *s_st;
@@ -179,6 +180,11 @@ static void dump(void)
         printf("dev (없음)\n");
     }
 
+    nvs_stats_t ns;
+    if (nvs_get_stats(NULL, &ns) == ESP_OK) {        /* 앱 nvs 사용량(항목 32바이트 단위) */
+        printf("nvs used=%u free=%u total=%u ns=%u\n", (unsigned)ns.used_entries, (unsigned)ns.free_entries,
+               (unsigned)ns.total_entries, (unsigned)ns.namespace_count);
+    }
     char errs[4 * 60 + 8];
     hub_store_errors_json(errs, sizeof(errs));
     printf("store_bad=%d errors=%s\n", hub_store_error_count(), errs);
