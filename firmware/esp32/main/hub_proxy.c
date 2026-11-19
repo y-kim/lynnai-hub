@@ -31,6 +31,11 @@
 #include "nvs.h"
 #include "hub_store.h"
 #include "esp_random.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/rsa.h"
+#include "mbedtls/x509_crt.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
 #include "hub_proxy.h"
 #include "hub_rinnai.h"
 #include "hub_wifi.h"
@@ -46,14 +51,17 @@ extern const uint8_t srv_pem_end[]   asm("_binary_srv_pem_end");
 #define UP_HOST        "www.rkiot.net"
 #define MQTT_PORT      8883               /* 기기 → 허브, 허브 → 클라우드 모두 같은 포트(기기는 허브를 클라우드로 안다) */
 #define BOOT_PORT      80                 /* /key/server 도 마찬가지 */
+#define PEM_MAX        6144               /* 인증서+키 PEM 최대(RSA-2048 은 약 3KB) */
 #define MAX_LINKS      3                  /* 보일러 + 각방 모듈 + 재접속 여유 1 */
 #define IDLE_SEC       200                /* 이만큼 아무것도 안 오가면 죽은 연결로 보고 닫음 */
 
 static WOLFSSL_CTX *s_srv_ctx, *s_cli_ctx;
+static SemaphoreHandle_t s_ctx_mx;            /* s_srv_ctx 교체(인증서 바꿈)와 wolfSSL_new 사이 */
 static struct {
     char host[64];
     char ip[16];
 } s_up = { UP_HOST, DEF_UP_IP };
+static size_t s_pem_len;                      /* 0 = 펌웨어 내장 인증서 사용 */
 static SemaphoreHandle_t s_dns_mx;
 static int64_t s_dns_at;                      /* 마지막 조회 성공 시각(0 = 아직) */
 static char s_dns_from[16];                   /* 그때 물어본 DNS 서버 */
@@ -200,6 +208,143 @@ static void mode_load(void)
         nvs_close(h);
     }
     s_mode = m == HUB_MODE_STANDALONE ? HUB_MODE_STANDALONE : HUB_MODE_PROXY;
+}
+
+/* 기기 쪽 TLS 서버 컨텍스트: 인증서+개인키 PEM 하나로. 실패하면 NULL */
+static WOLFSSL_CTX *make_srv_ctx(const uint8_t *pem, long len)
+{
+    WOLFSSL_CTX *c = wolfSSL_CTX_new(wolfSSLv23_server_method());
+    if (!c) {
+        return NULL;
+    }
+    if (wolfSSL_CTX_SetMinVersion(c, WOLFSSL_TLSV1_1) != WOLFSSL_SUCCESS ||   /* 보일러 모듈은 TLS 1.1 */
+        wolfSSL_CTX_use_certificate_buffer(c, pem, len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS ||
+        wolfSSL_CTX_use_PrivateKey_buffer(c, pem, len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) {
+        wolfSSL_CTX_free(c);
+        return NULL;
+    }
+    wolfSSL_CTX_set_cipher_list(c, "ALL");
+    return c;
+}
+
+/* 허브가 만들어 저장해 둔 PEM 이 있으면 그것, 없으면 펌웨어 내장 srv.pem(그동안 certgen_task 가 만든다) */
+static WOLFSSL_CTX *load_srv_ctx(void)
+{
+    nvs_handle_t h;
+    WOLFSSL_CTX *c = NULL;
+    uint8_t *pem = malloc(PEM_MAX);
+    size_t n = PEM_MAX;
+    if (pem && nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
+        if (hs_get_blob(h, "proxy", "pem", pem, &n) == ESP_OK && n > 0) {
+            c = make_srv_ctx(pem, (long)n);
+            if (c) {
+                s_pem_len = n;
+                ESP_LOGI(TAG, "기기용 인증서: 허브 자체 인증서 (%u바이트)", (unsigned)n);
+            } else {
+                ESP_LOGW(TAG, "저장된 인증서를 읽지 못함 — 내장 인증서로 받고 새로 만듦");
+            }
+        }
+        nvs_close(h);
+    }
+    free(pem);
+    if (!c) {
+        s_pem_len = 0;
+        c = make_srv_ctx(srv_pem_start, srv_pem_end - srv_pem_start);
+    }
+    return c;
+}
+
+/* ---------------------------------------------------------------- 허브 자체 인증서
+ * 기기는 서버 인증서를 검증하지 않는다(핀닝 없음, MITM 실험으로 확인) → 아무 자체 서명 인증서면 된다.
+ * 펌웨어마다 같은 개인키(내장 srv.pem)를 쓰지 않도록, 허브가 처음 한 번 RSA-2048 키와 인증서를 만들어 저장한다.
+ * 보일러 모듈이 TLS 1.1 이라 RSA 로(ECDSA 지원 불확실). 만드는 동안(수 초~수십 초)은 내장 인증서로 받는다. */
+static void certgen_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(60000));                /* 부팅 직후 기기 TLS 몰림(힙 최저)이 지난 뒤 */
+    int64_t t0 = esp_timer_get_time();
+    mbedtls_pk_context key;
+    mbedtls_x509write_cert crt;
+    mbedtls_entropy_context ent;
+    mbedtls_ctr_drbg_context rng;
+    mbedtls_pk_init(&key);
+    mbedtls_x509write_crt_init(&crt);
+    mbedtls_entropy_init(&ent);
+    mbedtls_ctr_drbg_init(&rng);
+    char *pem = malloc(PEM_MAX);
+    int r = pem ? 0 : -1;
+    const char *pers = "lynnai-hub-cert";
+    if (!r) r = mbedtls_ctr_drbg_seed(&rng, mbedtls_entropy_func, &ent, (const uint8_t *)pers, strlen(pers));
+    if (!r) r = mbedtls_pk_setup(&key, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
+    if (!r) r = mbedtls_rsa_gen_key(mbedtls_pk_rsa(key), mbedtls_ctr_drbg_random, &rng, 2048, 65537);
+    if (!r) {
+        uint8_t serial[16];
+        esp_fill_random(serial, sizeof(serial));
+        serial[0] &= 0x7F;                           /* 양수 */
+        mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
+        mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
+        mbedtls_x509write_crt_set_subject_key(&crt, &key);
+        mbedtls_x509write_crt_set_issuer_key(&crt, &key);
+        r = mbedtls_x509write_crt_set_subject_name(&crt, "C=KR,O=rkiot,CN=rkiot.net");
+        if (!r) r = mbedtls_x509write_crt_set_issuer_name(&crt, "C=KR,O=rkiot,CN=rkiot.net");
+        if (!r) r = mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial));
+        if (!r) r = mbedtls_x509write_crt_set_validity(&crt, "20240101000000", "20491231235959");
+        if (!r) {
+            mbedtls_x509_san_list n3 = { .node = { .type = MBEDTLS_X509_SAN_DNS_NAME,
+                                                   .san.unstructured_name = { .p = (uint8_t *)"www.rkiot.net", .len = 13 } } };
+            mbedtls_x509_san_list n2 = { .node = { .type = MBEDTLS_X509_SAN_DNS_NAME,
+                                                   .san.unstructured_name = { .p = (uint8_t *)"*.rkiot.net", .len = 11 } },
+                                         .next = &n3 };
+            mbedtls_x509_san_list n1 = { .node = { .type = MBEDTLS_X509_SAN_DNS_NAME,
+                                                   .san.unstructured_name = { .p = (uint8_t *)"rkiot.net", .len = 9 } },
+                                         .next = &n2 };
+            r = mbedtls_x509write_crt_set_subject_alternative_name(&crt, &n1);
+        }
+        if (!r) r = mbedtls_x509write_crt_pem(&crt, (uint8_t *)pem, PEM_MAX, mbedtls_ctr_drbg_random, &rng);
+        if (!r) {
+            size_t cl = strlen(pem);
+            r = mbedtls_pk_write_key_pem(&key, (uint8_t *)pem + cl, PEM_MAX - cl);
+        }
+    }
+    WOLFSSL_CTX *c = NULL;
+    size_t pl = 0;
+    if (!r) {
+        pl = strlen(pem);
+        c = make_srv_ctx((const uint8_t *)pem, (long)pl);   /* 만든 것을 실제로 읽혀 본 뒤에만 저장·교체 */
+    }
+    if (c) {
+        nvs_handle_t h;
+        if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
+            hs_set_blob(h, "pem", pem, pl);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        xSemaphoreTake(s_ctx_mx, portMAX_DELAY);
+        WOLFSSL_CTX *old = s_srv_ctx;
+        s_srv_ctx = c;                               /* 새 연결부터(연결 중인 세션은 옛 것을 잡고 있다가 끝남) */
+        s_pem_len = pl;
+        xSemaphoreGive(s_ctx_mx);
+        if (old) {
+            wolfSSL_CTX_free(old);
+        }
+        ESP_LOGW(TAG, "허브 자체 인증서 만듦 (RSA-2048, %u바이트, %lld초) — 이제부터 이걸로 기기를 받음", (unsigned)pl,
+                 (long long)((esp_timer_get_time() - t0) / 1000000));
+    } else {
+        ESP_LOGE(TAG, "자체 인증서 만들기 실패(mbedtls -0x%04x) — 내장 인증서 계속 사용", (unsigned)-r);
+    }
+    mbedtls_x509write_crt_free(&crt);
+    mbedtls_pk_free(&key);
+    mbedtls_ctr_drbg_free(&rng);
+    mbedtls_entropy_free(&ent);
+    free(pem);
+    vTaskDelete(NULL);
+}
+
+static WOLFSSL *new_srv_ssl(void)
+{
+    xSemaphoreTake(s_ctx_mx, portMAX_DELAY);
+    WOLFSSL *ssl = s_srv_ctx ? wolfSSL_new(s_srv_ctx) : NULL;
+    xSemaphoreGive(s_ctx_mx);
+    return ssl;
 }
 
 void hub_proxy_render(char *o, size_t cap)
@@ -570,7 +715,7 @@ static void link_task(void *arg)
 
     struct timeval tv = { .tv_sec = 30 };
     setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    down = wolfSSL_new(s_srv_ctx);
+    down = new_srv_ssl();
     if (!buf || !down) {
         ESP_LOGE(TAG, "메모리 부족으로 세션 생성 실패");
         goto done;
@@ -705,18 +850,16 @@ done:
 static void listen_task(void *arg)
 {
     wolfSSL_Init();
-    s_srv_ctx = wolfSSL_CTX_new(wolfSSLv23_server_method());
+    s_srv_ctx = load_srv_ctx();
+    if (!s_pem_len) {                                /* 저장된 자체 인증서 없음 → 한 번 만든다 */
+        xTaskCreate(certgen_task, "certgen", 8192, NULL, 1, NULL);
+    }
     s_cli_ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
-    long len = srv_pem_end - srv_pem_start;
-    if (!s_srv_ctx || !s_cli_ctx ||
-        wolfSSL_CTX_SetMinVersion(s_srv_ctx, WOLFSSL_TLSV1_1) != WOLFSSL_SUCCESS ||
-        wolfSSL_CTX_use_certificate_buffer(s_srv_ctx, srv_pem_start, len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS ||
-        wolfSSL_CTX_use_PrivateKey_buffer(s_srv_ctx, srv_pem_start, len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) {
+    if (!s_srv_ctx || !s_cli_ctx) {
         ESP_LOGE(TAG, "TLS 준비 실패");
         vTaskDelete(NULL);
         return;
     }
-    wolfSSL_CTX_set_cipher_list(s_srv_ctx, "ALL");
     wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_NONE, NULL);   /* Pi 판과 동일(클라우드가 사설 CA) */
 
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
@@ -755,6 +898,7 @@ static void listen_task(void *arg)
 
 void hub_proxy_start(void)
 {
+    s_ctx_mx = xSemaphoreCreateMutex();
     s_dns_mx = xSemaphoreCreateMutex();
     mode_load();
     ESP_LOGI(TAG, "동작 모드: %s", s_mode == HUB_MODE_STANDALONE ? "단독" : "프록시");
