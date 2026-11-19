@@ -1,5 +1,8 @@
 /*
  * hub_rinnai.c -- 중계 MQTT 엿보기(상태) + 명령 주입. 설명은 hub_rinnai.h.
+ *
+ * 기기를 종류(f06/f09)가 아니라 MAC 끝 3바이트(instance)로 구분한다 → 보일러 N대·써머스탯 N개.
+ * 플랫폼으로 보내는 상태/명령에도 MAC 끝3바이트가 들어간다(hub_uplink.h).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,13 +15,18 @@
 #include "freertos/queue.h"
 
 #include "hub_rinnai.h"
+#include "hub_uplink.h"
+#include "hub_pairs.h"
+#include "hub_expose.h"
 
 static const char *TAG = "HUB_RINNAI";
 
 #define CAP_DOWN    768             /* 기기→클라우드 패킷 하나 (f09 res ~300바이트) */
-#define BLOB_MAX    64
 #define CMD_MAX     320
 #define HEARTBEAT_S 300             /* 바뀐 게 없어도 이 간격으로 다시 보낸다(드라이버가 끊김 판단) */
+#define POLL_S      30              /* 이 간격으로 보일러/각방에 상태 요청(fa) → 외출 등 변경 빨리 반영 */
+#define MAX_DEV     6               /* 동시에 다룰 기기 수(보일러 + 써머스탯 합) */
+#define MAX_PAIRS_BYTES 36          /* 짝 6개 * 6바이트 */
 
 /* MQTT 패킷 경계 추적. cap>0 이면 패킷 전체를 모아 cb 로 넘긴다. */
 typedef struct {
@@ -39,6 +47,7 @@ typedef struct {
 struct hub_link_tap {
     framer_t down, up;
     uint8_t kind;                   /* 0 = 아직 모름 */
+    uint8_t mac3[3];                /* MAC 끝 3바이트 = instance */
     char base[72];                  /* rinnai/RK/01/RK/f06/23/<MAC> */
     QueueHandle_t cmds;
     bool used;
@@ -48,16 +57,19 @@ struct hub_link_tap {
 static hub_link_tap_t s_taps[MAX_TAPS];
 static SemaphoreHandle_t s_lock;
 
-/* 마지막 상태(종류별) — Zigbee 로 보낼 것 */
-static struct {
-    uint8_t blob[BLOB_MAX];
+/* 기기별 마지막 상태(kind+mac3 으로 식별) */
+typedef struct {
+    bool used;
+    uint8_t kind;
+    uint8_t mac3[3];
+    uint8_t blob[HUB_BLOB_MAX];
     int n;
     bool dirty;
-} s_state[2];                       /* 0 = f06, 1 = f09 */
-static uint8_t s_links_sent = 0xff;
-static TaskHandle_t s_task;
+} rk_dev_t;
+static rk_dev_t s_dev[MAX_DEV];
 
-static int kind_idx(uint8_t kind) { return kind == HUB_KIND_F06 ? 0 : kind == HUB_KIND_F09 ? 1 : -1; }
+static bool s_links_dirty = true;   /* 연결 목록을 다시 보낼지 */
+static TaskHandle_t s_task;
 
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static void unlock(void) { xSemaphoreGive(s_lock); }
@@ -67,6 +79,62 @@ static void kick(void)
     if (s_task) {
         xTaskNotifyGive(s_task);
     }
+}
+
+static bool mac3_eq(const uint8_t *a, const uint8_t *b) { return !memcmp(a, b, 3); }
+
+/* base 토픽의 마지막 세그먼트(MAC "34:5f:45:00:00:01")에서 끝 3바이트를 뽑는다 */
+static bool parse_mac3(const char *base, uint8_t out[3])
+{
+    const char *m = strrchr(base, '/');
+    m = m ? m + 1 : base;
+    uint8_t b[6];
+    int n = 0;
+    for (const char *p = m; *p && n < 6; ) {
+        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) {
+            return false;
+        }
+        char hx[3] = { p[0], p[1], 0 };
+        b[n++] = (uint8_t)strtoul(hx, NULL, 16);
+        p += 2;
+        if (*p == ':') {
+            p++;
+        }
+    }
+    if (n < 3) {
+        return false;
+    }
+    memcpy(out, b + n - 3, 3);       /* 끝 3바이트 */
+    return true;
+}
+
+static rk_dev_t *dev_find(uint8_t kind, const uint8_t *mac3)
+{
+    for (int i = 0; i < MAX_DEV; i++) {
+        if (s_dev[i].used && s_dev[i].kind == kind && mac3_eq(s_dev[i].mac3, mac3)) {
+            return &s_dev[i];
+        }
+    }
+    return NULL;
+}
+
+static rk_dev_t *dev_get(uint8_t kind, const uint8_t *mac3)
+{
+    rk_dev_t *d = dev_find(kind, mac3);
+    if (d) {
+        return d;
+    }
+    for (int i = 0; i < MAX_DEV; i++) {
+        if (!s_dev[i].used) {
+            s_dev[i].used = true;
+            s_dev[i].kind = kind;
+            memcpy(s_dev[i].mac3, mac3, 3);
+            s_dev[i].n = 0;
+            s_dev[i].dirty = false;
+            return &s_dev[i];
+        }
+    }
+    return NULL;                     /* 표 가득 */
 }
 
 /* ---------------------------------------------------------------- MQTT 틀 */
@@ -149,8 +217,10 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
         t->kind = kind;
         memcpy(t->base, topic, slash - topic);
         t->base[slash - topic] = 0;
+        parse_mac3(t->base, t->mac3);
+        s_links_dirty = true;
         unlock();
-        ESP_LOGI(TAG, "링크 = f0%d (%s)", kind, t->base);
+        ESP_LOGI(TAG, "링크 = f0%d (%s) mac %02x%02x%02x", kind, t->base, t->mac3[0], t->mac3[1], t->mac3[2]);
         kick();
     }
 
@@ -162,21 +232,20 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
         if (memcmp(pl + i, key, kl)) {
             continue;
         }
-        uint8_t blob[BLOB_MAX];
+        uint8_t blob[HUB_BLOB_MAX];
         int bn = 0;
-        for (int j = i + kl; j + 1 < plen && isxdigit(pl[j]) && isxdigit(pl[j + 1]) && bn < BLOB_MAX; j += 2) {
+        for (int j = i + kl; j + 1 < plen && isxdigit(pl[j]) && isxdigit(pl[j + 1]) && bn < HUB_BLOB_MAX; j += 2) {
             char hx[3] = { (char)pl[j], (char)pl[j + 1], 0 };
             blob[bn++] = (uint8_t)strtoul(hx, NULL, 16);
         }
-        int k = kind_idx(kind);
         lock();
-        if (bn && (s_state[k].n != bn || memcmp(s_state[k].blob, blob, bn))) {
-            memcpy(s_state[k].blob, blob, bn);
-            s_state[k].n = bn;
-            s_state[k].dirty = true;
+        rk_dev_t *d = dev_get(kind, t->mac3);
+        if (d && bn && (d->n != bn || memcmp(d->blob, blob, bn))) {
+            memcpy(d->blob, blob, bn);
+            d->n = bn;
+            d->dirty = true;
             unlock();
-            ESP_LOGI(TAG, "f0%d 상태 바뀜 (%d바이트)", kind, bn);
-            ESP_LOG_BUFFER_HEX(TAG, blob, bn);
+            ESP_LOGI(TAG, "f0%d %02x%02x%02x 상태 바뀜 (%d바이트)", kind, t->mac3[0], t->mac3[1], t->mac3[2], bn);
             kick();
         } else {
             unlock();
@@ -204,6 +273,7 @@ hub_link_tap_t *hub_rinnai_link_open(void)
         t->down.cap = t->down.pkt ? CAP_DOWN : 0;
         t->kind = 0;
         t->base[0] = 0;
+        memset(t->mac3, 0, 3);
         if (!t->cmds) {
             t->cmds = xQueueCreate(4, sizeof(cmd_t *));
         }
@@ -221,6 +291,7 @@ void hub_rinnai_link_close(hub_link_tap_t *t)
     lock();
     t->used = false;
     t->kind = 0;
+    s_links_dirty = true;
     free(t->down.pkt);
     t->down.pkt = NULL;
     cmd_t *c;
@@ -274,7 +345,7 @@ static bool token_ok(const char *s, int n, int max)
 
 static void command_one(const char *text, int len);
 
-/* "f06 80=1;f06 b1=1" — 세미콜론으로 여러 개(각각 따로 /set 으로 보낸다) */
+/* "f06@aabbcc 80=1;f09@ddeeff a0=7,b1=1" — ';' 로 여러 개, '@MAC끝3바이트' 로 대상 지정(생략 가능) */
 void hub_rinnai_command(const char *text, int len)
 {
     int start = 0;
@@ -288,7 +359,75 @@ void hub_rinnai_command(const char *text, int len)
     }
 }
 
-/* "f09 a0=7,b1=1" → 해당 링크 큐에 MQTT PUBLISH(QoS 0) */
+/* 지정된 mac3 과 kind 에 맞는 링크. mac3==NULL 이면 그 kind 의 아무 링크(단일 기기 하위호환) */
+static hub_link_tap_t *find_tap(uint8_t kind, const uint8_t *mac3)
+{
+    hub_link_tap_t *any = NULL;
+    for (int i = 0; i < MAX_TAPS; i++) {
+        if (!s_taps[i].used || s_taps[i].kind != kind) {
+            continue;
+        }
+        if (mac3 && mac3_eq(s_taps[i].mac3, mac3)) {
+            return &s_taps[i];
+        }
+        any = &s_taps[i];
+    }
+    return mac3 ? NULL : any;
+}
+
+/* PUBLISH 패킷을 만들어 tap 의 주입 큐에 넣는다(QoS0). 성공 true. 호출자가 lock 보유. */
+static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j)
+{
+    cmd_t *c = malloc(sizeof(cmd_t));
+    int rl = 2 + tl + j;
+    if (!c || rl > 16383 || 3 + rl > CMD_MAX) {
+        free(c);
+        return false;
+    }
+    uint8_t *q = c->pkt;
+    *q++ = 0x30;                                       /* PUBLISH, QoS 0 */
+    if (rl < 128) {
+        *q++ = rl;
+    } else {
+        *q++ = (rl & 0x7f) | 0x80;
+        *q++ = rl >> 7;
+    }
+    *q++ = tl >> 8;
+    *q++ = tl & 0xff;
+    memcpy(q, topic, tl);
+    q += tl;
+    memcpy(q, json, j);
+    q += j;
+    c->len = q - c->pkt;
+    if (xQueueSend(t->cmds, &c, 0) != pdTRUE) {
+        free(c);
+        return false;
+    }
+    return true;
+}
+
+/* 모든 연결에 상태 요청(fa)을 주입한다. 보일러가 상태(70)를 자주 안 올려서, 외출 등 변경이
+ * 빨리 반영되도록 주기적으로 당긴다(Pi 기록기가 1분마다 하던 것). topic 은 <base>/get. */
+static void poll_status(void)
+{
+    lock();
+    for (int i = 0; i < MAX_TAPS; i++) {
+        if (!s_taps[i].used || !s_taps[i].kind) {
+            continue;
+        }
+        char topic[80];
+        int tl = snprintf(topic, sizeof(topic), "%s/get", s_taps[i].base);
+        char json[128];
+        int j = snprintf(json, sizeof(json),
+            "{\"ptn\":\"J07\",\"code\":\"null\",\"id\":\"f0%d\",\"no\":\"1\",\"sum\":1,\"rpc\":[{\"id\":\"fa\"}],\"lt\":\"null\"}",
+            s_taps[i].kind);
+        if (tl > 0 && tl < (int)sizeof(topic) && j > 0 && j < (int)sizeof(json)) {
+            enqueue_pub(&s_taps[i], topic, tl, json, j);
+        }
+    }
+    unlock();
+}
+
 static void command_one(const char *text, int len)
 {
     char s[128];
@@ -299,26 +438,52 @@ static void command_one(const char *text, int len)
     s[len] = 0;
     if (!strcmp(s, "refresh")) {
         lock();
-        s_state[0].dirty = s_state[0].n > 0;
-        s_state[1].dirty = s_state[1].n > 0;
-        s_links_sent = 0xff;
+        for (int i = 0; i < MAX_DEV; i++) {
+            if (s_dev[i].used) {
+                s_dev[i].dirty = s_dev[i].n > 0;
+            }
+        }
+        s_links_dirty = true;
         unlock();
         kick();
+        hub_expose_send_all();     /* 노출 마스크도 다시(드라이버 재시작 후 비트 재동기화) */
         return;
     }
-    uint8_t kind = !strncmp(s, "f06 ", 4) ? HUB_KIND_F06 : !strncmp(s, "f09 ", 4) ? HUB_KIND_F09 : 0;
+    uint8_t kind = !strncmp(s, "f06", 3) ? HUB_KIND_F06 : !strncmp(s, "f09", 3) ? HUB_KIND_F09 : 0;
     if (!kind) {
         ESP_LOGW(TAG, "모르는 명령: %s", s);
         return;
     }
+    /* 선택적 '@<6 hex>' 대상 MAC */
+    char *rest = s + 3;
+    uint8_t mac3[3];
+    const uint8_t *target = NULL;
+    if (*rest == '@') {
+        if (token_ok(rest + 1, 6, 6)) {
+            char tmp[16];
+            snprintf(tmp, sizeof(tmp), "%.6s", rest + 1);
+            for (int i = 0; i < 3; i++) {
+                char hx[3] = { tmp[2 * i], tmp[2 * i + 1], 0 };
+                mac3[i] = (uint8_t)strtoul(hx, NULL, 16);
+            }
+            target = mac3;
+        }
+        rest = strchr(rest, ' ');
+        if (!rest) {
+            return;
+        }
+    }
+    while (*rest == ' ') {
+        rest++;
+    }
 
     /* 클라우드가 보내는 모양 그대로: "sum" = rpc 항목 수, 값은 소문자 16진(예 "1c") */
-    for (char *c = s + 4; *c; c++) {
+    for (char *c = rest; *c; c++) {
         *c = tolower((unsigned char)*c);
     }
     char rpc[192];
     int r = 0, items = 0;
-    for (char *p = s + 4, *save = NULL, *tok = strtok_r(p, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+    for (char *save = NULL, *tok = strtok_r(rest, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
         char *eq = strchr(tok, '=');
         if (!eq || !token_ok(tok, eq - tok, 2) || !token_ok(eq + 1, strlen(eq + 1), 16)) {
             ESP_LOGW(TAG, "잘못된 명령 항목: %s", tok);
@@ -342,12 +507,7 @@ static void command_one(const char *text, int len)
     }
 
     lock();
-    hub_link_tap_t *t = NULL;
-    for (int i = 0; i < MAX_TAPS; i++) {
-        if (s_taps[i].used && s_taps[i].kind == kind) {
-            t = &s_taps[i];
-        }
-    }
+    hub_link_tap_t *t = find_tap(kind, target);
     if (!t) {
         unlock();
         ESP_LOGW(TAG, "f0%d 연결 없음 — 명령 버림: %s", kind, s);
@@ -355,78 +515,154 @@ static void command_one(const char *text, int len)
     }
     char topic[80];
     int tl = snprintf(topic, sizeof(topic), "%s/set", t->base);
-    cmd_t *c = malloc(sizeof(cmd_t));
-    int rl = 2 + tl + j;
-    if (!c || rl > 16383 || 3 + rl > CMD_MAX) {
-        unlock();
-        free(c);
-        return;
-    }
-    uint8_t *q = c->pkt;
-    *q++ = 0x30;                                       /* PUBLISH, QoS 0 */
-    if (rl < 128) {
-        *q++ = rl;
-    } else {
-        *q++ = (rl & 0x7f) | 0x80;
-        *q++ = rl >> 7;
-    }
-    *q++ = tl >> 8;
-    *q++ = tl & 0xff;
-    memcpy(q, topic, tl);
-    q += tl;
-    memcpy(q, json, j);
-    q += j;
-    c->len = q - c->pkt;
-    if (xQueueSend(t->cmds, &c, 0) != pdTRUE) {
-        free(c);
-        unlock();
-        ESP_LOGW(TAG, "명령 큐 가득 참");
-        return;
-    }
+    bool ok = enqueue_pub(t, topic, tl, json, j);
     unlock();
-    ESP_LOGI(TAG, "명령 → %s %s", topic, json);
+    if (ok) {
+        ESP_LOGI(TAG, "명령 → %s %s", topic, json);
+    } else {
+        ESP_LOGW(TAG, "명령 큐 가득/실패");
+    }
 }
 
-/* ---------------------------------------------------------------- Zigbee 로 내보내기 */
+/* ---------------------------------------------------------------- 플랫폼으로 내보내기 */
+
+/* 연결 목록: 활성 링크마다 [kind][mac3]. 드라이버가 목록에 없는 기기를 오프라인 처리. */
+static int build_links(uint8_t *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_TAPS && n + 4 <= cap; i++) {
+        if (s_taps[i].used && s_taps[i].kind) {
+            out[n++] = s_taps[i].kind;
+            memcpy(out + n, s_taps[i].mac3, 3);
+            n += 3;
+        }
+    }
+    return n;
+}
 
 static void zb_task(void *arg)
 {
     TickType_t last_beat = xTaskGetTickCount();
+    TickType_t last_poll = xTaskGetTickCount();
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
         bool beat = xTaskGetTickCount() - last_beat >= pdMS_TO_TICKS(HEARTBEAT_S * 1000);
         if (beat) {
             last_beat = xTaskGetTickCount();
+            hub_expose_send_all();     /* 주기적으로 노출 마스크도(드라이버 재시작 후 동기화) */
         }
-        uint8_t mask = 0;
-        uint8_t blob[2][BLOB_MAX];
-        int n[2] = { 0, 0 };
+        if (xTaskGetTickCount() - last_poll >= pdMS_TO_TICKS(POLL_S * 1000)) {
+            last_poll = xTaskGetTickCount();
+            poll_status();              /* 주기적 상태 요청(fa) — 외출 등 변경 빨리 반영 */
+        }
+        /* 연결 목록 */
+        uint8_t links[MAX_TAPS * 4];
+        int ln;
+        bool send_links;
         lock();
-        for (int i = 0; i < MAX_TAPS; i++) {
-            if (s_taps[i].used && s_taps[i].kind) {
-                mask |= s_taps[i].kind == HUB_KIND_F06 ? 1 : 2;
-            }
-        }
-        for (int k = 0; k < 2; k++) {
-            if (s_state[k].n && (s_state[k].dirty || beat)) {
-                memcpy(blob[k], s_state[k].blob, s_state[k].n);
-                n[k] = s_state[k].n;
-                s_state[k].dirty = false;
-            }
-        }
-        bool links = mask != s_links_sent || beat;
-        s_links_sent = mask;
+        ln = build_links(links, sizeof(links));
+        send_links = s_links_dirty || beat;
+        s_links_dirty = false;
         unlock();
-        if (links) {
-            hub_zigbee_send_links(mask);
+        if (send_links) {
+            ESP_LOGI(TAG, "→ 연결 %d대", ln / 4);
+            hub_uplink_send(HUB_RK_CMD_LINKS, links, ln);
+            uint8_t pairs[MAX_PAIRS_BYTES];
+            int pn = hub_pairs_blob(pairs, sizeof(pairs));
+            hub_uplink_send(HUB_RK_CMD_PAIRS, pairs, pn);   /* 짝(없으면 0바이트 = 전부 단독/암묵) */
         }
-        for (int k = 0; k < 2; k++) {
-            if (n[k]) {
+        /* 기기별 상태 */
+        for (int i = 0; i < MAX_DEV; i++) {
+            uint8_t kind, mac3[3], blob[HUB_BLOB_MAX];
+            int bn = 0;
+            lock();
+            if (s_dev[i].used && s_dev[i].n && (s_dev[i].dirty || beat)) {
+                kind = s_dev[i].kind;
+                memcpy(mac3, s_dev[i].mac3, 3);
+                bn = s_dev[i].n;
+                memcpy(blob, s_dev[i].blob, bn);
+                s_dev[i].dirty = false;
+            }
+            unlock();
+            if (bn) {
                 vTaskDelay(pdMS_TO_TICKS(200));
-                hub_zigbee_send_state(k ? HUB_KIND_F09 : HUB_KIND_F06, blob[k], n[k]);
+                uint8_t msg[1 + 3 + HUB_BLOB_MAX];
+                msg[0] = kind;
+                memcpy(msg + 1, mac3, 3);
+                memcpy(msg + 4, blob, bn);
+                ESP_LOGI(TAG, "→ f0%d %02x%02x%02x 상태 %d바이트", kind, mac3[0], mac3[1], mac3[2], bn);
+                hub_uplink_send(HUB_RK_CMD_STATE, msg, bn + 4);
             }
         }
     }
+}
+
+int hub_rinnai_snapshot(hub_dev_t *out, int max)
+{
+    int n = 0;
+    if (!s_lock) {
+        return 0;
+    }
+    lock();
+    for (int i = 0; i < MAX_DEV && n < max; i++) {
+        if (!s_dev[i].used || !s_dev[i].n) {
+            continue;
+        }
+        out[n].kind = s_dev[i].kind;
+        memcpy(out[n].mac3, s_dev[i].mac3, 3);
+        out[n].n = s_dev[i].n;
+        memcpy(out[n].blob, s_dev[i].blob, s_dev[i].n);
+        out[n].linked = find_tap(s_dev[i].kind, s_dev[i].mac3) != NULL;
+        n++;
+    }
+    unlock();
+    return n;
+}
+
+/* 관리 화면에서 짝이 바뀌면: 연결(과 짝)을 다시 보내도록 깨운다 */
+void hub_rinnai_resend(void)
+{
+    if (!s_lock) {
+        return;
+    }
+    lock();
+    s_links_dirty = true;
+    unlock();
+    kick();
+}
+
+/* 관리 화면: 기기 삭제. 허브 기기표(s_dev)에서 지우고, 드라이버에 CMD_FORGET 으로 알린다.
+ * 지금 연결돼 relay 중인 기기면 다음 상태(70)에 다시 생길 수 있다(끊긴 기기 정리에 주로 쓴다). */
+bool hub_rinnai_forget(const char *mac6)
+{
+    if (!s_lock || !mac6) {
+        return false;
+    }
+    uint8_t m[3];
+    for (int i = 0; i < 3; i++) {
+        char hx[3] = { mac6[2 * i], mac6[2 * i + 1], 0 };
+        m[i] = (uint8_t)strtoul(hx, NULL, 16);
+    }
+    uint8_t gone[MAX_DEV][4];
+    int ng = 0;
+    lock();
+    for (int i = 0; i < MAX_DEV; i++) {
+        if (s_dev[i].used && mac3_eq(s_dev[i].mac3, m)) {
+            gone[ng][0] = s_dev[i].kind;
+            memcpy(gone[ng] + 1, m, 3);
+            ng++;
+            s_dev[i].used = false;
+            s_dev[i].n = 0;
+            s_dev[i].dirty = false;
+            s_links_dirty = true;
+        }
+    }
+    unlock();
+    for (int i = 0; i < ng; i++) {
+        hub_uplink_send(HUB_RK_CMD_FORGET, gone[i], 4);   /* 드라이버가 그 기기 자식들을 지운다 */
+    }
+    kick();
+    return ng > 0;
 }
 
 void hub_rinnai_start(void)
