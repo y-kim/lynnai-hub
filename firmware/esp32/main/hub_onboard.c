@@ -18,6 +18,7 @@
 
 #include "hub_onboard.h"
 #include "hub_wifi.h"
+#include "hub_zigbee.h"
 #include "hub_led.h"
 #include "hub_events.h"
 
@@ -99,6 +100,7 @@ static void onboard_task(void *arg)
 {
     char ssid[33];
     hub_led_set(HUB_LED_BLUE);
+    hub_zigbee_ap_onboarding(true);      /* 등록하는 동안 Zigbee 가입 중단 — 라디오를 Wi-Fi 에 양보 */
     ESP_LOGI(TAG, "보일러 온보딩 시작: '%s…' AP 검색", BOILER_AP_PREFIX);
 
     esp_err_t r = ESP_ERR_NOT_FOUND;
@@ -135,6 +137,7 @@ restore:
     hub_wifi_apply(s_st);
     vTaskDelay(pdMS_TO_TICKS(5000)); hub_led_set(HUB_LED_OFF);
 done:
+    hub_zigbee_ap_onboarding(false);     /* 등록 끝 — Zigbee 가입 재개 가능 */
     s_running = false;
     vTaskDelete(NULL);
 }

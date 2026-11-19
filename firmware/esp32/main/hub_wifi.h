@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "hub_state.h"
@@ -22,6 +23,10 @@ esp_err_t hub_wifi_sta_temp_open(const char *ssid, uint32_t *ip_out);
 
 /* 허브 AP 쪽 IP(네트워크 바이트 순서) */
 uint32_t hub_wifi_ap_ip(void);
+
+/* 2.4GHz 라디오 공유: Zigbee 가입(steering) 동안 Wi-Fi 를 멈췄다가 다시 켠다. */
+void hub_wifi_radio_pause(void);
+void hub_wifi_radio_resume(void);
 
 /* 10초마다 남은 힙/최저치/가장 큰 블록을 로그로(메모리 예산 확인용) */
 void hub_heap_monitor_start(void);

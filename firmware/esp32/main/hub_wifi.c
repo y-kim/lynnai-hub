@@ -186,6 +186,31 @@ esp_err_t hub_wifi_apply(const hub_state_t *st)
     return hub_wifi_start(st);
 }
 
+/* Zigbee 가입(steering) 동안 2.4GHz 라디오를 Zigbee 에 양보하려고 Wi-Fi 를 잠깐 멈춘다.
+ * 설정(mode/config)은 남으므로 resume 은 다시 start 만 하면 된다(STA 재접속은 STA_START 핸들러). */
+static bool s_radio_paused;
+
+void hub_wifi_radio_pause(void)
+{
+    if (s_radio_paused) {
+        return;
+    }
+    s_radio_paused = true;
+    esp_timer_stop(s_retry_timer);
+    ESP_LOGI(TAG, "Zigbee 가입: Wi-Fi 잠시 중단(라디오 양보)");
+    esp_wifi_stop();
+}
+
+void hub_wifi_radio_resume(void)
+{
+    if (!s_radio_paused) {
+        return;
+    }
+    s_radio_paused = false;
+    ESP_LOGI(TAG, "Zigbee 가입 끝: Wi-Fi 재개");
+    esp_wifi_start();           /* 저장된 mode/config 로 복귀, STA 는 STA_START 에서 재접속 */
+}
+
 uint32_t hub_wifi_ap_ip(void)
 {
     esp_netif_ip_info_t ip;

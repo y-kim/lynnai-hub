@@ -125,26 +125,79 @@ static void esp_zigbee_alarm_bdb_commissioning(alarm_timer_arg_t arg)
  * 찾는 동안 라디오가 Zigbee 채널 16개를 훑어 설정용 AP 가 흔들리고, 폰이 IP 를 못 받는다(실측).
  * 실제 사용 순서도 'Wi-Fi 설정 → SmartThings 에서 기기 추가'다. */
 static volatile bool s_steer_allowed;
+static volatile bool s_ap_busy;             /* 허브 AP 에 기기 등록(온보딩) 중 → Zigbee 가입 보류 */
+static volatile bool s_join_session;        /* Wi-Fi 를 멈추고 Zigbee 가입(steering) 진행 중 */
 static uint32_t s_backoff_ms = 10000;       /* 가입 실패 시 재시도 간격(점점 늘림) */
-static int64_t s_fast_until_us;             /* 이 시각까지는 10초마다 빠르게 재시도(기기 추가 창) */
+static int64_t s_fast_until_us;             /* 이 시각까지는 빠르게 재시도(기기 추가 창) */
 
-/* 지금 바로 Zigbee 가입 시도 + 3분간 10초마다 재시도. 버튼 길게 / GET /api/zigbee/join */
+static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg);
+
+/* 2.4GHz 라디오는 Wi-Fi 와 Zigbee 가 공유한다. steering(망 찾기)은 채널 16개를 훑어 라디오를
+ * 오래 잡으므로, 그동안 Wi-Fi 를 멈춰 라디오를 Zigbee 에 내준다(가입 세션). 반대로 허브 AP 에
+ * 기기를 등록(온보딩)하는 중이면 steering 을 미뤄 라디오를 Wi-Fi 에 양보한다.
+ * 모든 가입 경로가 이 함수로 모인다. 타이머/일반 태스크 컨텍스트에서만 호출(stack lock 잡음). */
+static void zb_try_steer(void)
+{
+    if (!s_steer_allowed || s_ap_busy) {
+        ESP_LOGI(TAG, "Zigbee 가입 보류(%s) — 5초 뒤 다시",
+                 s_ap_busy ? "AP 온보딩 중, 라디오 양보" : "Wi-Fi 설정 전");
+        alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);
+        return;
+    }
+    if (!s_join_session) {
+        s_join_session = true;
+        hub_wifi_radio_pause();                     /* 가입하는 동안 Wi-Fi 중단 */
+    }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+    esp_zigbee_lock_release();
+}
+
+/* 가입 세션 종료: Wi-Fi 다시 켠다. */
+static void zb_join_session_end(void)
+{
+    if (s_join_session) {
+        s_join_session = false;
+        hub_wifi_radio_resume();
+    }
+}
+
+/* 지금 바로 Zigbee 가입 시도 + 3분간 빠르게 재시도(그동안 Wi-Fi 중단). 버튼 길게 / GET /api/zigbee/join */
+/* Zigbee 초기화(재부팅 재가입) 재시도 — Wi-Fi 를 멈춘 세션 안에서, 간격을 늘려 가며(핸들러가 예약). */
+static uint32_t s_init_backoff_ms = 30000;
+static void esp_zigbee_alarm_reinit(alarm_timer_arg_t arg)
+{
+    (void)arg;
+    if (s_ap_busy) {                                 /* AP 기기 등록 중이면 양보 */
+        alarm_timer_schedule(esp_zigbee_alarm_reinit, 0, 5000);
+        return;
+    }
+    if (!s_join_session) {
+        s_join_session = true;
+        hub_wifi_radio_pause();
+    }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
+    esp_zigbee_lock_release();
+}
+
 void hub_zigbee_join_now(void)
 {
     if (!s_steer_allowed) {
         ESP_LOGW(TAG, "Wi-Fi 설정 전이라 Zigbee 가입 보류");
         return;
     }
-    if (!ezb_bdb_is_factory_new()) {
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    bool joined = ezb_bdb_dev_joined();
+    esp_zigbee_lock_release();
+    if (joined) {                       /* 실제로 붙어 있을 때만 생략(고아 상태면 재가입 진행) */
         ESP_LOGI(TAG, "이미 Zigbee 망에 가입돼 있음");
         return;
     }
     s_fast_until_us = esp_timer_get_time() + 180LL * 1000000;
     s_backoff_ms = 10000;
-    ESP_LOGI(TAG, "Zigbee 가입 시도 시작(3분간 10초마다)");
-    esp_zigbee_lock_acquire(portMAX_DELAY);
-    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
-    esp_zigbee_lock_release();
+    ESP_LOGI(TAG, "Zigbee 가입 시도 시작(3분간, 그동안 Wi-Fi 잠깐 중단)");
+    zb_try_steer();
 }
 
 void hub_zigbee_allow_steering(void)
@@ -152,16 +205,40 @@ void hub_zigbee_allow_steering(void)
     s_steer_allowed = true;
 }
 
-static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg)
+/* 허브 AP 에 기기 등록(온보딩) 시작/종료 알림(hub_wifi 에서 호출).
+ * 반대 방향 보호: 등록 중이면 Zigbee 가입을 멈추고 라디오를 Wi-Fi 에 양보한다. */
+void hub_zigbee_ap_onboarding(bool busy)
+{
+    s_ap_busy = busy;
+    if (busy && s_join_session) {
+        ESP_LOGI(TAG, "AP 기기 등록 시작 — Zigbee 가입 멈추고 Wi-Fi 양보");
+        zb_join_session_end();
+    }
+}
+
+/* 주기 워치독: 실제로 망에 안 붙어 있으면(부모가 밀어낸 고아 포함) 재가입을 시도한다.
+ * 붙어 있으면 아무 스캔도 안 하고 5분 뒤 다시 확인. */
+static void esp_zigbee_alarm_rejoin_check(alarm_timer_arg_t arg)
 {
     if (!s_steer_allowed) {
-        alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);   /* 스캔 없이 5초 뒤 다시 확인 */
+        alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 300000);
         return;
     }
-    ESP_LOGI(TAG, "Zigbee 망 찾기 시작 (Wi-Fi 설정 완료됨)");
     esp_zigbee_lock_acquire(portMAX_DELAY);
-    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+    bool joined = ezb_bdb_dev_joined();
     esp_zigbee_lock_release();
+    if (joined) {
+        alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 300000);
+    } else {
+        ESP_LOGW(TAG, "Zigbee 미가입 감지 — 재가입(rejoin) 시도");
+        zb_try_steer();
+    }
+}
+
+static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg)
+{
+    (void)arg;
+    zb_try_steer();
 }
 
 static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
@@ -176,22 +253,28 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case EZB_BDB_SIGNAL_DEVICE_REBOOT: {
         ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
+        zb_join_session_end();              /* 재초기화 세션이었다면 Wi-Fi 다시 켬 */
         if (status == EZB_BDB_STATUS_SUCCESS) {
+            s_init_backoff_ms = 30000;
             ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
             if (ezb_bdb_is_factory_new()) {
-                if (s_steer_allowed) {
-                    ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
-                } else {
-                    ESP_LOGI(TAG, "Zigbee 망 찾기 보류: Wi-Fi 설정 먼저");
-                    alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);
-                }
+                /* 가입은 타이머 컨텍스트에서(Wi-Fi 중단·AP 온보딩 양보·stack lock 포함) */
+                alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 100);
             } else {
                 ESP_LOGI(TAG, "Device reboot");
+                alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 20000);   /* 고아면 자동 재가입 */
             }
         } else {
-            ESP_LOGW(TAG, "%s failed with status(0x%02x), please retry", ezb_app_signal_to_string(signal_type), status);
-            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_INITIALIZATION, 1000);
+            /* 망을 못 찾음(0x03 등). 예제처럼 1초마다 다시 초기화하면 재가입 스캔(~11초)이 라디오를 쉬지 않고 잡아
+             * 집 Wi-Fi 가 AP 를 못 찾고(사유 201) 허브가 집 네트워크에서 사라진다(실측). → 간격을 늘려가며,
+             * 재시도는 Wi-Fi 를 잠깐 멈춘 세션 안에서. 그 사이엔 Wi-Fi 가 붙어 보일러 중계·관리 화면이 산다. */
+            ESP_LOGW(TAG, "%s failed with status(0x%02x) — %lu초 뒤 다시(그동안 Wi-Fi 우선)",
+                     ezb_app_signal_to_string(signal_type), status, (unsigned long)(s_init_backoff_ms / 1000));
+            alarm_timer_schedule(esp_zigbee_alarm_reinit, 0, s_init_backoff_ms);
+            if (s_init_backoff_ms < 600000) {
+                s_init_backoff_ms *= 2;
+            }
         }
     } break;
     case EZB_BDB_SIGNAL_STEERING: {
@@ -204,18 +287,25 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             hub_event(EV_ZB_JOINED, NULL, ezb_nwk_get_panid(), ezb_nwk_get_current_channel());
             s_backoff_ms = 10000;
             s_fast_until_us = 0;
+            zb_join_session_end();              /* 붙었으니 Wi-Fi 다시 켠다 */
             hub_led_set(HUB_LED_GREEN);
+            alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 300000);
         } else {
-            /* 채널 스캔은 Wi-Fi AP 를 몇 초씩 비워 보일러가 끊긴다(실측). 실패가 이어지면 간격을 늘린다.
-             * 단 가입 시도 창(버튼 길게/API 후 3분)에는 10초마다. */
             bool fast = esp_timer_get_time() < s_fast_until_us;
-            uint32_t wait = fast ? 10000 : s_backoff_ms;
-            ESP_LOGW(TAG, "Failed to join network with status(0x%02x) — %lu초 뒤 다시", status,
-                     (unsigned long)(wait / 1000));
-            hub_event(EV_ZB_JOIN_FAIL, NULL, status, (int32_t)wait);
-            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, wait);
-            if (!fast && s_backoff_ms < 600000) {
-                s_backoff_ms *= 2;
+            hub_event(EV_ZB_JOIN_FAIL, NULL, status, 0);
+            if (fast) {
+                /* 가입 창: Wi-Fi 는 계속 멈춰 둔 채(라디오 전부 Zigbee) 바로 다시 시도 */
+                ESP_LOGW(TAG, "Failed to join (0x%02x) — Wi-Fi 멈춘 채 8초 뒤 재시도", status);
+                alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 8000);
+            } else {
+                /* 배경 자가복구: Wi-Fi 다시 켜고 점점 긴 간격으로 재시도(그때 또 잠깐 멈춤) */
+                zb_join_session_end();
+                ESP_LOGW(TAG, "Failed to join (0x%02x) — Wi-Fi 복귀, %lu초 뒤 재가입", status,
+                         (unsigned long)(s_backoff_ms / 1000));
+                alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, s_backoff_ms);
+                if (s_backoff_ms < 600000) {
+                    s_backoff_ms *= 2;
+                }
             }
         }
     } break;
