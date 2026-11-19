@@ -231,10 +231,20 @@ local function main_text(m)
   return res(heat)
 end
 
+-- 반복예약 간격(97): 0 = 30분, n = n시간(1~24). 값은 다른 명령처럼 16진 2자리로 보낸다(12시간 = 0c).
+local RESV_MODES = { "30분" }
+for h = 1, 24 do RESV_MODES[#RESV_MODES + 1] = h .. "시간" end
+local function resv_label(n) return (n or 0) == 0 and "30분" or (n .. "시간") end
+local function resv_code(label)
+  if label == "30분" then return 0 end
+  local h = tonumber((label or ""):match("^(%d+)시간$"))
+  return (h and h >= 1 and h <= 24) and h or nil
+end
+
 local function zone_text(m, z)
   local what
   if z.outing then what = "외출"                                    -- 존별 외출(f09)
-  elseif z.reserve then what = "예약"                               -- 존별 반복예약(f09 96)
+  elseif z.reserve then what = "예약 " .. resv_label(z.resv)       -- 존별 반복예약(f09 96, 간격 97)
   elseif (m and (not m.power or not m.heat)) or not z.on then what = "꺼짐"
   else what = "난방 " .. deg(z.target) end
   return deg(z.current) .. " · " .. what
@@ -329,6 +339,11 @@ local function refresh_zone(parent, mac, id)
   emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = z.current, unit = "C" }))
   emit(child, "outing", z.outing and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 외출(f09 stat bit 0x10)
   emit(child, "reserve", z.reserve and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 예약(stat 0x08)
+  -- 예약 간격: 예약 중이면 기기 값(다음 바이트)을 기억해 두고, 꺼져 있으면 기억한 값(없으면 1시간)을 보여 준다
+  if z.reserve then child:set_field("resv_iv", z.resv, { persist = true }) end
+  emit(child, "reserve", capabilities.mode.supportedModes(RESV_MODES, { visibility = { displayed = false } }))
+  emit(child, "reserve", capabilities.mode.supportedArguments(RESV_MODES, { visibility = { displayed = false } }))
+  emit(child, "reserve", capabilities.mode.mode(resv_label(child:get_field("resv_iv") or 1)))
   emit_text(child, zone_text(m, z), true)
 end
 
@@ -410,7 +425,7 @@ local function wanted_caps(parent, key)
     local out = { { "main", pick({ { BIT.room_on, "switch" }, { BIT.room_set, "thermostatHeatingSetpoint" } }) } }
     local outing = pick({ { BIT.room_out, "switch" } })
     if #outing > 0 then out[#out + 1] = { "outing", outing } end
-    local reserve = pick({ { BIT.room_resv, "switch" } })
+    local reserve = pick({ { BIT.room_resv, "switch" }, { BIT.room_resv, "mode" } })
     if #reserve > 0 then out[#out + 1] = { "reserve", reserve } end
     return "lynnai-zone", out
   end
@@ -627,7 +642,7 @@ local function on_switch(on)
       -- 예약은 켜진 방에서만 걸리므로(방을 끄면 풀림, 실기기 확인) 꺼진 방이면 먼저 켠다.
       local z = ZONES[id]
       local zs = (hub_state(parent).thermos[mac] or {})[id] or {}
-      local v = (zs.resv and zs.resv > 0) and zs.resv or 1
+      local v = device:get_field("resv_iv") or (zs.reserve and zs.resv) or 1
       local list = {}
       if on then
         if zs.on == false then list[#list + 1] = string.format("f09@%s a0=%d,b1=1", mac, z.a0) end
@@ -682,6 +697,20 @@ local function set_heating_setpoint(_, device, cmd)
 end
 
 local function set_mode(_, device, cmd)
+  if cmd.component == "reserve" then
+    -- 예약 간격 고르기 = 그 간격으로 예약 켜기(꺼진 방이면 먼저 켬)
+    local parent = parent_of(device)
+    local kind, mac, id = parse_key(device.parent_assigned_child_key)
+    local v = resv_code(cmd.args.mode)
+    if kind ~= "zone" or not v then return end
+    device:set_field("resv_iv", v, { persist = true })
+    local z = ZONES[id]
+    local zs = (hub_state(parent).thermos[mac] or {})[id] or {}
+    local list = {}
+    if zs.on == false then list[#list + 1] = string.format("f09@%s a0=%d,b1=1", mac, z.a0) end
+    list[#list + 1] = string.format("f09@%s a0=%d,96=1,97=%02x", mac, z.a0, v)
+    return boiler_cmds(parent, list)
+  end
   if cmd.component ~= "heat" then return end
   local parent = parent_of(device)
   local kind, mac = parse_key(device.parent_assigned_child_key)

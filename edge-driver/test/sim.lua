@@ -385,5 +385,29 @@ expose(0x7FFFFFFF & ~(1 << 12), {})
 local zc = driver._children["td4e5f6_z1"]._caps or {}
 check(zc.reserve == nil and zc.outing ~= nil, "노출 비트 12 끔 → 예약만 숨김(외출은 보임)")
 
+print("[15] 예약 간격(97: 0=30분, n=n시간, 16진)")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", F09:sub(1, 14) .. "0b02" .. F09:sub(19))   -- 방2 예약 2시간
+local function lastv(key, comp, attr)
+  for i = #emitted, 1, -1 do local e = emitted[i]
+    if e.key == key and e.comp == comp and e.attr == attr then return e.value end end
+end
+check((lastv("td4e5f6_z2", "main", "roomStatus") or ""):find("예약 2시간", 1, true), "상태 글 '예약 2시간'")
+check(lastv("td4e5f6_z2", "reserve", "mode") == "2시간", "간격 모드 = 2시간")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { mode = "12시간" } })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=0c"), "12시간 → 97=0c(16진)")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { mode = "30분" } })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=00"), "30분 → 97=00")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z2"], { component = "reserve" })
+check(last_cmd_has("a0=2,96=1,97=00"), "스위치 켬 → 마지막으로 고른 간격(30분) 사용")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z1"], { component = "reserve", args = { mode = "3시간" } })
+local j1 = table.concat(sent_cmds, " | ")
+check(j1:find("a0=1,b1=1", 1, true) and j1:find("a0=1,96=1,97=03", 1, true), "꺼진 방1 에 3시간 → 켜고 97=03")
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

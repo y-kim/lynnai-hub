@@ -29,3 +29,6 @@ components:
       - id: switch
         version: 1
         optional: true
+      - id: mode               # 예약 간격(30분, 1~24시간)
+        version: 1
+        optional: true
