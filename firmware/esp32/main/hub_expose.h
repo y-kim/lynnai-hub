@@ -40,6 +40,7 @@ bool hub_room_present(const hub_dev_t *d, int i);   /* 온도 조절기가 이 �
 
 void hub_expose_load(void);
 void hub_expose_send_all(void);                 /* 각 통로에 자기 마스크 + 숨김 목록 */
+void hub_expose_prepare(void);                  /* 화면 그리기 전: 옛 설정을 새로 보인 기기에 옮김 */
 void hub_expose_forget(uint8_t kind, const uint8_t mac3[3]);   /* 기기 삭제 시 그 기기 항목 정리 */
 
 /* 관리 화면 */

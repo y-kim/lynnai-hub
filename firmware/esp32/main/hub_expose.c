@@ -31,6 +31,17 @@ typedef struct {
 } hid_t;
 
 static uint32_t s_mask[EXPOSE_NCH] = { ALL_BITS, ALL_BITS, ALL_BITS };
+
+/* 옛 노출 설정(키 zb2/lan2/mt2: 비트 0 보일러 기기, 8/11/14/17/20/23/26 방 z1·z2·z3·z4~z7 기기 +1 켜기 +2 온도)을
+ * 새 형식으로 옮긴다. 컨트롤 비트는 처음 읽을 때 한 번, 기기·방 숨김은 그 기기가 처음 보일 때 기기마다 한 번
+ * (옮긴 기기는 "lgdone" 에 적어 두어, 나중에 사용자가 다시 보이게 바꾼 것을 되돌리지 않는다). */
+static const char *const OLD_KEY[EXPOSE_NCH] = { "zb2", "lan2", "mt2" };
+static const uint8_t OLD_ZBIT[8] = { 0, 8, 11, 14, 17, 20, 23, 26 };   /* z1~z7 의 옛 기기 비트 */
+static uint32_t s_old[EXPOSE_NCH];
+static bool s_has_old[EXPOSE_NCH];
+#define MAX_LGDONE 8
+static uint8_t s_lgdone[MAX_LGDONE][4];                /* [종류][MAC끝3] */
+static int s_nlgdone;
 static hid_t s_hid[EXPOSE_NCH][MAX_HID];
 static int s_nhid[EXPOSE_NCH];
 
@@ -60,18 +71,64 @@ static const ctl_t ROOM_CTL[] = { { 8, "켜기/끄기" }, { 9, "설정 온도" }
 
 /* ---------------------------------------------------------------- 저장 */
 
+/* 옛 마스크 → 새 컨트롤 마스크. 방 컨트롤은 옛 방들 중 하나라도 숨겼으면 숨김(숨긴 쪽 우선) */
+static uint32_t migrate_mask(uint32_t old)
+{
+    uint32_t m = ALL_BITS;
+    for (int b = 1; b <= 7; b++) {                       /* 보일러 컨트롤: 같은 비트 */
+        if (!((old >> b) & 1)) {
+            m &= ~(1u << b);
+        }
+    }
+    for (int z = 1; z <= 7; z++) {
+        if (!((old >> (OLD_ZBIT[z] + 1)) & 1)) {
+            m &= ~(1u << 8);                              /* 방 켜기/끄기 */
+        }
+        if (!((old >> (OLD_ZBIT[z] + 2)) & 1)) {
+            m &= ~(1u << 9);                              /* 방 설정 온도 */
+        }
+    }
+    for (int b = EXPOSE_ROOM_DEV; b <= EXPOSE_GAS_DEV; b++) {   /* 플러그인 기기: 같은 비트 */
+        if (!((old >> b) & 1)) {
+            m &= ~(1u << b);
+        }
+    }
+    return m;
+}
+
+static void save(void);
+
 void hub_expose_load(void)
 {
     nvs_handle_t h;
+    bool migrated = false;
     if (nvs_open("expose", NVS_READWRITE, &h) == ESP_OK) {
         for (int c = 0; c < EXPOSE_NCH; c++) {
-            hs_get_u32(h, "expose", CH_KEY[c], &s_mask[c]);
+            bool have_new = hs_get_u32(h, "expose", CH_KEY[c], &s_mask[c]) == ESP_OK;
             size_t n = sizeof(s_hid[c]);
             if (hs_get_blob(h, "expose", HID_KEY[c], s_hid[c], &n) == ESP_OK && n % sizeof(hid_t) == 0) {
                 s_nhid[c] = (int)(n / sizeof(hid_t));
             }
+            uint32_t old;
+            if (nvs_get_u32(h, OLD_KEY[c], &old) == ESP_OK) {   /* 옛 값(검사값 없이 읽음 — 옮기기 전용) */
+                s_old[c] = old;
+                s_has_old[c] = true;
+                if (!have_new) {
+                    s_mask[c] = migrate_mask(old);
+                    migrated = true;
+                    ESP_LOGW(TAG, "옛 노출 설정 옮김(%s): %08lx → 컨트롤 %08lx", CH_NAME[c], (unsigned long)old,
+                             (unsigned long)s_mask[c]);
+                }
+            }
+        }
+        size_t n = sizeof(s_lgdone);
+        if (nvs_get_blob(h, "lgdone", s_lgdone, &n) == ESP_OK) {
+            s_nlgdone = (int)(n / 4);
         }
         nvs_close(h);
+    }
+    if (migrated) {
+        save();
     }
     ESP_LOGI(TAG, "노출: Zigbee %08lx(숨김 %d), LAN %08lx(숨김 %d)", (unsigned long)s_mask[0], s_nhid[0],
              (unsigned long)s_mask[1], s_nhid[1]);
@@ -137,8 +194,64 @@ void hub_expose_forget(uint8_t kind, const uint8_t mac3[3])
     save();
 }
 
+/* 옛 설정이 있으면, 처음 보이는 기기마다 옛 기기·방 숨김을 한 번 옮긴다 */
+static void migrate_devices(void)
+{
+    bool any = false;
+    for (int c = 0; c < EXPOSE_NCH; c++) {
+        any |= s_has_old[c];
+    }
+    if (!any) {
+        return;
+    }
+    hub_dev_t dev[8];
+    int nd = hub_rinnai_snapshot(dev, 8);
+    bool changed = false;
+    for (int i = 0; i < nd && s_nlgdone < MAX_LGDONE; i++) {
+        bool done = false;
+        for (int k = 0; k < s_nlgdone && !done; k++) {
+            done = s_lgdone[k][0] == dev[i].kind && !memcmp(&s_lgdone[k][1], dev[i].mac3, 3);
+        }
+        if (done) {
+            continue;
+        }
+        for (int c = 0; c < EXPOSE_NCH; c++) {
+            if (!s_has_old[c]) {
+                continue;
+            }
+            uint8_t hid = hid_get(c, dev[i].kind, dev[i].mac3);
+            if (dev[i].kind == HUB_KIND_F06 && !((s_old[c] >> 0) & 1)) {
+                hid |= 1;                                    /* 옛 '보일러 기기' 꺼짐 */
+            }
+            for (int z = 1; dev[i].kind == HUB_KIND_F09 && z <= 7; z++) {
+                if (!((s_old[c] >> OLD_ZBIT[z]) & 1)) {
+                    hid |= 1u << z;                          /* 옛 '방 기기' 꺼짐 */
+                }
+            }
+            hid_set(c, dev[i].kind, dev[i].mac3, hid);
+        }
+        s_lgdone[s_nlgdone][0] = dev[i].kind;
+        memcpy(&s_lgdone[s_nlgdone][1], dev[i].mac3, 3);
+        s_nlgdone++;
+        changed = true;
+    }
+    if (changed) {
+        nvs_handle_t h;
+        if (nvs_open("expose", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_blob(h, "lgdone", s_lgdone, s_nlgdone * 4);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        save();
+        ESP_LOGW(TAG, "옛 노출 설정을 기기별로 옮김(기기 %d대)", s_nlgdone);
+    }
+}
+
+void hub_expose_prepare(void) { migrate_devices(); }
+
 void hub_expose_send_all(void)
 {
+    migrate_devices();
     for (int c = 0; c < EXPOSE_NCH; c++) {
         uint8_t buf[4 + MAX_HID * 5];
         memcpy(buf, &s_mask[c], 4);                           /* 리틀엔디언 u32 */

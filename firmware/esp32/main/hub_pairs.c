@@ -273,6 +273,7 @@ static void boiler_label(const char *mac, char *out, size_t cap)
 
 void hub_pairs_render(char *o, size_t cap)
 {
+    hub_expose_prepare();                            /* 옛 노출 설정이 남아 있으면 먼저 기기별로 옮김 */
     hub_dev_t dev[8];
     int nd = hub_rinnai_snapshot(dev, 8);
     char f06s[8][7];
