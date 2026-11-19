@@ -57,16 +57,16 @@ export NAS_CERT="$DATA/certs/server.crt" NAS_KEY="$DATA/certs/server.key"
 term() { kill 0 2>/dev/null; }
 trap term INT TERM
 
-if [ "${MODE:-proxy}" = "proxy" ]; then
-  # ESP32 허브와 동일(LAN 전용): DNS + /key/server(:80) + MQTT 중계(:8883) + LAN 통로(:8484).
-  # 공용 코어 하나를 nas_hub.py 가 조립한다(standalone/ 의 dns_hijack 재사용). 린나이 앱 그대로.
-  echo "== proxy 모드 (nas_hub) =="
-  export PYTHONPATH="/app/standalone:/app/lynnai-nas"
-  cd /app/lynnai-nas
-  exec python3 -u nas_hub.py
-else
-  # standalone: 클라우드 없이 NAS 가 직접 브로커(server_pi3.py 가 DNS 까지 같이 돌린다)
-  echo "== standalone 모드: DNS + 브로커(:${MQTT_PORT:-8883}) =="
+if [ -n "${GATE_TEST:-}" ]; then
+  # TLS 핸드셰이크 성사/거부만 보는 시험(옛 standalone/server_pi3.py)
+  echo "== GATE_TEST: TLS 관문 시험 =="
   cd "$APP"
-  exec python3 -u server_pi3.py --config "$DATA/config.json" ${GATE_TEST:+--gate-test}
+  exec python3 -u server_pi3.py --config "$DATA/config.json" --gate-test
 fi
+# 두 모드 모두 nas_hub.py(ESP32 허브와 동일, LAN 전용): DNS + /key/server(:80) + MQTT(:8883) + LAN 통로(:8484).
+#   MODE=proxy      린나이 클라우드로 중계(린나이 앱 그대로)
+#   MODE=standalone 클라우드 없이 허브가 MQTT 상대(상태 요청·시간 응답을 허브가 대신)
+echo "== ${MODE:-proxy} 모드 (nas_hub) =="
+export MODE="${MODE:-proxy}" PYTHONPATH="/app/standalone:/app/lynnai-nas"
+cd /app/lynnai-nas
+exec python3 -u nas_hub.py

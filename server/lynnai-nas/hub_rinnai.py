@@ -6,6 +6,10 @@ SmartThings 명령을 기기 쪽 MQTT 로 조립한다. ESP32 펌웨어 hub_rinn
   허브 → 앱   0x01 상태 [종류 6|9][EPC70 블롭]   0x02 연결 [bit0 보일러, bit1 각방]
   앱 → 허브   0x00 명령 "f06 b1=1" / "f09 a0=7,b1=1,d4=10" / "refresh"(여러 개 ";")
 NAS 엔 허브에 꽂는 센서(온습도계·가스)가 없으므로 0x03~0x06 은 쓰지 않는다.
+
+단독 모드(standalone=True, 클라우드 없음)에서는 클라우드가 하던 일을 코어가 한다(ESP32 와 같음):
+  - 기기가 <base>/get 을 구독하면 곧바로, 그 뒤 30초마다 상태 요청(fa)
+  - 기기의 시간 요청(<base>/stg, 약 1시간마다)에 <base>/set 72 = 현재 한국 시각으로 답함
 """
 import re
 import struct
@@ -15,6 +19,7 @@ import time
 CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_PAIRS = 0x00, 0x01, 0x02, 0x07
 KIND_F06, KIND_F09 = 6, 9
 HEARTBEAT_S = 300
+POLL_S = 30
 _STATE_RE = re.compile(rb'"id":"70","data":"([0-9a-fA-F]+)"')
 _TOK = re.compile(r"[0-9a-z]{1,2}")
 _VAL = re.compile(r"[0-9a-z]{1,16}")
@@ -57,14 +62,17 @@ class Link:
 
 
 class HubCore:
-    def __init__(self, log=print):
+    def __init__(self, log=print, standalone=False):
         self.log = log
+        self.standalone = standalone
         self.lock = threading.Lock()
         self.links = []
         self.state = {}       # (kind, mac3) -> blob(bytes)
         self.senders = []     # 내보내기 대상(LAN uplink 등): fn(cmd_id, data_bytes)
         self._last_mask = None
         threading.Thread(target=self._heartbeat, daemon=True).start()
+        if standalone:
+            threading.Thread(target=self._poll_loop, daemon=True).start()
 
     # ---- 내보내기 대상 등록(LAN uplink) ----
     def add_sender(self, fn):
@@ -111,8 +119,8 @@ class HubCore:
                 self.links.remove(ln)
         self._send_links()
 
-    def on_device_publish(self, ln, topic, payload):
-        """기기 → 클라우드 PUBLISH. 종류·상태 블롭을 뽑는다."""
+    def _learn(self, ln, topic):
+        """이 링크의 기기 토픽(base = 마지막 '/' 앞)과 종류를 배운다."""
         seg = topic.rsplit("/", 1)
         kind = KIND_F06 if "/f06/" in topic else KIND_F09 if "/f09/" in topic else 0
         if kind and ln.kind != kind:
@@ -120,6 +128,52 @@ class HubCore:
             ln.mac3 = _mac3(seg[0])
             self.log(f"[core] 링크 = f0{kind} {ln.mac3.hex()} ({ln.base})")
             self._send_links()
+        return kind
+
+    def on_device_subscribe(self, ln, topic):
+        """기기의 SUBSCRIBE(<base>/set, <base>/get) — 접속하자마자 토픽을 배운다. 단독이면 바로 상태 요청."""
+        seg = topic.rsplit("/", 1)
+        if len(seg) < 2 or seg[1] not in ("set", "get"):
+            return
+        self._learn(ln, topic)
+        if self.standalone and seg[1] == "get":
+            self.poll(ln)
+
+    def poll(self, ln):
+        """상태 요청(fa) — 클라우드가 하던 것과 같은 모양."""
+        if not ln.kind or not ln.base:
+            return
+        body = ('{"ptn":"J07","code":"null","id":"f0%d","no":"1","sum":1,"rpc":[{"id":"fa"}],"lt":"null"}'
+                % ln.kind).encode()
+        ln.inject_cb(mqtt_publish(ln.base + "/get", body))
+
+    def _poll_loop(self):
+        while True:
+            time.sleep(POLL_S)
+            with self.lock:
+                links = list(self.links)
+            for ln in links:
+                self.poll(ln)
+
+    def _answer_time(self, ln):
+        """단독: 기기의 시간 요청(stg)에 set 72 = 현재 한국 시각(YYYYMMDDTHHMMSS)."""
+        now = time.time()
+        if now < 1704067200:                 # 시계가 안 맞으면 틀린 시각은 안 준다
+            self.log("[core] 단독: 시간 요청 — 시계가 안 맞아 건너뜀")
+            return
+        ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now + 9 * 3600))
+        body = ('{"ptn":"J07","code":"null","id":"f0%d","no":"1","sum":1,"rpc":[{"id":"72","data":"%s"}],"lt":"null"}'
+                % (ln.kind, ts)).encode()
+        ln.inject_cb(mqtt_publish(ln.base + "/set", body))
+        self.log(f"[core] 단독: f0{ln.kind} 시간 알려 줌 {ts}")
+
+    def on_device_publish(self, ln, topic, payload):
+        """기기 → 클라우드 PUBLISH. 종류·상태 블롭을 뽑는다(단독이면 시간 요청에도 답한다)."""
+        seg = topic.rsplit("/", 1)
+        kind = self._learn(ln, topic)
+        if len(seg) == 2 and seg[1] == "stg" and self.standalone and ln.kind:
+            self._answer_time(ln)
+            return
         if len(seg) < 2 or seg[1] not in ("inf", "res") or not kind or len(ln.mac3) != 3:
             return
         m = _STATE_RE.search(payload)

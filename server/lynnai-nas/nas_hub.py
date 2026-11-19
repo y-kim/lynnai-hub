@@ -1,9 +1,11 @@
 """
-nas_hub.py -- NAS proxy 모드 조립(ESP32 허브와 동작 동일, LAN 전용). 대응: ESP32 hub_main.c(app_main).
+nas_hub.py -- NAS 허브 조립(ESP32 허브와 동작 동일, LAN 전용). 대응: ESP32 hub_main.c(app_main).
+MODE=proxy(기본, 린나이 클라우드로 중계) | standalone(클라우드 없이 허브가 MQTT 상대).
 
 한 프로세스에서 공용 코어(hub_rinnai) 하나를 두고:
   - DNS(:53)        린나이 기기의 rkiot.net 만 NAS 로 (hub_dns=dns_hijack, only_src)
-  - MQTT 중계(:8883) 기기 TLS 종단 → 진짜 클라우드 재연결(hub_proxy), 지나가는 상태를 코어에 먹임·명령 주입
+  - MQTT(:8883)     기기 TLS 종단 → proxy: 진짜 클라우드 재연결 / standalone: 허브가 직접 응답(hub_proxy),
+                    상태를 코어에 먹임·명령 주입(단독이면 상태 요청·시간 응답도)
   - HTTP(:80)       /key/server 부트스트랩 중계 + /api/v1/state·/metrics (hub_api)
   - LAN 통로(:8484)  SmartThings LAN 드라이버(SSDP + TCP) — core 상태를 내보내고 명령을 코어로 (hub_lan)
 
@@ -68,9 +70,10 @@ def main():
     hid = hub_id()
     nas_ip = os.environ.get("NAS_IP", "")
     token = os.environ.get("API_TOKEN", "").strip()
-    log(f"lynnai-nas proxy 모드 시작  id={hid}  NAS_IP={nas_ip or '(미지정)'}")
+    standalone = os.environ.get("MODE", "proxy") == "standalone"
+    log(f"lynnai-nas {'단독' if standalone else '프록시'} 모드 시작  id={hid}  NAS_IP={nas_ip or '(미지정)'}")
 
-    core = HubCore(log=lambda *a: log(*a))
+    core = HubCore(log=lambda *a: log(*a), standalone=standalone)
 
     # LAN 통로(SmartThings)
     if nas_ip:

@@ -6,6 +6,11 @@ lynnai-hub-watch·Prometheus 가 NAS 든 ESP32 든 똑같이 읽는다.
   GET /metrics        Prometheus 텍스트(lynnai_*)
   GET /api/stats      부팅 id·up(watch 호환)   GET /api/events  (NAS 는 이벤트 링이 없어 빈 목록)
 토큰(API_TOKEN) 있으면 Authorization: Bearer 필요.
+
+GET /key/server(기기 부트스트랩, 인증 없음) — ESP32 hub_proxy_bootstrap_handler 와 같은 규칙:
+  proxy      : 클라우드에 다시 묻고, 정상(200 + 성공 XML)이면 (서비스, MAC)별로 DATA_DIR/boot/ 에 저장해 그대로.
+               클라우드 오류는 그 상태·본문 그대로(저장 안 함), 응답이 없으면 이 기기의 저장분, 없으면 502.
+  standalone : 이 기기의 저장분, 없으면 허브가 만든 답(uid/pass 는 자리 표시 — 단독 브로커는 무엇이든 받는다).
 """
 import json
 import os
@@ -15,6 +20,23 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 KIND_F06, KIND_F09 = 6, 9
+DATA = os.environ.get("DATA_DIR", "/data")
+STANDALONE = os.environ.get("MODE", "proxy") == "standalone"
+BOOT_LOCAL = (b'<?xml version="1.0" encoding="UTF-8"?><result><tid></tid><error>S000001</error><message>success</message>'
+              b'<ip>www.rkiot.net</ip><port><mqtt>8883</mqtt><ws>6002</ws><ssl>true</ssl></port>'
+              b'<uid>lynnai</uid><pass>standalone</pass></result>')
+
+
+def _boot_key(svc, mac):
+    """ESP32 와 같은 키: 'bt' + (서비스|MAC) FNV-1a 32비트"""
+    h = 2166136261
+    for c in (svc + "|" + mac).encode():
+        h = ((h ^ c) * 16777619) & 0xFFFFFFFF
+    return "bt%08x" % h
+
+
+def _boot_valid(body):
+    return all(t in body for t in (b"<result>", b"</result>", b"<error>S000001</error>", b"<uid>", b"<pass>", b"<ip>"))
 ZONES = [("z1", "안방", 0, 3, 4), ("z2", "방2", 7, 10, 11), ("z3", "거실", 42, 45, 46)]
 T0 = time.time()
 BOOT_ID = random.getrandbits(31)
@@ -137,22 +159,56 @@ def serve(core, hub_id, port, token, log=print):
             self.end_headers()
             self.wfile.write(json.dumps(obj, ensure_ascii=False).encode())
 
+        def _send_xml(self, status, body):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _bootstrap(self):
+            key = _boot_key(self.headers.get("Ck-Service", ""), self.headers.get("Ck-Mac", ""))
+            path = os.path.join(DATA, "boot", key + ".xml")
+            cached = None
+            try:
+                with open(path, "rb") as f:
+                    cached = f.read()
+                if not _boot_valid(cached):
+                    cached = None
+            except OSError:
+                pass
+            if STANDALONE:
+                log(f"[api] /key/server(단독): {'이 기기의 저장된 답' if cached else '허브가 만든 답'}")
+                return self._send_xml(200, cached or BOOT_LOCAL)
+            status = body = None
+            try:
+                import hub_bootstrap
+                req = "GET /key/server\n" + "".join(f"{k}: {v}\n" for k, v in self.headers.items())
+                status, _hdrs, body = hub_bootstrap.fetch_real_bootstrap(req)
+            except Exception as e:
+                log(f"[api] /key/server 클라우드 응답 없음: {e}")
+            if status == 200 and _boot_valid(body):
+                try:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path + ".tmp", "wb") as f:
+                        f.write(body)
+                    os.replace(path + ".tmp", path)
+                except OSError as e:
+                    log(f"[api] 부트스트랩 저장 실패: {e}")
+                return self._send_xml(200, body)
+            if status:                          # 클라우드 오류: 그대로(저장 안 함)
+                log(f"[api] /key/server 클라우드가 {status} / 성공 아님 — 그대로 전달")
+                return self._send_xml(status, body or b"")
+            if cached:
+                log("[api] /key/server 클라우드 응답 없음 — 이 기기의 저장된 답")
+                return self._send_xml(200, cached)
+            self.send_response(502)
+            self.end_headers()
+
         def do_GET(self):
             p = self.path.split("?", 1)[0]
             if p == "/key/server":          # 기기 부트스트랩: 인증 없이(기기가 토큰을 모른다)
-                try:
-                    import hub_bootstrap
-                    req = "GET /key/server\n" + "".join(f"{k}: {v}\n" for k, v in self.headers.items())
-                    status, _hdrs, body = hub_bootstrap.fetch_real_bootstrap(req)
-                    self.send_response(status)
-                    self.send_header("Content-Type", "application/xml; charset=utf-8")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                except Exception as e:
-                    log(f"[api] /key/server 중계 실패: {e}")
-                    self.send_response(502)
-                    self.end_headers()
+                self._bootstrap()
                 return
             if not self._auth():
                 return

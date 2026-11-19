@@ -15,7 +15,7 @@ import os, socket, ssl, threading, datetime, http.client
 # 원본: Pi 의 rkprobe/fakesrv.py — 경로를 환경변수로 바꾸고 TLS 포트(핀닝 테스트용)는 뺌.
 TLS_PORTS = []
 PLAIN_PORTS = [int(os.environ.get("HTTP_PORT", "80"))]
-REAL_HOST_IP = os.environ.get("UPSTREAM_IP", "3.38.86.244")
+import upstream                      # 진짜 클라우드 주소(UPSTREAM_IP 또는 DNS 조회)
 REAL_SNI = os.environ.get("UPSTREAM_SNI", "www.rkiot.net")
 
 def log(m):
@@ -62,7 +62,7 @@ def fetch_real_bootstrap(req_headers_txt):
             if k.lower().startswith("ck-"):
                 extra[k] = v.strip()
     extra["Host"] = REAL_SNI
-    conn = http.client.HTTPConnection(REAL_HOST_IP, 80, timeout=8)
+    conn = http.client.HTTPConnection(upstream.ip(log), 80, timeout=8)
     try:
         conn.request("GET", "/key/server", headers=extra)
         r = conn.getresponse()
@@ -114,7 +114,7 @@ def serve(port, tls):
 def main():
     for p in PLAIN_PORTS:
         threading.Thread(target=serve, args=(p, False), daemon=True).start()
-    log("부트스트랩 시작; plain " + ",".join(map(str, PLAIN_PORTS)) + f" -> {REAL_HOST_IP}")
+    log("부트스트랩 시작; plain " + ",".join(map(str, PLAIN_PORTS)) + f" -> {upstream.ip(log)}")
     threading.Event().wait()
 
 if __name__ == "__main__":
