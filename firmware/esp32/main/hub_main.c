@@ -64,6 +64,16 @@ static void zb_mark_set(void)
     }
 }
 
+static void zb_mark_clear(void)            /* 정상 탈퇴: 다음 부팅의 "가입 정보 사라짐" 경보를 막는다 */
+{
+    nvs_handle_t h;
+    if (nvs_open("zbmark", NVS_READWRITE, &h) == ESP_OK) {
+        hs_erase(h, "joined");                 /* 값 + 검사값 */
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
 static bool zb_mark_get(void)
 {
     nvs_handle_t h;
@@ -97,8 +107,11 @@ static void esp_app_temp_sensor_handler(float temperature)
     esp_zigbee_lock_release();
 }
 
+static volatile bool s_lan_pair_after;      /* Zigbee 가입 세션이 끝나면 LAN 페어링 창을 연다(버튼) */
+
 /* 버튼: 드라이버가 눌린 동안 0.2초마다 다시 부르므로, 여기서 뗄 때까지 기다려 길이를 잰다.
- *   짧게(3초 미만) = 스마트홈 허브와 붙기: Zigbee 가입 시도(3분) + LAN 새 드라이버 페어링(3분)
+ *   짧게(3초 미만) = 스마트홈 허브와 붙기: (Zigbee 를 쓰고 미가입이면) 가입 시도(3분), (LAN 을 쓰면) 새 드라이버
+ *                   페어링 3분 — 가입 시도 중엔 Wi-Fi 가 멈추므로 페어링 창은 가입이 끝난 뒤 연다
  *   길게(3초 이상) = 새 기기 Wi-Fi 페어링: 보일러/온도 조절기를 허브 AP 에 등록(온보딩)
  * 주의: USB-UART 의 DTR 이 이 버튼(GPIO9)에 물려 있어, 시리얼 포트를 열 때 '짧게'로 눌릴 수 있다. */
 static void button_event_handler(switch_driver_handle_t handle)
@@ -109,13 +122,21 @@ static void button_event_handler(switch_driver_handle_t handle)
         vTaskDelay(pdMS_TO_TICKS(50));
         ms += 50;
     }
+    if (ms < 3000 && hub_crypt_button()) {          /* 관리 화면에서 암호화 켜기를 고른 뒤의 확인 버튼 */
+        return;
+    }
     if (ms < 3000) {
-        ESP_LOGI(TAG, "버튼 짧게 → Zigbee 가입 시도 + LAN 페어링 3분");
+        bool lan = hub_uplink_mask() & HUB_UPLINK_LAN;
+        ESP_LOGI(TAG, "버튼 짧게 → %s%s", (hub_uplink_mask() & HUB_UPLINK_ZIGBEE) ? "Zigbee 가입 시도 " : "",
+                 lan ? "+ LAN 페어링 3분" : "");
         hub_led_set(HUB_LED_BLUE);                 /* 눌림 확인용 짧은 파랑 */
         vTaskDelay(pdMS_TO_TICKS(300));
         hub_led_set(HUB_LED_OFF);
-        hub_lan_pairing_open(180);
-        hub_zigbee_join_now();
+        if (hub_zigbee_join_now()) {
+            s_lan_pair_after = lan;                /* 가입 중엔 Wi-Fi 가 멈추므로 LAN 페어링 창은 가입이 끝난 뒤 연다 */
+        } else if (lan) {
+            hub_lan_pairing_open(180);
+        }
         return;
     }
     ESP_LOGI(TAG, "버튼 길게 → 새 기기 Wi-Fi 페어링(온보딩)");
@@ -137,21 +158,24 @@ static esp_err_t deferred_driver_init(void)
         temp_sensor_driver_init(&temp_sensor_config, ESP_TEMP_SENSOR_UPDATE_INTERVAL, esp_app_temp_sensor_handler), TAG,
         "Failed to initialize temperature sensor");
 
-    switch_driver_config_t config = {
-        .gpio_num = CONFIG_GPIO_BOOT_ON_DEVKIT,
-        .event_cb = button_event_handler,
-    };
-    ESP_RETURN_ON_FALSE(switch_driver_init(&config) != SWITCH_INV_HANDLE, ESP_FAIL, TAG, "Failed to initialize switch driver");
-    is_inited = true;
+    is_inited = true;                    /* 버튼은 app_main 에서(Zigbee 초기화가 실패해도 온보딩·페어링은 되게) */
 
     return is_inited ? ESP_OK : ESP_FAIL;
 }
 
+static void zb_join_session_end(void);
+
 static void esp_zigbee_alarm_bdb_commissioning(alarm_timer_arg_t arg)
 {
     esp_zigbee_lock_acquire(portMAX_DELAY);
-    (void)ezb_bdb_start_top_level_commissioning(arg);
+    bool joined = ezb_bdb_dev_joined();
+    if (!joined) {
+        (void)ezb_bdb_start_top_level_commissioning(arg);
+    }
     esp_zigbee_lock_release();
+    if (joined) {                                    /* 그 사이 가입됨(버튼 등) — 남은 재시도 타이머는 무시 */
+        zb_join_session_end();
+    }
 }
 
 /* Zigbee 망 찾기(steering)는 Wi-Fi 설정이 끝난 뒤에만 한다.
@@ -178,6 +202,13 @@ static void zb_try_steer(void)
         alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);
         return;
     }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    bool joined = ezb_bdb_dev_joined();
+    esp_zigbee_lock_release();
+    if (joined) {                                   /* 남아 있던 타이머가 가입된 뒤에 불림 — Wi-Fi 를 멈추지 않는다 */
+        zb_join_session_end();
+        return;
+    }
     if (!s_join_session) {
         s_join_session = true;
         hub_wifi_radio_pause();                     /* 가입하는 동안 Wi-Fi 중단 */
@@ -194,9 +225,13 @@ static void zb_join_session_end(void)
         s_join_session = false;
         hub_wifi_radio_resume();
     }
+    if (s_lan_pair_after) {
+        s_lan_pair_after = false;
+        hub_lan_pairing_open(180);                  /* 버튼으로 미뤄 둔 LAN 페어링 창(Wi-Fi 가 돌아온 뒤) */
+    }
 }
 
-/* 지금 바로 Zigbee 가입 시도 + 3분간 빠르게 재시도(그동안 Wi-Fi 중단). 버튼 길게 / GET /api/zigbee/join */
+/* 지금 바로 Zigbee 가입 시도 + 3분간 빠르게 재시도(그동안 Wi-Fi 중단). 버튼 짧게 / POST /api/zigbee/join */
 /* Zigbee 초기화(재부팅 재가입) 재시도 — Wi-Fi 를 멈춘 세션 안에서, 간격을 늘려 가며(핸들러가 예약). */
 static uint32_t s_init_backoff_ms = 30000;
 static void esp_zigbee_alarm_reinit(alarm_timer_arg_t arg)
@@ -215,23 +250,28 @@ static void esp_zigbee_alarm_reinit(alarm_timer_arg_t arg)
     esp_zigbee_lock_release();
 }
 
-void hub_zigbee_join_now(void)
+bool hub_zigbee_join_now(void)
 {
+    if (!(hub_uplink_mask() & HUB_UPLINK_ZIGBEE) || !hub_zigbee_is_ready()) {
+        ESP_LOGI(TAG, "Zigbee 를 쓰지 않거나 아직 준비 전 — 가입 시도 안 함");
+        return false;
+    }
     if (!s_steer_allowed) {
         ESP_LOGW(TAG, "Wi-Fi 설정 전이라 Zigbee 가입 보류");
-        return;
+        return false;
     }
     esp_zigbee_lock_acquire(portMAX_DELAY);
     bool joined = ezb_bdb_dev_joined();
     esp_zigbee_lock_release();
     if (joined) {                       /* 실제로 붙어 있을 때만 생략(고아 상태면 재가입 진행) */
         ESP_LOGI(TAG, "이미 Zigbee 망에 가입돼 있음");
-        return;
+        return false;
     }
     s_fast_until_us = esp_timer_get_time() + 180LL * 1000000;
     s_backoff_ms = 10000;
     ESP_LOGI(TAG, "Zigbee 가입 시도 시작(3분간, 그동안 Wi-Fi 잠깐 중단)");
     zb_try_steer();
+    return true;
 }
 
 void hub_zigbee_allow_steering(void)
@@ -355,6 +395,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         const ezb_zdo_signal_leave_params_t *leave_params = ezb_app_signal_get_params(app_signal);
         ESP_LOGI(TAG, "Left network successfully with type(0x%02x)", leave_params->leave_type);
         hub_event(EV_ZB_LEAVE, NULL, leave_params->leave_type, 0);
+        zb_mark_clear();                        /* 스스로(또는 SmartThings 에서 지워져) 나갔음 — 사라짐 경보 아님 */
     } break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t duration = *(uint8_t *)ezb_app_signal_get_params(app_signal);
@@ -485,6 +526,17 @@ void app_main(void)
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
     hub_heap_monitor_start();
     hub_diag_start(&s_hub);                 /* LED 오류 코드 + USB 시리얼 diag */
-    ESP_LOGI(TAG, "Start ESP Zigbee Stack");
-    xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
+    {
+        /* 버튼(GPIO9): Zigbee 와 상관없이 — SmartThings 허브가 꺼져 Zigbee 초기화가 실패해도 온보딩·LAN 페어링은 된다 */
+        switch_driver_config_t bc = { .gpio_num = CONFIG_GPIO_BOOT_ON_DEVKIT, .event_cb = button_event_handler };
+        if (switch_driver_init(&bc) == SWITCH_INV_HANDLE) {
+            ESP_LOGE(TAG, "버튼 초기화 실패");
+        }
+    }
+    if (hub_uplink_mask() & HUB_UPLINK_ZIGBEE) {
+        ESP_LOGI(TAG, "Start ESP Zigbee Stack");
+        xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
+    } else {
+        ESP_LOGI(TAG, "Zigbee 를 쓰지 않음(연결 방식) — Zigbee 스택 시작 안 함");
+    }
 }

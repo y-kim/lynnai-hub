@@ -25,12 +25,13 @@
 #include "hub_api.h"
 #include "hub_store.h"
 #include "hub_led.h"
+#include "hub_portal.h"
 
 #define RING 256
 
 typedef struct {
     uint32_t seq;
-    uint32_t up_ms;
+    uint64_t up_ms;                 /* 64비트 — 32비트면 가동 49.7일에 되감긴다 */
     int32_t a, b;
     uint8_t type;
     uint8_t mac[6];
@@ -65,7 +66,7 @@ void hub_event(hub_ev_t type, const uint8_t *mac, int32_t a, int32_t b)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     ev_t *e = &s_ring[s_next % RING];
     e->seq = s_next++;
-    e->up_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    e->up_ms = (uint64_t)(esp_timer_get_time() / 1000);
     e->type = type;
     e->a = a;
     e->b = b;
@@ -96,8 +97,8 @@ void hub_events_print(int last)
         if (gone) {
             break;
         }
-        printf("ev %lu t=%lu.%03lus %s %02x:%02x:%02x:%02x:%02x:%02x a=%ld b=%ld\n", (unsigned long)e.seq,
-               (unsigned long)(e.up_ms / 1000), (unsigned long)(e.up_ms % 1000), NAMES[e.type], e.mac[0], e.mac[1],
+        printf("ev %lu t=%llu.%03lus %s %02x:%02x:%02x:%02x:%02x:%02x a=%ld b=%ld\n", (unsigned long)e.seq,
+               (unsigned long long)(e.up_ms / 1000), (unsigned long)(e.up_ms % 1000), NAMES[e.type], e.mac[0], e.mac[1],
                e.mac[2], e.mac[3], e.mac[4], e.mac[5], (long)e.a, (long)e.b);
     }
 }
@@ -148,8 +149,8 @@ static esp_err_t events_get(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, line);
     for (uint32_t i = 0; i < n; i++) {
         const ev_t *e = &copy[i];
-        snprintf(line, sizeof(line), "%s[%lu,%lu,\"%s\",\"%02x:%02x:%02x:%02x:%02x:%02x\",%ld,%ld]",
-                 i ? "," : "", (unsigned long)e->seq, (unsigned long)e->up_ms, NAMES[e->type], e->mac[0],
+        snprintf(line, sizeof(line), "%s[%lu,%llu,\"%s\",\"%02x:%02x:%02x:%02x:%02x:%02x\",%ld,%ld]",
+                 i ? "," : "", (unsigned long)e->seq, (unsigned long long)e->up_ms, NAMES[e->type], e->mac[0],
                  e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], (long)e->a, (long)e->b);
         httpd_resp_sendstr_chunk(req, line);
     }
@@ -194,19 +195,34 @@ static esp_err_t stats_get(httpd_req_t *req)
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
-static esp_err_t zb_join_get(httpd_req_t *req)
+/* POST /api/zigbee/join — Wi-Fi 를 최대 3분 멈추므로 아무나 못 부르게: 관리자 세션(관리 화면 버튼) 또는
+ * 설정된 API 토큰. 토큰이 없는 허브는 API 로는 못 부른다(허브 버튼 짧게 / 관리 화면). */
+static esp_err_t zb_join_post(httpd_req_t *req)
 {
-    if (!hub_api_authorized(req)) {
-        return ESP_OK;
+    bool admin = hub_portal_authed(req);
+    if (!admin) {
+        if (!hub_api_has_token()) {
+            httpd_resp_set_status(req, "403 Forbidden");
+            return httpd_resp_sendstr(req, "API 토큰이 없어 막아 둠 — 허브 버튼을 짧게 누르거나 관리 화면에서");
+        }
+        if (!hub_api_authorized(req)) {
+            return ESP_OK;
+        }
     }
-    hub_zigbee_join_now();
+    bool started = hub_zigbee_join_now();
+    if (admin) {                                     /* 관리 화면 버튼: 되돌아가기 */
+        httpd_resp_set_status(req, "303 See Other");
+        httpd_resp_set_hdr(req, "Location", "/admin");
+        return httpd_resp_send(req, NULL, 0);
+    }
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true,\"note\":\"3분간 10초마다 가입 시도\"}");
+    return httpd_resp_sendstr(req, started ? "{\"ok\":true,\"note\":\"3분간 가입 시도(그동안 Wi-Fi 멈춤)\"}"
+                                           : "{\"ok\":false,\"note\":\"이미 가입됐거나 Zigbee 를 쓰지 않음\"}");
 }
 
 void hub_events_register(httpd_handle_t srv)
 {
-    const httpd_uri_t zj = { .uri = "/api/zigbee/join", .method = HTTP_GET, .handler = zb_join_get };
+    const httpd_uri_t zj = { .uri = "/api/zigbee/join", .method = HTTP_POST, .handler = zb_join_post };
     httpd_register_uri_handler(srv, &zj);
     const httpd_uri_t ev = { .uri = "/api/events", .method = HTTP_GET, .handler = events_get };
     const httpd_uri_t st = { .uri = "/api/stats", .method = HTTP_GET, .handler = stats_get };

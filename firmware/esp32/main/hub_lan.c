@@ -8,8 +8,9 @@
  *   허브 → 드라이버  "ok <허브 id>" 또는 "denied"
  *   이후 양쪽 다     "<명령 16진 2자리> <내용 16진>"   (명령 번호·내용은 hub_uplink.h, Zigbee 와 같음)
  *   허브 → 드라이버  "ping" 30초마다(드라이버가 끊김을 알아채게)
- * 토큰(페어링): 저장된 토큰이 하나도 없으면 처음 붙는 드라이버를 믿고 저장한다(첫 설치).
- *   그 뒤 새 드라이버는 버튼을 짧게 누른 뒤 3분 안에만 등록된다. 최대 4개.
+ * 토큰(페어링): 새 드라이버는 허브 버튼을 짧게 누른 뒤 3분 안에만 등록된다(첫 설치도 같음 — 집 LAN 의 아무 기기나
+ *   먼저 붙어 등록되지 않게). 최대 4개, 꽉 차면 가장 오래 전에 등록한 것부터 바꾼다.
+ * 인증 전 연결은 동시에 2개까지, 5초 안에 hello 가 없으면 끊는다. 보내기는 기다리지 않는다(읽지 않는 상대는 끊음).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,9 @@ static SemaphoreHandle_t s_lock;
 static int s_clients[MAX_CLIENTS] = { -1, -1 };     /* 인증된 소켓 */
 static char s_tokens[MAX_TOKENS][TOKEN_LEN + 1];
 static int64_t s_pair_until_us;
+static int s_next;                                   /* 꽉 찼을 때 다음에 바꿀 칸(가장 오래된 것) */
+static int s_preauth;                                /* 인증 전 연결 수 */
+#define MAX_PREAUTH  2
 
 /* ---------------------------------------------------------------- 토큰 */
 
@@ -54,25 +58,48 @@ static void tokens_load(void)
     for (int i = 0; i < MAX_TOKENS; i++) {
         char key[4] = { 't', (char)('0' + i), 0 };
         size_t n = TOKEN_LEN + 1;
-        if (hs_get_str(h, "lan", key, s_tokens[i], &n) != ESP_OK) {
+        esp_err_t e = hs_get_str(h, "lan", key, s_tokens[i], &n);
+        if (e != ESP_OK) {
             s_tokens[i][0] = 0;
+            if (e != ESP_ERR_NVS_NOT_FOUND) {
+                ESP_LOGE(TAG, "토큰 %d 읽기 실패(%s) — 그 드라이버는 다시 페어링 필요", i, esp_err_to_name(e));
+            }
         }
     }
+    uint8_t nx = 0;
+    nvs_get_u8(h, "nx", &nx);
+    s_next = nx % MAX_TOKENS;
     nvs_close(h);
 }
 
-static void tokens_save(void)
+static esp_err_t tokens_save(void)
 {
     nvs_handle_t h;
-    if (nvs_open("lan", NVS_READWRITE, &h) != ESP_OK) {
-        return;
+    esp_err_t e = nvs_open("lan", NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
     }
-    for (int i = 0; i < MAX_TOKENS; i++) {
+    for (int i = 0; e == ESP_OK && i < MAX_TOKENS; i++) {
         char key[4] = { 't', (char)('0' + i), 0 };
-        hs_set_str(h, key, s_tokens[i]);
+        e = hs_set_str(h, key, s_tokens[i]);
     }
-    nvs_commit(h);
+    if (e == ESP_OK) {
+        e = nvs_set_u8(h, "nx", (uint8_t)s_next);
+    }
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
     nvs_close(h);
+    return e;
+}
+
+static bool same_token(const char *a, const char *b)   /* 길이 고정(32) — 시간이 내용에 따라 달라지지 않게 */
+{
+    uint8_t d = 0;
+    for (int i = 0; i < TOKEN_LEN; i++) {
+        d |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return d == 0;
 }
 
 static bool token_ok(const char *t)
@@ -88,32 +115,38 @@ static bool token_ok(const char *t)
     return true;
 }
 
-/* 아는 토큰이면 true. 모르는 토큰은 '첫 설치' 이거나 페어링 창이 열려 있을 때만 등록 */
+/* 아는 토큰이면 true. 모르는 토큰은 페어링 창(버튼 짧게 → 3분)이 열려 있을 때만 등록 */
 static bool token_accept(const char *t)
 {
-    bool empty = true, ok = false;
+    bool ok = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int i = 0; i < MAX_TOKENS; i++) {
-        if (s_tokens[i][0]) {
-            empty = false;
-            if (!strcmp(s_tokens[i], t)) {
-                ok = true;
-            }
+        if (s_tokens[i][0] && same_token(s_tokens[i], t)) {
+            ok = true;
         }
     }
-    if (!ok && (empty || esp_timer_get_time() < s_pair_until_us)) {
-        int slot = 0;
+    if (!ok && esp_timer_get_time() < s_pair_until_us) {
+        int slot = -1;
         for (int i = 0; i < MAX_TOKENS; i++) {
             if (!s_tokens[i][0]) {
                 slot = i;
                 break;
             }
-            slot = (i + 1) % MAX_TOKENS;                 /* 꽉 차면 가장 오래된(0번)부터 덮는다 */
         }
+        if (slot < 0) {                              /* 꽉 참: 가장 오래된 칸부터 돌아가며 */
+            slot = s_next;
+            s_next = (s_next + 1) % MAX_TOKENS;
+        }
+        char old[TOKEN_LEN + 1];
+        strcpy(old, s_tokens[slot]);
         strcpy(s_tokens[slot], t);
-        tokens_save();
-        ok = true;
-        ESP_LOGI(TAG, "새 드라이버 등록(%s)", empty ? "첫 설치" : "페어링");
+        if (tokens_save() == ESP_OK) {
+            ok = true;
+            ESP_LOGI(TAG, "새 드라이버 등록(칸 %d)", slot);
+        } else {
+            strcpy(s_tokens[slot], old);             /* 저장 못 하면 등록하지 않는다(재부팅 뒤 사라지지 않게) */
+            ESP_LOGE(TAG, "새 드라이버 토큰 저장 실패");
+        }
     }
     xSemaphoreGive(s_lock);
     return ok;
@@ -127,9 +160,10 @@ void hub_lan_pairing_open(int seconds)
 
 /* ---------------------------------------------------------------- 보내기 */
 
+/* 기다리지 않고 보낸다: 상대가 읽지 않아 버퍼가 찼으면 그 연결을 끊는다(다른 통로·Zigbee 전송이 멈추지 않게) */
 static void send_line(int fd, const char *line, int n)
 {
-    if (send(fd, line, n, 0) != n) {
+    if (send(fd, line, n, MSG_DONTWAIT) != n) {
         shutdown(fd, SHUT_RDWR);                      /* 받는 태스크가 정리한다 */
     }
 }
@@ -175,7 +209,7 @@ static void handle_line(char *line)
         buf[n++] = (char)(hexval(hx[0]) * 16 + hexval(hx[1]));
     }
     if (cmd == HUB_RK_CMD_REQUEST && n > 0) {
-        hub_uplink_on_request(buf, n);
+        hub_uplink_on_request(HUB_UPLINK_LAN, buf, n);
     }
 }
 
@@ -184,18 +218,18 @@ static void client_task(void *arg)
     int fd = (int)(intptr_t)arg;
     char rx[512];
     int len = 0, slot = -1;
-    bool authed = false;
-    struct timeval tv = { .tv_sec = 5 };              /* hello 는 5초 안에 */
+    bool authed = false, pre = true;                  /* pre = 인증 전 연결 수에 들어가 있음 */
+    struct timeval tv = { .tv_sec = 1 };              /* 인증 전엔 1초마다 깨어 5초 기한을 본다 */
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    int64_t last_ping = esp_timer_get_time();
+    int64_t t0 = esp_timer_get_time(), last_ping = t0;
 
     for (;;) {
-        int r = recv(fd, rx + len, sizeof(rx) - 1 - len, 0);
-        if (r == 0 || (r < 0 && (errno != EAGAIN && errno != EWOULDBLOCK))) {
+        if (!authed && esp_timer_get_time() - t0 > 5LL * 1000000) {   /* 조금씩 흘려 보내도 5초면 끝 */
+            ESP_LOGW(TAG, "5초 안에 hello 없음 — 끊음");
             break;
         }
-        if (r < 0 && !authed) {
-            ESP_LOGW(TAG, "hello 없음 — 끊음");
+        int r = recv(fd, rx + len, sizeof(rx) - 1 - len, 0);
+        if (r == 0 || (r < 0 && (errno != EAGAIN && errno != EWOULDBLOCK))) {
             break;
         }
         if (r > 0) {
@@ -228,11 +262,16 @@ static void client_task(void *arg)
                             goto out;
                         }
                         authed = true;
+                        xSemaphoreTake(s_lock, portMAX_DELAY);
+                        s_preauth--;
+                        pre = false;
+                        xSemaphoreGive(s_lock);
                         tv.tv_sec = 30;                  /* 이후엔 30초마다 깨어 ping */
                         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                         ESP_LOGI(TAG, "드라이버 연결됨");
-                        hub_uplink_on_request("refresh", 7);   /* 지금 상태를 곧바로 */
+                        hub_uplink_on_request(HUB_UPLINK_LAN, "refresh", 7);   /* 지금 상태를 곧바로 */
                     } else {
+                        vTaskDelay(pdMS_TO_TICKS(1000));   /* 토큰 맞히기 늦추기 */
                         send_line(fd, "denied\n", 7);
                         ESP_LOGW(TAG, "토큰 거절(페어링하려면 버튼 짧게)");
                         goto out;
@@ -243,7 +282,10 @@ static void client_task(void *arg)
                 len -= (nl + 1 - rx);
                 memmove(rx, nl + 1, len + 1);
             }
-            if (len >= (int)sizeof(rx) - 1) {          /* 너무 긴 줄: 버림 */
+            if (len >= (int)sizeof(rx) - 1) {          /* 너무 긴 줄: 인증 전이면 끊고, 뒤면 버림 */
+                if (!authed) {
+                    break;
+                }
                 len = 0;
             }
         }
@@ -258,6 +300,9 @@ out:
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (slot >= 0) {
         s_clients[slot] = -1;
+    }
+    if (pre) {
+        s_preauth--;
     }
     xSemaphoreGive(s_lock);
     close(fd);
@@ -286,9 +331,23 @@ static void server_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        bool room = s_preauth < MAX_PREAUTH;
+        if (room) {
+            s_preauth++;
+        }
+        xSemaphoreGive(s_lock);
+        if (!room) {                                  /* 인증 전 연결이 이미 많음 — 소켓 고갈 막기 */
+            close(fd);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
         int ka = 1;
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
         if (xTaskCreate(client_task, "hub_lan_c", 4096, (void *)(intptr_t)fd, 4, NULL) != pdPASS) {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_preauth--;
+            xSemaphoreGive(s_lock);
             close(fd);
         }
     }

@@ -28,7 +28,13 @@ static ezb_zcl_status_t cmd_handler(const ezb_zcl_cmd_hdr_t *h, const uint8_t *p
         return EZB_ZCL_STATUS_UNSUP_CMD;
     }
     if (h->cmd_id == HUB_RK_CMD_REQUEST) {
-        hub_uplink_on_request((const char *)payload, len);
+        /* 명령은 SmartThings 허브(코디네이터, 0x0000)에서만 받는다 — 같은 망의 다른 Zigbee 기기가 보낸 것은 버림 */
+        if (h->src_addr.addr_mode != EZB_ADDR_MODE_SHORT || h->src_addr.u.short_addr != 0x0000) {
+            ESP_LOGW(TAG, "코디네이터가 아닌 곳(모드 %d, 0x%04x)의 명령 버림", h->src_addr.addr_mode,
+                     h->src_addr.addr_mode == EZB_ADDR_MODE_SHORT ? h->src_addr.u.short_addr : 0xffff);
+            return EZB_ZCL_STATUS_NOT_AUTHORIZED;
+        }
+        hub_uplink_on_request(HUB_UPLINK_ZIGBEE, (const char *)payload, len);
         return EZB_ZCL_STATUS_SUCCESS;
     }
     return EZB_ZCL_STATUS_UNSUP_CMD;

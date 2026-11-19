@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 /*
  * hub_uplink -- 허브 ↔ 스마트홈 플랫폼(SmartThings) 통로.
@@ -16,7 +17,7 @@
 #define HUB_UPLINK_ZIGBEE  0x01
 #define HUB_UPLINK_LAN     0x02
 #define HUB_UPLINK_MATTER  0x04
-#define HUB_UPLINK_DEFAULT (HUB_UPLINK_ZIGBEE | HUB_UPLINK_LAN)
+#define HUB_UPLINK_DEFAULT HUB_UPLINK_ZIGBEE   /* LAN(TCP 8484)은 고를 때만 연다 */
 
 /* 플랫폼 → 허브 */
 #define HUB_RK_CMD_REQUEST  0x00    /* 명령 텍스트: "f06 b1=1" / "f09 a0=7,b1=1,d4=10" / "refresh", 여러 개는 ";" */
@@ -32,7 +33,7 @@
 
 void hub_uplink_load(void);                    /* NVS 에서 고른 통로 읽기 */
 uint8_t hub_uplink_mask(void);
-void hub_uplink_set_mask(uint8_t mask);        /* 저장 + 즉시 적용 */
+esp_err_t hub_uplink_set_mask(uint8_t mask);   /* 저장(성공해야 바꿈). 바뀌면 관리 화면이 재시작해 적용 */
 
 void hub_uplink_render(char *out, size_t cap);              /* 관리 화면: 연결 방식 고르기 */
 bool hub_uplink_apply(const char *form, char *msg, size_t len);  /* POST /admin/transport */
@@ -43,4 +44,4 @@ void hub_uplink_send(uint8_t cmd, const uint8_t *data, uint16_t n);
 void hub_uplink_send_to(uint8_t uplink, uint8_t cmd, const uint8_t *data, uint16_t n);
 
 /* 어느 통로든 플랫폼에서 요청이 오면 */
-void hub_uplink_on_request(const char *text, int len);
+void hub_uplink_on_request(uint8_t from, const char *text, int len);   /* from = 받은 통로(꺼진 통로면 버림) */
