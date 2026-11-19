@@ -90,6 +90,7 @@ def run(cfg, gate_test=False):
             logger=log,
             forward=tuple(dns_cfg["forward"]) if dns_cfg.get("forward") else None,
             catch_all=dns_cfg.get("catch_all", False),
+            only_src=dns_cfg.get("only_src"),
         )
         dns.open(dns_cfg.get("port", 53))
 

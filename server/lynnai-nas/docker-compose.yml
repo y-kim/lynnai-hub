@@ -1,0 +1,23 @@
+# lynnai-nas: NAS 모드. DNS(:53)·MQTT(:8883)가 집 LAN 에서 보여야 하고, 린나이 기기의
+# '진짜 출발지 IP'로 걸러내야 하므로 host 네트워크로 띄운다(NAS 에서 가장 간단).
+# 빌드 컨텍스트는 레포 루트(standalone/ 을 담기 위해): docker compose 를 레포 루트에서 실행하거나 아래처럼.
+services:
+  lynnai-nas:
+    build:
+      context: ../..            # 레포 루트 (lynnai-hub/)
+      dockerfile: server/lynnai-nas/Dockerfile
+    container_name: lynnai-nas
+    restart: unless-stopped
+    network_mode: host          # :53/:8883 를 LAN 에 직접. 출발지 IP 보존(only_src 필터)
+    cap_add:
+      - NET_BIND_SERVICE        # 53 번(1024 미만) 바인드
+    environment:
+      - MODE=${MODE:-proxy}      # proxy = ESP32 허브와 동일(클라우드 중계, 앱 유지) / standalone = 클라우드 대신
+      - NAS_IP=${NAS_IP:?NAS_IP 를 .env 에}        # 이 NAS 의 LAN 주소
+      - ONLY_SRC=${RINNAI_IPS:-}                   # 보일러/각방 IP(쉼표). 공유기에서 고정 권장
+      - HIJACK_NAMES=rkiot.net
+      - FORWARD=${FORWARD:-}                       # 비우면 기본 게이트웨이(공유기), none 이면 완전독립
+      - UPSTREAM_IP=${UPSTREAM_IP:-3.38.86.244}    # 진짜 린나이 클라우드(IP, proxy 모드)
+      - DEBUG_MQTT=${DEBUG_MQTT:-}                 # 1이면 복호화 payload 로그(비밀값 포함)
+    volumes:
+      - ./data:/data

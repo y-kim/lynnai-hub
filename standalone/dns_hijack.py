@@ -47,13 +47,15 @@ def _build_answer(query, ip):
 
 class DnsHijack:
     def __init__(self, listen_ip, answer_ip, hijack_names, logger=None,
-                 forward=None, catch_all=False):
+                 forward=None, catch_all=False, only_src=None):
         """
         listen_ip   : 바인드할 IP (AP측 IP, 예 192.168.50.1)
         answer_ip   : 하이재킹 대상에 답할 IP (대개 listen_ip와 동일)
         hijack_names: ['rkiot.net', 'www.rkiot.net', ...]  (부분일치)
         forward     : (ip, port) 업스트림 DNS. None이면 포워딩 안 함(standalone).
         catch_all   : True면 하이재킹 외 도메인도 answer_ip로 답(캡티브 포털식).
+        only_src    : 이 출발지 IP 목록에서 온 질의만 하이재킹(=등록된 린나이 기기).
+                      None/빈 목록이면 제한 없음. 목록 밖 기기의 질의는 forward 로 그대로 넘긴다.
         """
         self.listen_ip = listen_ip
         self.answer_ip = answer_ip
@@ -61,7 +63,21 @@ class DnsHijack:
         self._log = logger or (lambda *a: None)
         self.forward = forward
         self.catch_all = catch_all
+        self.only_src = set(only_src or [])
         self.sock = None
+
+    def _forward(self, data, addr, qname):
+        if not self.forward:
+            return                       # standalone(외부차단): 묵살
+        try:
+            up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            up.settimeout(3)
+            up.sendto(data, self.forward)
+            resp, _ = up.recvfrom(512)
+            up.close()
+            self.sock.sendto(resp, addr)
+        except Exception as e:
+            self._log("[dns] forward fail %s: %s" % (qname, e))
 
     def open(self, port=53):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -84,19 +100,15 @@ class DnsHijack:
             qname, _ = _parse_qname(data, 12)
         except Exception:
             return
+        src = addr[0]
+        # 등록된 린나이 기기 목록이 있으면, 목록 밖 기기의 질의는 건드리지 않고 그대로 넘긴다.
+        if self.only_src and src not in self.only_src:
+            self._forward(data, addr, qname)
+            return
         if self._is_hijacked(qname):
-            self._log("[dns] HIJACK %s -> %s  (from %s)" % (qname, self.answer_ip, addr[0]))
+            self._log("[dns] HIJACK %s -> %s  (from %s)" % (qname, self.answer_ip, src))
             self.sock.sendto(_build_answer(data, self.answer_ip), addr)
         elif self.catch_all:
             self.sock.sendto(_build_answer(data, self.answer_ip), addr)
-        elif self.forward:
-            try:
-                up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                up.settimeout(3)
-                up.sendto(data, self.forward)
-                resp, _ = up.recvfrom(512)
-                up.close()
-                self.sock.sendto(resp, addr)
-            except Exception as e:
-                self._log("[dns] forward fail %s: %s" % (qname, e))
-        # forward 없고 catch_all 아니면: 묵살 (standalone에서 외부차단)
+        else:
+            self._forward(data, addr, qname)   # forward 없으면 묵살(standalone 외부차단)
