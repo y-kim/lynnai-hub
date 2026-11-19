@@ -26,5 +26,5 @@ uint8_t hub_plugins_mask(void);                 /* 켜진 플러그인 비트 */
 
 /* 관리 화면 */
 void hub_plugins_render(char *out, size_t cap);  /* 카드들(HTML) */
-/* 폼 적용: op = "save" | "add" | "del". 성공이면 true(호출부가 hub_sensors_reload), 실패면 err 에 이유 */
+/* 폼 적용: op = "save"(설정+노출) | "add" | "del". 성공이면 true(호출부가 hub_sensors_reload), 실패면 err 에 이유 */
 bool hub_plugins_apply(const char *form, char *err, size_t errlen);

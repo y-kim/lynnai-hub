@@ -156,8 +156,9 @@ static void cat(char *o, size_t cap, const char *s) { strlcat(o, s, cap); }
 
 void hub_plugins_render(char *o, size_t cap)
 {
-    char t[384];
-    cat(o, cap, "<h2>설치된 플러그인</h2><p class=muted>숨기기 = 노출할 곳을 모두 끔(센서는 계속 읽음). 삭제 = 플러그인 제거.</p>");
+    char t[768];
+    cat(o, cap, "<h2>설치된 플러그인</h2><p class=muted>노출을 모두 끄면 플랫폼에서 숨김(센서는 계속 읽음). "
+                "삭제 = 플러그인 제거.</p>");
     bool any = false;
     for (int i = 0; i < NPLUG; i++) {
         const plugin_t *p = &PLUGINS[i];
@@ -165,8 +166,10 @@ void hub_plugins_render(char *o, size_t cap)
             continue;
         }
         any = true;
-        snprintf(t, sizeof(t), "<div class=card><h3>%s</h3><p class=muted>%s</p>"
-                 "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->name, p->help, p->id);
+        snprintf(t, sizeof(t), "<div class=card><h3>%s</h3><p class=muted>%s</p>", p->name, p->help);
+        cat(o, cap, t);
+        /* 설정 + 노출을 한 폼, 저장 하나로 */
+        snprintf(t, sizeof(t), "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->id);
         cat(o, cap, t);
         for (int f = 0; f < p->nfields; f++) {
             snprintf(t, sizeof(t), "<label>%s</label><input name=%s type=text inputmode=numeric pattern=\"[0-9]*\" "
@@ -174,11 +177,12 @@ void hub_plugins_render(char *o, size_t cap)
                      p->fields[f].label, p->fields[f].key, p->fields[f].min, p->fields[f].max, s_val[i][f]);
             cat(o, cap, t);
         }
-        cat(o, cap, "<button name=op value=save class=sv>설정 저장</button>"
+        cat(o, cap, "<div class=row><span>노출</span><span>");
+        hub_expose_render_bit(o, cap, p->expose_bit);
+        cat(o, cap, "</span></div><button name=op value=save class=sv>저장</button>"
                     "<button name=op value=del class=ghost onclick=\"return confirm('플러그인을 삭제할까요? 센서를 더 이상 읽지 않고, 모든 플랫폼에서 기기가 빠집니다.')\">삭제</button>"
                     "</form>");
-        hub_expose_render_bit(o, cap, p->expose_bit);
-        if (s_act_fn[i]) {
+        if (s_act_fn[i]) {                          /* 즉시 동작(예: 계량기 숫자 맞추기)은 따로 */
             snprintf(t, sizeof(t), "<form method=post action=/admin/plugin-action><input type=hidden name=id value=%s>"
                      "<label>%s</label><input name=value inputmode=decimal placeholder=\"%s\">"
                      "<button class=ghost>%s</button></form>", p->id, s_act_label[i], s_act_hint[i], s_act_label[i]);
@@ -314,6 +318,9 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
     nvs_close(h);
     s_on[idx] = on;
     memcpy(s_val[idx], vals, sizeof(vals));
+    if (!strcmp(op, "save")) {
+        hub_expose_apply_bit(form, p->expose_bit);   /* 같은 폼의 노출 체크(통로별) */
+    }
     ESP_LOGI(TAG, "%s %s", p->name, !on ? "삭제" : !strcmp(op, "add") ? "추가" : "저장");
     return true;
 }

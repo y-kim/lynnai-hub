@@ -301,5 +301,31 @@ state(6, "a1b2c3", F06)
 local st2 = last_emit("ba1b2c3", "connectbook02461.boilerStatus", "status") or ""
 check(not st2:find("예약", 1, true), "예약 꺼짐 → 상태에 예약 표시 없음")
 
+print("[11] 노출: 종류별 컨트롤 마스크 + 기기·방별 숨김(0x06 = u32 + [종류][mac3][숨김]*n)")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", F09)
+check(created["ba1b2c3"] and created["td4e5f6_z1"] and created["td4e5f6_z3"], "처음엔 다 보임")
+local function expose(mask, entries)
+  local b = { string.pack("<I4", mask) }
+  for _, e in ipairs(entries) do b[#b + 1] = string.char(e[1]) .. mac3(e[2]) .. string.char(e[3]) end
+  msg(CMD.EXPOSE, table.concat(b))
+end
+-- 방 설정온도(9)·외출(10) 끔, 보일러 조절기 숨김(bit0), 거실(z3 → bit3) 숨김
+expose(0x7FFFFFFF & ~(1 << 9) & ~(1 << 10), { { 6, "a1b2c3", 0x01 }, { 9, "d4e5f6", 0x08 } })
+check(deleted["ba1b2c3"], "보일러 조절기 숨김 → 보일러 기기 빠짐")
+check(deleted["td4e5f6_z3"], "거실(z3) 숨김 → 그 방 기기만 빠짐")
+check(driver._children["td4e5f6_z1"] ~= nil, "방1 은 그대로")
+local cz = driver._children["td4e5f6_z1"]._caps or {}
+check(cz.main and cz.main["switch"] and not cz.main["thermostatHeatingSetpoint"] and not cz.outing,
+  "방 컨트롤: 켜기만 보임(설정온도·외출 숨김)")
+state(9, "d4e5f6", F09)
+check(driver._children["td4e5f6_z3"] == nil, "상태가 다시 와도 숨긴 거실은 안 생김")
+check(hub._fields["expose2"] and #hub._fields["expose2"] == 8 + 20, "노출을 저장(재시작 대비)")
+-- 다시 보이게
+created = {}
+expose(0x7FFFFFFF, {})
+check(created["ba1b2c3"] and created["td4e5f6_z3"], "숨김 풀면 보일러·거실 다시 생김")
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

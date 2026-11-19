@@ -20,13 +20,13 @@ local KIND_F06, KIND_F09 = 6, 9
 -- 기기가 리포트하는 슬롯만 보인다(decode_rooms 가 거른다). 이름은 슬롯(a0)대로 방1~방6/거실.
 -- 슬롯 간격 7바이트(stat=base, cur=base+3, set=base+4). z1~z3 은 기존 그대로(기기 안 바뀌게).
 local ZONES = {
-  z1 = { label = "방1", stat = 0,  cur = 3,  set = 4,  a0 = 1, max = 30, bit = 8 },
-  z2 = { label = "방2", stat = 7,  cur = 10, set = 11, a0 = 2, max = 30, bit = 11 },
-  z3 = { label = "거실", stat = 42, cur = 45, set = 46, a0 = 7, max = 30, bit = 14 },
-  z4 = { label = "방3", stat = 14, cur = 17, set = 18, a0 = 3, max = 30, bit = 17 },
-  z5 = { label = "방4", stat = 21, cur = 24, set = 25, a0 = 4, max = 30, bit = 20 },
-  z6 = { label = "방5", stat = 28, cur = 31, set = 32, a0 = 5, max = 30, bit = 23 },
-  z7 = { label = "방6", stat = 35, cur = 38, set = 39, a0 = 6, max = 30, bit = 26 },
+  z1 = { label = "방1", stat = 0,  cur = 3,  set = 4,  a0 = 1, max = 30, n = 1 },
+  z2 = { label = "방2", stat = 7,  cur = 10, set = 11, a0 = 2, max = 30, n = 2 },
+  z3 = { label = "거실", stat = 42, cur = 45, set = 46, a0 = 7, max = 30, n = 3 },
+  z4 = { label = "방3", stat = 14, cur = 17, set = 18, a0 = 3, max = 30, n = 4 },
+  z5 = { label = "방4", stat = 21, cur = 24, set = 25, a0 = 4, max = 30, n = 5 },
+  z6 = { label = "방5", stat = 28, cur = 31, set = 32, a0 = 5, max = 30, n = 6 },
+  z7 = { label = "방6", stat = 35, cur = 38, set = 39, a0 = 6, max = 30, n = 7 },
 }
 local ZONE_ORDER = { "z1", "z2", "z3", "z4", "z5", "z6", "z7" }
 
@@ -64,16 +64,37 @@ local function hub_state(parent)
   return hubs[parent.id]
 end
 
--- 노출 비트(펌웨어 hub_expose.h). 보일러/존 '종류'별 한 벌(여러 대면 모두에 같이 적용 — 1단계).
-local ALL_VISIBLE = 0x7FFFFFFF   -- 비트 0~30(보일러 + 방7 + 온습도 + 가스). 펌웨어 ALL_BITS 와 같게
-local BIT = { boiler = 0, power = 1, heat_mode = 2, heat_type = 3, heat_temp = 4, hw = 5, hw_temp = 6, preheat = 7,
-  room = 29, gas = 30 }   -- 방1~거실이 비트 8~28 을 쓰므로 온습도·가스는 29·30
-local function vis_mask(parent)
-  local s = hub_state(parent)
-  if not s.vis then s.vis = parent:get_field("expose") or ALL_VISIBLE end
-  return s.vis
+-- 노출(펌웨어 hub_expose.h). 0x06 = [u32 마스크] + ([종류][MAC끝3][숨김 비트])*n
+--   마스크: 종류별 컨트롤(보일러 조절기 1~7, 방 8~10) + 플러그인 기기(29 온습도, 30 가스). 그 종류 모든 기기에 적용.
+--   숨김 비트(기기별): bit0 = 기기 자신(보일러 조절기), bit1~7 = 온도 조절기의 방 z1~z7(ZONES[id].n)
+local ALL_VISIBLE = 0x7FFFFFFF   -- 펌웨어 ALL_BITS 와 같게
+local BIT = { power = 1, heat_mode = 2, heat_type = 3, heat_temp = 4, hw = 5, hw_temp = 6, preheat = 7,
+  room_on = 8, room_set = 9, room_out = 10, room = 29, gas = 30 }
+local function parse_expose(s, raw)
+  s.vis = string.unpack("<I4", raw)
+  s.hidden = {}
+  for i = 5, #raw - 4, 5 do
+    s.hidden[raw:byte(i) .. ":" .. string.format("%02x%02x%02x", raw:byte(i + 1, i + 3))] = raw:byte(i + 4)
+  end
 end
-local function visible(parent, bit) return ((vis_mask(parent) >> bit) & 1) == 1 end
+local function vis_state(parent)
+  local s = hub_state(parent)
+  if not s.vis then
+    local hex = parent:get_field("expose2")          -- 저장해 둔 마지막 0x06(16진) — 재시작 직후에도 같은 노출
+    if type(hex) == "string" and #hex >= 8 then
+      parse_expose(s, (hex:gsub("..", function(h) return string.char(tonumber(h, 16)) end)))
+    else
+      s.vis, s.hidden = ALL_VISIBLE, {}
+    end
+  end
+  return s
+end
+local function visible(parent, bit) return ((vis_state(parent).vis >> bit) & 1) == 1 end
+-- 이 기기(sub=0) / 이 방(sub=ZONES[id].n) 을 보이나
+local function shown(parent, kind, mac, sub)
+  local h = vis_state(parent).hidden[kind .. ":" .. mac] or 0
+  return ((h >> sub) & 1) == 0
+end
 
 local function is_child(device) return device.parent_assigned_child_key ~= nil end
 local function parent_of(device) return is_child(device) and device:get_parent_device() or device end
@@ -315,7 +336,7 @@ local function refresh_all(parent)
   for mac in pairs(s.thermos) do
     for _, id in ipairs(ZONE_ORDER) do refresh_zone(parent, mac, id) end
     local vchild = parent:get_child_by_parent_assigned_key(vbkey(mac))
-    if is_standalone(parent, mac) and visible(parent, BIT.boiler) then
+    if is_standalone(parent, mac) then
       create_vboiler(parent, mac)
       refresh_vboiler(parent, mac)
     elseif vchild then
@@ -380,8 +401,10 @@ local function wanted_caps(parent, key)
     end
     return "lynnai-boiler", out
   elseif kind == "zone" then
-    local z = ZONES[id]
-    return "lynnai-zone", { { "main", pick({ { z.bit + 1, "switch" }, { z.bit + 2, "thermostatHeatingSetpoint" } }) } }
+    local out = { { "main", pick({ { BIT.room_on, "switch" }, { BIT.room_set, "thermostatHeatingSetpoint" } }) } }
+    local outing = pick({ { BIT.room_out, "switch" } })
+    if #outing > 0 then out[#out + 1] = { "outing", outing } end
+    return "lynnai-zone", out
   end
 end
 
@@ -412,14 +435,14 @@ local function on_state(parent, b)
   s.online[kind .. ":" .. mac] = true
   if kind == KIND_F06 then
     s.boilers[mac] = decode_boiler(blob)
-    if visible(parent, BIT.boiler) then create_boiler(parent, mac) end
+    if shown(parent, KIND_F06, mac, 0) then create_boiler(parent, mac) end
     refresh_boiler(parent, mac)
   elseif kind == KIND_F09 then
     s.thermos[mac] = decode_rooms(blob)
     s.vboilers = s.vboilers or {}
     s.vboilers[mac] = decode_vboiler(blob, s.thermos[mac])
     for _, id in ipairs(ZONE_ORDER) do
-      if s.thermos[mac][id] and visible(parent, ZONES[id].bit) then   -- 기기가 리포트한 방만 생성
+      if s.thermos[mac][id] and shown(parent, KIND_F09, mac, ZONES[id].n) then   -- 기기가 리포트한 방만 생성
         create_zone(parent, mac, id)
       else                                                            -- 없는 방/숨긴 방의 옛 기기는 정리
         local c = parent:get_child_by_parent_assigned_key(zkey(mac, id))
@@ -427,7 +450,7 @@ local function on_state(parent, b)
       end
       refresh_zone(parent, mac, id)
     end
-    if is_standalone(parent, mac) and visible(parent, BIT.boiler) then
+    if is_standalone(parent, mac) then
       create_vboiler(parent, mac)
       refresh_vboiler(parent, mac)
     end
@@ -510,19 +533,22 @@ local function on_plugins(parent, b)
   end
 end
 
--- 이 통로에 무엇을 보일지(관리 화면 '노출'). 아는 기기 전부에 같은 비트 적용(1단계).
+-- 이 통로에 무엇을 보일지(관리 화면 '노출'). 종류별 컨트롤 마스크 + 기기·방별 숨김.
 local function on_expose(parent, b)
-  local m = string.unpack("<I4", b)
+  if #b < 4 then return end
   local s = hub_state(parent)
-  local changed = s.vis ~= m
-  s.vis = m
+  local hex = (b:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+  local changed = s.expose_hex ~= hex
+  s.expose_hex = hex
+  parse_expose(s, b)
   if changed then
-    parent:set_field("expose", m, { persist = true })
-    log.info(string.format("노출 항목 %05x", m))
+    parent:set_field("expose2", hex, { persist = true })
+    log.info("노출 바뀜: " .. hex)
   end
-  local function sync(key, bit, has_data, create)
+  -- show = 보여야 하나(true/false)
+  local function sync(key, show, has_data, create)
     local child = parent:get_child_by_parent_assigned_key(key)
-    if not visible(parent, bit) then
+    if not show then
       if child then delete_child(child) end
     elseif not child then
       if has_data then create() end
@@ -531,15 +557,16 @@ local function on_expose(parent, b)
     end
   end
   for mac in pairs(s.boilers) do
-    sync(bkey(mac), BIT.boiler, true, function() create_boiler(parent, mac) end)
+    sync(bkey(mac), shown(parent, KIND_F06, mac, 0), true, function() create_boiler(parent, mac) end)
   end
   for mac in pairs(s.thermos) do
     for _, id in ipairs(ZONE_ORDER) do
-      sync(zkey(mac, id), ZONES[id].bit, s.thermos[mac][id] ~= nil, function() create_zone(parent, mac, id) end)
+      sync(zkey(mac, id), shown(parent, KIND_F09, mac, ZONES[id].n), s.thermos[mac][id] ~= nil,
+        function() create_zone(parent, mac, id) end)
     end
   end
-  sync(ROOM_KEY, BIT.room, s.room ~= nil, function() create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31") end)
-  sync(GAS_KEY, BIT.gas, s.gas ~= nil, function() create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter") end)
+  sync(ROOM_KEY, visible(parent, BIT.room), s.room ~= nil, function() create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31") end)
+  sync(GAS_KEY, visible(parent, BIT.gas), s.gas ~= nil, function() create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter") end)
   if changed then
     driver:call_with_delay(3, function()
       refresh_all(parent)

@@ -1,5 +1,5 @@
 /*
- * hub_expose.c -- 항목별 노출 통로. 설명·비트는 hub_expose.h.
+ * hub_expose.c -- 노출 통로. 설명·비트·전송 형식은 hub_expose.h.
  */
 #include <stdio.h>
 #include <string.h>
@@ -15,53 +15,50 @@
 
 static const char *TAG = "HUB_EXPOSE";
 
-/* 키 뒤 '2': 방 비트 배치가 바뀌어 옛 저장값은 뜻이 달라졌으므로 무시하고 전부 보임으로 시작 */
-static const char *const CH_KEY[EXPOSE_NCH] = { "zb2", "lan2", "mt2" };
+/* 키 '3': 노출 방식이 기기별+종류별로 바뀌어 옛 마스크(zb2/lan2/mt2)는 뜻이 달라 무시 → 전부 보임으로 시작 */
+static const char *const CH_KEY[EXPOSE_NCH] = { "zb3", "lan3", "mt3" };
+static const char *const HID_KEY[EXPOSE_NCH] = { "hzb", "hlan", "hmt" };
 static const char *const CH_NAME[EXPOSE_NCH] = { "Zigbee", "LAN", "Matter" };
 static const uint8_t CH_UPLINK[EXPOSE_NCH] = { HUB_UPLINK_ZIGBEE, HUB_UPLINK_LAN, HUB_UPLINK_MATTER };
 
-#define ALL_BITS 0x7FFFFFFFu   /* 비트 0~30 전부(보일러 8 + 방 7×3 + 온습도 + 가스) */
-static uint32_t s_mask[EXPOSE_NCH] = { ALL_BITS, ALL_BITS, ALL_BITS };
+#define ALL_BITS 0x7FFFFFFFu
+#define MAX_HID  8                      /* 기기 수(hub_rinnai MAX_DEV 6) + 여유 */
 
-/* 린나이 항목 표. group = 소속 기기 이름, label = 세부 컨트롤 이름(NULL 이면 '기기 노출' 행). */
+typedef struct {
+    uint8_t kind;
+    uint8_t mac[3];
+    uint8_t hid;                        /* bit0 기기 자신, bit1~7 방 z1~z7 */
+} hid_t;
+
+static uint32_t s_mask[EXPOSE_NCH] = { ALL_BITS, ALL_BITS, ALL_BITS };
+static hid_t s_hid[EXPOSE_NCH][MAX_HID];
+static int s_nhid[EXPOSE_NCH];
+
+const hub_room_t HUB_ROOMS[HUB_NROOMS] = {
+    { "방1", 0, 1 }, { "방2", 7, 2 }, { "방3", 14, 4 }, { "방4", 21, 5 },
+    { "방5", 28, 6 }, { "방6", 35, 7 }, { "거실", 42, 3 },
+};
+
+bool hub_room_present(const hub_dev_t *d, int i)
+{
+    int s = HUB_ROOMS[i].stat;
+    return d->kind == HUB_KIND_F09 && s + 3 < d->n && (d->blob[s] || d->blob[s + 3]);
+}
+
+/* 종류별 컨트롤 표 */
 typedef struct {
     int bit;
-    const char *group;
     const char *label;
-} item_t;
-
-static const item_t RINNAI[] = {
-    { 0, "보일러", NULL },
-    { 1, "보일러", "전원" },
-    { 2, "보일러", "난방 모드 (난방/외출/끄기)" },
-    { 3, "보일러", "난방 방식 (온돌/실내)" },
-    { 4, "보일러", "난방 온도" },
-    { 5, "보일러", "온수 켜기/끄기" },
-    { 6, "보일러", "온수 온도" },
-    { 7, "보일러", "온수 예열" },
-    { 8, "방1", NULL },
-    { 9, "방1", "켜기/끄기" },
-    { 10, "방1", "설정 온도" },
-    { 11, "방2", NULL },
-    { 12, "방2", "켜기/끄기" },
-    { 13, "방2", "설정 온도" },
-    { 17, "방3", NULL },
-    { 18, "방3", "켜기/끄기" },
-    { 19, "방3", "설정 온도" },
-    { 20, "방4", NULL },
-    { 21, "방4", "켜기/끄기" },
-    { 22, "방4", "설정 온도" },
-    { 23, "방5", NULL },
-    { 24, "방5", "켜기/끄기" },
-    { 25, "방5", "설정 온도" },
-    { 26, "방6", NULL },
-    { 27, "방6", "켜기/끄기" },
-    { 28, "방6", "설정 온도" },
-    { 14, "거실", NULL },
-    { 15, "거실", "켜기/끄기" },
-    { 16, "거실", "설정 온도" },
+} ctl_t;
+static const ctl_t BOILER_CTL[] = {
+    { 1, "전원" }, { 2, "난방 모드 (난방/외출/끄기)" }, { 3, "난방 방식 (온돌/실내)" }, { 4, "난방 온도" },
+    { 5, "온수 켜기/끄기" }, { 6, "온수 온도" }, { 7, "온수 예열" },
 };
-#define NRINNAI (int)(sizeof(RINNAI) / sizeof(RINNAI[0]))
+static const ctl_t ROOM_CTL[] = { { 8, "켜기/끄기" }, { 9, "설정 온도" }, { 10, "외출" } };
+#define NB (int)(sizeof(BOILER_CTL) / sizeof(BOILER_CTL[0]))
+#define NR (int)(sizeof(ROOM_CTL) / sizeof(ROOM_CTL[0]))
+
+/* ---------------------------------------------------------------- 저장 */
 
 void hub_expose_load(void)
 {
@@ -69,57 +66,97 @@ void hub_expose_load(void)
     if (nvs_open("expose", NVS_READWRITE, &h) == ESP_OK) {
         for (int c = 0; c < EXPOSE_NCH; c++) {
             hs_get_u32(h, "expose", CH_KEY[c], &s_mask[c]);
+            size_t n = sizeof(s_hid[c]);
+            if (hs_get_blob(h, "expose", HID_KEY[c], s_hid[c], &n) == ESP_OK && n % sizeof(hid_t) == 0) {
+                s_nhid[c] = (int)(n / sizeof(hid_t));
+            }
         }
         nvs_close(h);
     }
-    ESP_LOGI(TAG, "노출: Zigbee %05lx, LAN %05lx, Matter %05lx", (unsigned long)s_mask[0], (unsigned long)s_mask[1],
-             (unsigned long)s_mask[2]);
+    ESP_LOGI(TAG, "노출: Zigbee %08lx(숨김 %d), LAN %08lx(숨김 %d)", (unsigned long)s_mask[0], s_nhid[0],
+             (unsigned long)s_mask[1], s_nhid[1]);
 }
 
-uint32_t hub_expose_mask(int ch) { return ch >= 0 && ch < EXPOSE_NCH ? s_mask[ch] : 0; }
+static void save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("expose", NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    for (int c = 0; c < EXPOSE_NCH; c++) {
+        hs_set_u32(h, CH_KEY[c], s_mask[c]);
+        if (s_nhid[c]) {
+            hs_set_blob(h, HID_KEY[c], s_hid[c], s_nhid[c] * sizeof(hid_t));
+        } else {
+            hs_erase(h, HID_KEY[c]);
+        }
+    }
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static hid_t *hid_find(int c, uint8_t kind, const uint8_t mac3[3])
+{
+    for (int i = 0; i < s_nhid[c]; i++) {
+        if (s_hid[c][i].kind == kind && !memcmp(s_hid[c][i].mac, mac3, 3)) {
+            return &s_hid[c][i];
+        }
+    }
+    return NULL;
+}
+
+static uint8_t hid_get(int c, uint8_t kind, const uint8_t mac3[3])
+{
+    hid_t *e = hid_find(c, kind, mac3);
+    return e ? e->hid : 0;
+}
+
+/* 숨김 비트를 정한다(0 이 되면 항목을 빼서 목록을 짧게) */
+static void hid_set(int c, uint8_t kind, const uint8_t mac3[3], uint8_t hid)
+{
+    hid_t *e = hid_find(c, kind, mac3);
+    if (!e) {
+        if (!hid || s_nhid[c] >= MAX_HID) {
+            return;
+        }
+        e = &s_hid[c][s_nhid[c]++];
+        e->kind = kind;
+        memcpy(e->mac, mac3, 3);
+    }
+    e->hid = hid;
+    if (!hid) {
+        *e = s_hid[c][--s_nhid[c]];
+    }
+}
+
+void hub_expose_forget(uint8_t kind, const uint8_t mac3[3])
+{
+    for (int c = 0; c < EXPOSE_NCH; c++) {
+        hid_set(c, kind, mac3, 0);
+    }
+    save();
+}
 
 void hub_expose_send_all(void)
 {
     for (int c = 0; c < EXPOSE_NCH; c++) {
-        uint32_t m = s_mask[c];
-        hub_uplink_send_to(CH_UPLINK[c], HUB_RK_CMD_EXPOSE, (const uint8_t *)&m, sizeof(m));   /* 리틀엔디언 u32 */
+        uint8_t buf[4 + MAX_HID * 5];
+        memcpy(buf, &s_mask[c], 4);                           /* 리틀엔디언 u32 */
+        int n = 4;
+        for (int i = 0; i < s_nhid[c]; i++) {
+            buf[n++] = s_hid[c][i].kind;
+            memcpy(buf + n, s_hid[c][i].mac, 3);
+            n += 3;
+            buf[n++] = s_hid[c][i].hid;
+        }
+        hub_uplink_send_to(CH_UPLINK[c], HUB_RK_CMD_EXPOSE, buf, (uint16_t)n);
     }
 }
 
 /* ---------------------------------------------------------------- 화면 */
 
-/* 방 행은 온도 조절기가 실제로 리포트하는 슬롯만 보인다(stat·현재온도 다 0 = 그 슬롯에 방 없음, 드라이버와 같은 기준).
- * 보일러 행(슬롯 없음)은 늘 보인다. 화면과 저장이 같은 기준을 써야 숨은 방의 비트를 안 건드린다. */
-static int group_slot(const char *g)
-{
-    static const struct { const char *n; int s; } M[] = {
-        { "방1", 0 }, { "방2", 7 }, { "방3", 14 }, { "방4", 21 }, { "방5", 28 }, { "방6", 35 }, { "거실", 42 },
-    };
-    for (int i = 0; i < (int)(sizeof(M) / sizeof(M[0])); i++) {
-        if (!strcmp(g, M[i].n)) {
-            return M[i].s;
-        }
-    }
-    return -1;
-}
-
-static void presence(bool pres[NRINNAI])
-{
-    hub_dev_t d[6];
-    int n = hub_rinnai_snapshot(d, 6);
-    for (int i = 0; i < NRINNAI; i++) {
-        int s = group_slot(RINNAI[i].group);
-        pres[i] = s < 0;
-        for (int k = 0; s >= 0 && k < n && !pres[i]; k++) {
-            if (d[k].kind == HUB_KIND_F09 && s + 3 < d[k].n && (d[k].blob[s] || d[k].blob[s + 3])) {
-                pres[i] = true;
-            }
-        }
-    }
-}
-
-/* 사용하기로 한 통로(hub_uplink_mask)의 열만 보여 준다. */
-static void boxes(char *o, size_t cap, int bit)
+/* 사용하기로 한 통로(hub_uplink_mask)의 체크박스만. name 은 접두사 + "_<통로>" */
+static void boxes(char *o, size_t cap, const char *name, bool (*on)(int c, const void *ctx), const void *ctx)
 {
     char t[160];
     uint8_t active = hub_uplink_mask();
@@ -127,118 +164,155 @@ static void boxes(char *o, size_t cap, int bit)
         if (!(active & CH_UPLINK[c])) {
             continue;
         }
-        snprintf(t, sizeof(t), "<label class=chk><input type=checkbox name=b%d_%d%s> %s</label>", bit, c,
-                 (s_mask[c] >> bit) & 1 ? " checked" : "", CH_NAME[c]);
+        snprintf(t, sizeof(t), "<label class=chk><input type=checkbox name=%s_%d%s> %s</label>", name, c,
+                 on(c, ctx) ? " checked" : "", CH_NAME[c]);
         strlcat(o, t, cap);
     }
 }
 
-void hub_expose_render_rinnai(char *o, size_t cap)
+static bool bit_on(int c, const void *ctx) { return (s_mask[c] >> *(const int *)ctx) & 1; }
+
+typedef struct {
+    uint8_t kind;
+    const uint8_t *mac;
+    int sub;
+} dev_ctx_t;
+static bool dev_on(int c, const void *ctx)
 {
-    char t[200];
-    bool pres[NRINNAI];
-    presence(pres);
+    const dev_ctx_t *d = ctx;
+    return !((hid_get(c, d->kind, d->mac) >> d->sub) & 1);
+}
+
+static void ctl_rows(char *o, size_t cap, const ctl_t *list, int n)
+{
+    char t[160], name[12];
+    for (int i = 0; i < n; i++) {
+        snprintf(t, sizeof(t), "<div class=row><span>%s</span><span>", list[i].label);
+        strlcat(o, t, cap);
+        snprintf(name, sizeof(name), "b%d", list[i].bit);
+        boxes(o, cap, name, bit_on, &list[i].bit);
+        strlcat(o, "</span></div>", cap);
+    }
+}
+
+void hub_expose_render_types(char *o, size_t cap)
+{
     strlcat(o, "<h2>노출 설정</h2><div class=card><p class=muted>"
-               "<b>기기 노출</b>은 그 기기를 플랫폼(SmartThings 등)에 통째로 보일지, "
-               "<b>세부 노출</b>은 각 기기의 컨트롤을 하나씩 보일지입니다. 끄면 숨김(허브는 계속 중계·제어). "
-               "방은 온도 조절기가 알려 주는 방만 나옵니다.</p>"
-               "<form method=post action=/admin/expose><input type=hidden name=scope value=rinnai>", cap);
-    /* 1) 기기 노출: 기기 행(label == NULL) */
-    strlcat(o, "<h3 class=grp>기기 노출</h3>", cap);
-    for (int i = 0; i < NRINNAI; i++) {
-        if (RINNAI[i].label || !pres[i]) {
-            continue;
-        }
-        snprintf(t, sizeof(t), "<div class=row><span>%s</span><span>", RINNAI[i].group);
-        strlcat(o, t, cap);
-        boxes(o, cap, RINNAI[i].bit);
-        strlcat(o, "</span></div>", cap);
-    }
-    /* 2) 세부 노출: 컨트롤 행(기기별 소제목) */
-    strlcat(o, "<h3 class=grp>세부 노출</h3>", cap);
-    const char *cur = NULL;
-    for (int i = 0; i < NRINNAI; i++) {
-        if (!RINNAI[i].label || !pres[i]) {
-            continue;
-        }
-        if (!cur || strcmp(cur, RINNAI[i].group)) {
-            cur = RINNAI[i].group;
-            snprintf(t, sizeof(t), "<p class=muted style='margin:12px 0 2px'>%s</p>", cur);
-            strlcat(o, t, cap);
-        }
-        snprintf(t, sizeof(t), "<div class=row><span>%s</span><span>", RINNAI[i].label);
-        strlcat(o, t, cap);
-        boxes(o, cap, RINNAI[i].bit);
-        strlcat(o, "</span></div>", cap);
-    }
-    strlcat(o, "<button class=sv>노출 저장</button></form></div>", cap);
+               "기기 종류마다 플랫폼(SmartThings 등)에 보일 컨트롤을 고릅니다. 같은 종류의 모든 기기에 적용됩니다. "
+               "기기를 통째로 숨기는 건 위 '연결된 기기'에서 합니다. 끄면 숨김(허브는 계속 중계·제어).</p>"
+               "<form method=post action=/admin/expose>"
+               "<div class=grpbox><h3 class=grp>🔥 보일러 조절기</h3><p class='muted sub'>보일러 기기의 컨트롤</p>", cap);
+    ctl_rows(o, cap, BOILER_CTL, NB);
+    strlcat(o, "</div><div class=grpbox><h3 class=grp>🌡️ 온도 조절기 (각 방)</h3>"
+               "<p class='muted sub'>방마다 생기는 기기의 컨트롤 — 모든 방에 같이 적용</p>", cap);
+    ctl_rows(o, cap, ROOM_CTL, NR);
+    strlcat(o, "</div><button class=sv>저장</button></form></div>", cap);
+}
+
+void hub_expose_render_dev(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], int sub)
+{
+    char name[24];
+    snprintf(name, sizeof(name), "h%d_%02x%02x%02x_%d", kind, mac3[0], mac3[1], mac3[2], sub);
+    dev_ctx_t d = { kind, mac3, sub };
+    boxes(o, cap, name, dev_on, &d);
+}
+
+/* 화면에 그린 기기·방을 폼에 적어 둔다 → 저장 때 그 사이 새로 붙은 기기를 '체크 안 됨=숨김'으로 오해하지 않게 */
+void hub_expose_render_dev_marker(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], uint8_t subs)
+{
+    char t[64];
+    snprintf(t, sizeof(t), "<input type=hidden name=x%d_%02x%02x%02x value=%u>", kind, mac3[0], mac3[1], mac3[2], subs);
+    strlcat(o, t, cap);
 }
 
 void hub_expose_render_bit(char *o, size_t cap, int bit)
 {
-    char t[192];
-    snprintf(t, sizeof(t), "<form method=post action=/admin/expose><input type=hidden name=scope value=%d>"
-             "<div class=row><span>노출</span><span>", bit);
-    strlcat(o, t, cap);
-    boxes(o, cap, bit);
-    strlcat(o, "</span></div><button class=sv>노출 저장 (모두 끄면 숨기기)</button></form>", cap);
+    char name[8];
+    snprintf(name, sizeof(name), "b%d", bit);
+    boxes(o, cap, name, bit_on, &bit);
 }
 
 /* ---------------------------------------------------------------- 적용 */
 
-bool hub_expose_apply(const char *form, char *err, size_t errlen)
+static bool checked(const char *form, const char *name, int c)
 {
-    char scope[12], key[12], v[8];
-    if (httpd_query_key_value(form, "scope", scope, sizeof(scope)) != ESP_OK) {
-        snprintf(err, errlen, "잘못된 요청");
-        return false;
-    }
-    /* 이 폼이 다루는 비트들: 린나이 표 전체, 또는 플러그인 한 비트 */
-    uint32_t scope_bits = 0;
-    if (!strcmp(scope, "rinnai")) {
-        bool pres[NRINNAI];
-        presence(pres);                                   /* 화면에 없던 방의 비트는 그대로 둔다 */
-        for (int i = 0; i < NRINNAI; i++) {
-            if (pres[i]) {
-                scope_bits |= 1u << RINNAI[i].bit;
-            }
-        }
-    } else {
-        int b = atoi(scope);
-        if (b != EXPOSE_ROOM_DEV && b != EXPOSE_GAS_DEV) {
-            snprintf(err, errlen, "잘못된 항목");
-            return false;
-        }
-        scope_bits = 1u << b;
-    }
+    char key[32], v[8];
+    snprintf(key, sizeof(key), "%s_%d", name, c);
+    return httpd_query_key_value(form, key, v, sizeof(v)) == ESP_OK;   /* 체크된 것만 온다 */
+}
+
+/* 화면에 있던 비트들만 폼대로 바꾼다(안 쓰는 통로·화면 밖 비트는 그대로) */
+static void apply_bits(const char *form, uint32_t scope)
+{
     uint8_t active = hub_uplink_mask();
-    uint32_t next[EXPOSE_NCH];
+    char name[8];
     for (int c = 0; c < EXPOSE_NCH; c++) {
-        next[c] = s_mask[c];
         if (!(active & CH_UPLINK[c])) {
-            continue;                                       /* 안 쓰는 통로(Matter 포함): 화면에 없으니 그대로 */
+            continue;
         }
         for (int b = 0; b < 32; b++) {
-            if (!((scope_bits >> b) & 1)) {
-                continue;
+            if ((scope >> b) & 1) {
+                snprintf(name, sizeof(name), "b%d", b);
+                s_mask[c] = checked(form, name, c) ? s_mask[c] | (1u << b) : s_mask[c] & ~(1u << b);
             }
-            snprintf(key, sizeof(key), "b%d_%d", b, c);
-            bool on = httpd_query_key_value(form, key, v, sizeof(v)) == ESP_OK;   /* 체크된 것만 온다 */
-            next[c] = on ? next[c] | (1u << b) : next[c] & ~(1u << b);
         }
     }
-    nvs_handle_t h;
-    if (nvs_open("expose", NVS_READWRITE, &h) != ESP_OK) {
-        snprintf(err, errlen, "저장소 열기 실패");
-        return false;
+}
+
+bool hub_expose_apply(const char *form, char *err, size_t errlen)
+{
+    uint32_t scope = 0;
+    for (int i = 0; i < NB; i++) {
+        scope |= 1u << BOILER_CTL[i].bit;
     }
-    for (int c = 0; c < EXPOSE_NCH; c++) {
-        s_mask[c] = next[c];
-        hs_set_u32(h, CH_KEY[c], next[c]);
+    for (int i = 0; i < NR; i++) {
+        scope |= 1u << ROOM_CTL[i].bit;
     }
-    nvs_commit(h);
-    nvs_close(h);
-    ESP_LOGI(TAG, "노출 바뀜: Zigbee %05lx, LAN %05lx", (unsigned long)s_mask[0], (unsigned long)s_mask[1]);
+    apply_bits(form, scope);
+    save();
+    ESP_LOGI(TAG, "컨트롤 노출 바뀜: Zigbee %08lx, LAN %08lx", (unsigned long)s_mask[0], (unsigned long)s_mask[1]);
     hub_expose_send_all();
     return true;
+}
+
+void hub_expose_apply_bit(const char *form, int bit)
+{
+    if (bit != EXPOSE_ROOM_DEV && bit != EXPOSE_GAS_DEV) {
+        return;
+    }
+    apply_bits(form, 1u << bit);
+    save();
+    hub_expose_send_all();
+}
+
+void hub_expose_apply_devices(const char *form)
+{
+    hub_dev_t dev[8];
+    int nd = hub_rinnai_snapshot(dev, 8);
+    uint8_t active = hub_uplink_mask();
+    for (int i = 0; i < nd; i++) {
+        char key[16], v[8], name[24];
+        snprintf(key, sizeof(key), "x%d_%02x%02x%02x", dev[i].kind, dev[i].mac3[0], dev[i].mac3[1], dev[i].mac3[2]);
+        if (httpd_query_key_value(form, key, v, sizeof(v)) != ESP_OK) {
+            continue;                                   /* 화면에 없던 기기: 그대로 */
+        }
+        uint8_t subs = (uint8_t)atoi(v);
+        for (int c = 0; c < EXPOSE_NCH; c++) {
+            if (!(active & CH_UPLINK[c])) {
+                continue;
+            }
+            uint8_t hid = hid_get(c, dev[i].kind, dev[i].mac3);
+            for (int sub = 0; sub < 8; sub++) {
+                if (!((subs >> sub) & 1)) {
+                    continue;
+                }
+                snprintf(name, sizeof(name), "h%d_%02x%02x%02x_%d", dev[i].kind, dev[i].mac3[0], dev[i].mac3[1],
+                         dev[i].mac3[2], sub);
+                hid = checked(form, name, c) ? hid & ~(1u << sub) : hid | (1u << sub);
+            }
+            hid_set(c, dev[i].kind, dev[i].mac3, hid);
+        }
+    }
+    save();
+    hub_expose_send_all();
 }

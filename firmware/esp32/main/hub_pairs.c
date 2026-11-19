@@ -12,6 +12,7 @@
 
 #include "hub_pairs.h"
 #include "hub_rinnai.h"
+#include "hub_expose.h"
 
 static const char *TAG = "HUB_PAIRS";
 #define MAX_PAIRS 6
@@ -272,7 +273,6 @@ static void boiler_label(const char *mac, char *out, size_t cap)
 
 void hub_pairs_render(char *o, size_t cap)
 {
-    static const int ZOFF[7] = { 0, 7, 14, 21, 28, 35, 42 };   /* 각방 슬롯 stat 위치 */
     hub_dev_t dev[8];
     int nd = hub_rinnai_snapshot(dev, 8);
     char f06s[8][7];
@@ -283,8 +283,9 @@ void hub_pairs_render(char *o, size_t cap)
         }
     }
     cat(o, cap, "<h2>연결된 기기</h2><div class=card><p class=muted>"
-                "허브에 직접 붙어 있는 린나이 기기입니다. 별명을 지으면 여기와 연결 선택에 그 이름으로 나옵니다 "
-                "(SmartThings 기기 이름은 ST 앱에서 바꿉니다). 아래 '노출 설정'은 이 기기들을 어느 플랫폼에 보일지 고릅니다.</p>");
+                "허브에 직접 붙어 있는 린나이 기기입니다. 별명(✏️)을 지으면 여기와 연결 선택에 그 이름으로 나옵니다 "
+                "(SmartThings 기기 이름은 ST 앱에서 바꿉니다). "
+                "각 기기·방 옆 체크는 그 기기를 어느 플랫폼에 보일지입니다.</p>");
     if (nd == 0) {
         cat(o, cap, "<p class=muted>아직 연결된 기기가 없습니다.</p></div>");
         return;
@@ -296,23 +297,19 @@ void hub_pairs_render(char *o, size_t cap)
         mac_hex(dev[i].mac3, mac);
         const char *al = alias_of(mac);
         esc(al ? al : "", ea, sizeof(ea));
-        const char *typ = dev[i].kind == HUB_KIND_F06 ? "보일러 조절기"
-                        : dev[i].kind == HUB_KIND_F09 ? "온도 조절기" : "기기";
+        bool f09 = dev[i].kind == HUB_KIND_F09;
+        const char *typ = dev[i].kind == HUB_KIND_F06 ? "보일러 조절기" : f09 ? "온도 조절기" : "기기";
+        int rooms = 0;
+        for (int z = 0; f09 && z < HUB_NROOMS; z++) {
+            rooms += hub_room_present(&dev[i], z);
+        }
         char meta[24] = "";
-        if (dev[i].kind == HUB_KIND_F09) {
-            int rooms = 0;
-            for (int z = 0; z < 7; z++) {
-                if (ZOFF[z] < dev[i].n && dev[i].blob[ZOFF[z]]) {
-                    rooms++;
-                }
-            }
+        if (f09) {
             snprintf(meta, sizeof(meta), " · 방 %d개", rooms);
         }
-        /* 별명: '✏️ 별명' 칩을 누르면 팝업(입력·저장·취소, ADMIN_EXTRA) → 숨은 a_<mac> 에 넣고 폼을 바로 제출.
-         * 삭제(🗑️)는 저장된 별명이 있을 때만 — 이름 붙인 기기만 지우게. 별명(ea)은 이스케이프된 값을 따로 붙인다. */
+        /* 기기 줄: 종류·MAC·상태 + 별명 칩(팝업) + 별명 있으면 삭제(🗑️) */
         snprintf(t, sizeof(t), "<div class=row><span><b>%s</b> · %s%s · %s</span><span>"
-                 "<button type=button class=ic title=\"별명 수정\" onclick=\"editAlias('%s')\">"
-                 "✏️ <span id=al_%s>",
+                 "<button type=button class=ic title=\"별명 수정\" onclick=\"editAlias('%s')\">✏️ <span id=al_%s>",
                  typ, mac, meta, dev[i].linked ? "연결됨" : "끊김", mac, mac);
         cat(o, cap, t);
         cat(o, cap, al ? ea : "별명 없음");
@@ -329,7 +326,15 @@ void hub_pairs_render(char *o, size_t cap)
                         "\U0001f5d1️</button>");
         }
         cat(o, cap, "</span></div>");
-        if (dev[i].kind == HUB_KIND_F09) {           /* 하위 항목: 보일러 조절기 연결(짝) */
+
+        /* 하위 줄들 — 보일러 조절기: 기기 노출 / 온도 조절기: 보일러 연결 + 방(세부 기기)별 노출 */
+        uint8_t subs = 0;
+        if (!f09) {
+            cat(o, cap, "<div class=row style='padding-left:18px'><span class=muted>↳ 노출</span><span>");
+            hub_expose_render_dev(o, cap, dev[i].kind, dev[i].mac3, 0);
+            cat(o, cap, "</span></div>");
+            subs = 1;
+        } else {
             const char *cur = paired_f06(mac);
             bool solo = cur && !strcmp(cur, "000000");
             snprintf(t, sizeof(t), "<div class=row style='padding-left:18px'><span class=muted>↳ 보일러 조절기 연결</span>"
@@ -344,7 +349,19 @@ void hub_pairs_render(char *o, size_t cap)
                 cat(o, cap, t);
             }
             cat(o, cap, "</select></span></div>");
+            for (int z = 0; z < HUB_NROOMS; z++) {
+                if (!hub_room_present(&dev[i], z)) {
+                    continue;
+                }
+                snprintf(t, sizeof(t), "<div class=row style='padding-left:18px'><span class=muted>↳ %s</span><span>",
+                         HUB_ROOMS[z].name);
+                cat(o, cap, t);
+                hub_expose_render_dev(o, cap, dev[i].kind, dev[i].mac3, HUB_ROOMS[z].z);
+                cat(o, cap, "</span></div>");
+                subs |= 1u << HUB_ROOMS[z].z;
+            }
         }
+        hub_expose_render_dev_marker(o, cap, dev[i].kind, dev[i].mac3, subs);
     }
     cat(o, cap, "<button class=sv>저장</button></form></div>");
 }
@@ -377,6 +394,7 @@ bool hub_pairs_apply(const char *form, char *msg, size_t msglen)
     }
     alias_save();
     save();
+    hub_expose_apply_devices(form);                  /* 기기·방별 노출(같은 폼) */
     hub_rinnai_resend();
     snprintf(msg, msglen, "저장했습니다");
     return true;
@@ -389,6 +407,15 @@ bool hub_pairs_delete(const char *form, char *msg, size_t msglen)
     if (httpd_query_key_value(form, "del", mac, sizeof(mac)) != ESP_OK || !hex6(mac)) {
         snprintf(msg, msglen, "잘못된 요청");
         return false;
+    }
+    hub_dev_t dev[8];                                /* 지우기 전에 종류를 알아 둔다(노출 항목 정리용) */
+    int nd = hub_rinnai_snapshot(dev, 8);
+    for (int i = 0; i < nd; i++) {
+        char m[7];
+        mac_hex(dev[i].mac3, m);
+        if (!strcmp(m, mac)) {
+            hub_expose_forget(dev[i].kind, dev[i].mac3);
+        }
     }
     hub_rinnai_forget(mac);
     alias_set(mac, NULL);

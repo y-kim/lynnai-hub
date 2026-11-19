@@ -67,6 +67,8 @@ static const char HEAD2[] =
     ".row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #2a2a2a}"
     "label.chk{display:inline-block;margin:0 0 0 10px;color:#ddd}label.chk input{width:auto;margin-right:4px}"
     "h3.grp{margin:14px 0 2px;color:#ccc}"
+    ".grpbox{background:#202020;border:1px solid #3a3a3a;border-radius:10px;padding:10px 12px;margin:12px 0}"
+    ".grpbox h3.grp{margin:0;padding-bottom:6px;color:#eee}.grpbox .sub{margin:0 0 6px;font-size:12px}"
     "</style></head><body>";
 static const char TAIL[] =
     "<script>(function(){"
@@ -422,9 +424,9 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
         hub_store_errors_html(w, sizeof(w));
         strlcat(b, w, cap);
     }
-    hub_uplink_render(b, cap);          /* 연결 방식(통로) 먼저 — 아래 노출은 고른 통로만 나옴 */
-    hub_pairs_render(b, cap);           /* 연결된 기기(별명·보일러 연결) — 노출 설정 바로 위 */
-    hub_expose_render_rinnai(b, cap);
+    hub_uplink_render(b, cap);          /* 연결 방식(통로) — 아래 노출 체크는 고른 통로만 나옴 */
+    hub_pairs_render(b, cap);           /* 연결된 기기(이름·보일러 연결·기기/방별 노출) */
+    hub_expose_render_types(b, cap);    /* 노출 설정: 종류별 컨트롤 */
     hub_plugins_render(b, cap);
     strlcat(b, "<h2>서버 연동 (장기 기록·그래프)</h2><div class=card><p class=muted>"
                "<code>/api/v1/state</code> (JSON), <code>/metrics</code> (Prometheus), <code>/api/events</code>. ", cap);
@@ -495,7 +497,7 @@ static esp_err_t plugin_post(httpd_req_t *req)
     if (!authed(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
-    char body[256], err[96] = "";
+    char body[512], err[96] = "";
     if (read_body(req, body, sizeof(body)) < 0) {
         return admin_page(req, "잘못된 요청", false);
     }
