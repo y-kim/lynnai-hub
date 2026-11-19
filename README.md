@@ -1,59 +1,98 @@
 # lynnai-hub
 
-린나이(Rinnai) 프로토콜을 쓰는 보일러·각방 조절기를 **클라우드 없이 로컬에서** 제어하는 허브.
-라즈베리 파이 한 대가 기기 입장에서의 "클라우드"가 되어, 집 안에서 상태를 읽고 명령을 내리고
-Home Assistant / SmartThings 로 중계한다.
+린나이(Rinnai) 프로토콜을 쓰는 보일러 조절기·각방 온도 조절기를 **집 안에서** 제어하고 SmartThings 에 붙이는 허브.
+ESP32-C6 보드 하나가 기기 입장에서의 "클라우드"가 되어, 기기를 자기 Wi-Fi(AP)로 받아 상태를 읽고 명령을 넣는다.
+린나이 클라우드로 그대로 이어 주거나(프록시 모드, 린나이 앱 계속 사용) 클라우드 없이 혼자 동작한다(단독 모드).
+SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 
 > ⚠️ 리버스 엔지니어링으로 만든 **비공식** 프로젝트입니다. 린나이와 아무 관련이 없고
 > 후원·보증받지 않았습니다. `lynnai` 는 상표 회피를 위한 임시 명칭입니다.
 > 본인 소유 기기에 대해 본인 책임으로 사용하세요.
 
+```
+보일러 조절기 ─┐ Wi-Fi(허브 AP)          ┌─ 린나이 클라우드 (프록시 모드)
+온도 조절기  ─┴→ [ESP32-C6 허브] ──집 Wi-Fi─┘
+                       └─ Zigbee ─→ SmartThings 허브/Station ─→ SmartThings 앱
+```
+
+## 빠른 시작
+
+자세한 내용은 **[docs/esp32-hub.md](docs/esp32-hub.md)** (설치·연결·초기화·고장 분석, 빌드는 부록).
+
+1. **펌웨어 쓰기**: ESP32-C6-DevKitC-1 에 릴리즈 이미지를 씁니다(esptool 또는 브라우저 웹 플래셔).
+2. **첫 설정**: 허브가 띄우는 `LYNNAI-SETUP-…` AP 에 휴대폰으로 붙어 집 Wi-Fi·허브 AP·관리자 암호를 넣습니다.
+3. **SmartThings**: 초대 링크 <https://bestow-regional.api.smartthings.com/invite/Qrjp9gnaJbMq> 로 드라이버
+   *LYNNAI Hub (Zigbee)* 를 설치 → 앱에서 **기기 추가 → 주변 기기 검색** → 허브 버튼 **짧게**.
+4. **린나이 기기**: 보일러·온도 조절기 Wi-Fi 모듈을 설정 모드로 두고 허브 버튼 **길게(3초)**.
+
+## 주요 기능
+
+- **SmartThings 기기**: 보일러(전원·난방 모드/방식/온도·온수·예열·예약 상태), 온도 조절기가 알려 주는 방마다
+  기기(방1~방6·거실: 켜기·설정 온도·외출), 온습도계, 가스 계량기. 보일러·온도 조절기 여러 대와 짝 지정 지원.
+- **자동화(드라이버 내장)**: 모든 방이 꺼지면 보일러 난방을 끄고, 방이 켜지면 다시 켠다.
+- **관리 화면** `http://<허브IP>/admin`: 동작 모드, 연결 방식(Zigbee/LAN), 연결된 기기(이름·보일러 연결·기기/방별 노출),
+  종류별 노출 컨트롤, 서버 연동(API 토큰), 센서 플러그인.
+- **서버 연동**: `/api/v1/state`(JSON)·`/metrics`(Prometheus)·`/api/events`·`/api/stats`, NAS 기록기 `server/lynnai-hub-watch`.
+- **고장 진단**: LED 오류 코드(빨강 N번 깜빡), USB 시리얼 `diag`, PC 진단 스크립트 `tools/hub_doctor.py`.
+
+## 동작 모드
+
+- **프록시** (기본) — 기기 ↔ 허브 ↔ 린나이 클라우드를 이어 준다. 린나이 앱을 그대로 쓰면서 SmartThings 로도 제어.
+  클라우드 주소는 허브가 집 Wi-Fi 쪽 DNS 로 직접 조회한다.
+- **단독** — 클라우드에 붙지 않고 허브가 기기의 MQTT 상대가 된다. 인터넷이 없어도 SmartThings 로 제어되지만
+  린나이 앱으로는 보이지 않는다.
+
+관리 화면 맨 위에서 고르고, 바꾸면 기기가 다시 접속할 때(수십 초) 적용된다.
+
 ## 구성
 
 | 디렉터리 | 역할 |
 |---|---|
-| `standalone/` | 클라우드를 **대체**하는 로컬 MQTT 브로커 + DNS 하이재킹 + Wi-Fi AP. 기기가 린나이 클라우드 대신 여기에 붙는다. (Pi3 기준, Pico 포팅 지향) |
-| `appliance/` | 배포 이미지 **제품**: 첫 부팅 자가 개별화(공유 비밀 0 원칙), 프로비저닝/관리 웹 포털(설정 Wi-Fi 접속 시 설정 페이지 자동 표시 = **캡티브 포털**), 기기 레지스트리(보일러·각방·기타 린나이 기기), standalone/proxy 모드 전환 |
-| `plugins/gasmeter/` | *(선택 플러그인)* 가스 계량기 리드스위치 펄스 카운터 + 도시가스 요금 계산. HA Energy 대시보드로 사용량·요금 송신 |
-| `plugins/roomsensor/` | *(선택 플러그인)* SHT31-D 온습도계(I2C 0x44) → 로컬 MQTT + HA 자동 등록(온도 °C · 습도 %) |
-| `firmware/esp32/` | **ESP32-C6 허브**: 보일러·각방을 허브 AP 로 받아 린나이 클라우드로 중계(또는 단독)하고 Zigbee 로 SmartThings 에 노출. 설치·연결·초기화·고장 분석은 [docs/esp32-hub.md](docs/esp32-hub.md) |
-| `edge-driver/`, `edge-driver-lan/` | SmartThings Edge 드라이버(Zigbee / LAN), 공통 로직 `edge-driver/src/core.lua` |
-| `tools/hub_doctor.py` | PC 에서 허브 고장 진단(API · SmartThings · USB 시리얼) |
+| `firmware/esp32/` | **ESP32-C6 허브 펌웨어**(ESP-IDF v5.5): 허브 AP·DNS·TLS 중계/단독 브로커·Zigbee·LAN·관리 화면·API·센서·진단 |
+| `edge-driver/` | SmartThings Edge 드라이버(Zigbee). 공통 로직 `src/core.lua`, 하드웨어 없는 시험 `test/` |
+| `edge-driver-lan/` | 같은 코어를 쓰는 LAN 드라이버(SSDP + TCP 8484) |
+| `docs/` | 설치·운영 안내 |
+| `tools/hub_doctor.py` | PC 에서 허브 고장 진단(API · SmartThings CLI · USB 시리얼) |
+| `server/lynnai-nas/` | ESP32 없이 **NAS 도커**로 같은 일을 하는 LAN 전용 허브(파이썬 판, 프록시/단독) |
+| `server/lynnai-hub-watch/` | 허브 API 를 SQLite 로 모으는 NAS 기록기 |
+| `standalone/` | 클라우드를 대체하는 최소 MQTT 브로커 + DNS 하이재킹(Pi 시절 검증용, NAS 단독 모드가 재사용) |
+| `appliance/`, `plugins/` | 라즈베리 파이 판 제품(프로비저닝 포털·플러그인). ESP32 허브로 옮겨 오며 지금은 참고용 |
 
-## 동작 모드
+## 보안
 
-- **standalone** (기본) — 기기가 우리 브로커에 붙는다. 클라우드·계정·외부 키 불필요.
-- **proxy** — 실제 린나이 클라우드로 중계하며 중간에서 관찰/제어. 앱 키·계정은 포털에서 설정(레포에 없음).
+- **펌웨어 이미지에 비밀값이 없다**: 기기 접속용 TLS 인증서·키는 허브마다 첫 부팅 때 직접 만든다(RSA-2048).
+  펌웨어에 들어 있는 인증서는 공개 정보인 린나이 클라우드 CA 뿐이다.
+- **클라우드 검증**: 허브(와 NAS 프록시)는 린나이 클라우드 인증서를 사설 CA "ckstack" 으로 검증한다.
+- **첫 설정 AP** 는 개방망 → 설정 페이지에서 허브 AP 암호(WPA2)와 관리자 암호를 반드시 정한다.
+  관리자 암호는 PBKDF2-HMAC-SHA256 해시로만 저장하고, 로그아웃은 세션을 확인한 POST 로만 된다.
+- **저장 데이터 검사**: 설정마다 CRC32 를 같이 저장해 손상을 찾아 알린다(LED 4번).
+- **한계**: eFuse 를 쓰지 않아 플래시·NVS 암호화가 없다. USB 로 플래시를 읽으면 집 Wi-Fi 암호·허브 AP 암호·API 토큰이
+  보인다. USB 진단 `diag` 는 비밀값을 출력하지 않는다. 기기(보일러 모듈)는 허브 인증서를 검증하지 않는다.
 
-## 보안 설계
-
-- **공유 비밀 0**: 배포 이미지는 전부 동일하게 구워지고, 각 기기는 첫 부팅에 CPU 시리얼 + HW RNG 로
-  자기만의 비밀을 만든다. 이미지 한 장을 뜯어도 다른 기기는 안전.
-- 첫 설정 AP 는 공개(개방)망 → 포털에서 생산 SSID/WPA 와 관리자 암호를 강제 설정, 생산 AP 암호는
-  기기별 랜덤 생성.
-- 관리 포털은 **AP 인터페이스에만** 바인드(가정용 Wi-Fi 노출 금지), 세션은 기기별 키로 HMAC 서명.
-- 린나이 앱 키·클라우드 인증서는 **bring-your-own**: `.env` 로 주입하며 저장소에 넣지 않는다.
-
-상태: WIP(진행 중). 자세한 내용은 각 디렉터리의 README / 주석 참고.
+상태: WIP(진행 중). 자세한 내용은 [docs/esp32-hub.md](docs/esp32-hub.md) 와 각 디렉터리의 README / 주석 참고.
 
 ---
 
 ## English
 
-**lynnai-hub** — a local, cloud‑free control hub for Rinnai‑protocol boilers and room controllers.
-A single Raspberry Pi becomes the "cloud" the appliance talks to, so you read state and send commands
-on your own LAN and bridge them to Home Assistant / SmartThings.
+**lynnai-hub** — a local hub for Rinnai‑protocol boiler controllers and room thermostats, bridged to SmartThings.
+A single ESP32‑C6 board becomes the "cloud" the appliances talk to: they join the hub's own Wi‑Fi AP, and the hub
+reads their state and injects commands. It either relays them to the real Rinnai cloud (proxy mode, the official app
+keeps working) or works on its own (standalone mode), and talks to SmartThings over Zigbee (or LAN).
 
 > ⚠️ Unofficial, reverse‑engineered project. Not affiliated with, endorsed by, or supported by Rinnai.
 > `lynnai` is a placeholder name to avoid trademark use. Use on hardware you own, at your own risk.
 
-- `standalone/` — a local MQTT broker + DNS hijack + Wi‑Fi AP that **replaces** the cloud; the device
-  connects here instead of Rinnai's servers.
-- `appliance/` — the distributable image product: first‑boot self‑individualization (zero shared
-  secrets), a provisioning/management web portal, a device registry, and standalone/proxy modes.
-- `plugins/gasmeter/` — *(optional)* a gas‑meter reed‑switch pulse counter + city‑gas pricing that
-  reports usage and cost to the Home Assistant Energy dashboard.
-- `plugins/roomsensor/` — *(optional)* an SHT31‑D temperature/humidity sensor (I2C) that publishes to
-  the local broker and auto‑registers in Home Assistant.
+- `firmware/esp32/` — the ESP32‑C6 hub firmware (ESP‑IDF v5.5). Setup and troubleshooting:
+  [docs/esp32-hub.md](docs/esp32-hub.md) (Korean).
+- `edge-driver/`, `edge-driver-lan/` — SmartThings Edge drivers (Zigbee / LAN) sharing `edge-driver/src/core.lua`.
+  Install via the channel invite <https://bestow-regional.api.smartthings.com/invite/Qrjp9gnaJbMq>.
+- `server/lynnai-nas/` — the same hub as a LAN‑only Docker container for a NAS; `server/lynnai-hub-watch/` records
+  the hub API into SQLite.
+- `tools/hub_doctor.py` — diagnostics from a PC (API, SmartThings CLI, USB serial).
+- `standalone/`, `appliance/`, `plugins/` — the earlier Raspberry Pi version, kept for reference.
+
+The firmware image carries no secrets: each hub generates its own device‑facing TLS key on first boot, and verifies
+the Rinnai cloud against its private CA. There is no flash/NVS encryption (eFuses are not used).
 
 License: MIT (see `LICENSE`).
