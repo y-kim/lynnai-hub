@@ -162,16 +162,3 @@ bool hub_state_verify_admin(const char *pw)
     }
     return diff == 0;
 }
-
-esp_err_t hub_state_factory_reset(void)
-{
-    nvs_handle_t h;
-    esp_err_t e = nvs_open(NS, NVS_READWRITE, &h);
-    if (e != ESP_OK) {
-        return e;
-    }
-    nvs_erase_all(h);
-    e = nvs_commit(h);
-    nvs_close(h);
-    return e;
-}

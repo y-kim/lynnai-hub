@@ -35,5 +35,3 @@ esp_err_t hub_state_provision(hub_state_t *st,
 
 bool hub_state_verify_admin(const char *pw);
 
-/* 우리 설정만 지운다(다음 부팅에 새 기기 ID). */
-esp_err_t hub_state_factory_reset(void);

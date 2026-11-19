@@ -52,7 +52,7 @@ bool hub_expose_apply(const char *form, char *err, size_t errlen);   /* POST /ad
 /* 연결된 기기 행 아래: 한 기기(sub=0)/방(sub=z) 의 통로 체크박스(폼은 호출부). 이름 h<종류>_<mac>_<sub>_<통로> */
 void hub_expose_render_dev(char *out, size_t cap, uint8_t kind, const uint8_t mac3[3], int sub);
 void hub_expose_render_dev_marker(char *out, size_t cap, uint8_t kind, const uint8_t mac3[3], uint8_t subs);
-void hub_expose_apply_devices(const char *form);                /* 연결된 기기 폼 저장 때 같이 */
+bool hub_expose_apply_devices(const char *form);   /* 저장 실패면 false */                /* 연결된 기기 폼 저장 때 같이 */
 /* 플러그인 카드: 한 비트의 통로 체크박스(폼은 호출부, 이름 b<비트>_<통로>) / 저장 */
 void hub_expose_render_bit(char *out, size_t cap, int bit);
-void hub_expose_apply_bit(const char *form, int bit);
+bool hub_expose_apply_bit(const char *form, int bit);   /* 저장 실패면 false */

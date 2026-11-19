@@ -13,6 +13,7 @@
 #include <string.h>
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -348,6 +349,8 @@ static bool authed(httpd_req_t *req)
     return true;
 }
 
+bool hub_portal_authed(httpd_req_t *req) { return authed(req); }
+
 static int read_body(httpd_req_t *req, char *body, int cap)
 {
     if (req->content_len <= 0 || req->content_len >= cap) {
@@ -412,10 +415,12 @@ static const char ADMIN_EXTRA[] =
     "T.addEventListener('keydown',function(e){if(e.key=='Enter'){e.preventDefault();ok()}})"
     "})();</script>";
 
+#define FORM_MAX 6144                    /* 연결된 기기 폼: 기기 6대 × 방 7개 × 통로별 숨김 + 별명(URL 인코딩 3배) */
+
 static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
 {
-    const size_t cap = 20480;
-    char *b = calloc(1, cap);
+    const size_t full = 36864, cap = full - 256;   /* 끝 256 바이트는 '잘림' 경고 자리 */
+    char *b = calloc(1, full);
     if (!b) {
         return httpd_resp_send_500(req);
     }
@@ -443,6 +448,10 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     strlcat(b, "<form method=post action=/admin/api><button name=op value=new>토큰 새로 만들기</button>"
                "<button name=op value=off class=ghost>토큰 끄기</button></form>"
                "<p class=muted>새로 만들면 이전 토큰은 바로 무효. 토큰은 만들 때 한 번만 보여 줍니다.</p></div>", cap);
+    if (strlen(b) >= cap - 1) {                       /* 화면이 버퍼를 넘침 — 뒤쪽이 잘렸다고 알린다 */
+        strlcat(b, "<p class=warn>화면이 너무 길어 뒤쪽이 잘렸습니다(기기·방이 많음). USB diag 로 확인하세요.</p>", full);
+        ESP_LOGW(TAG, "관리 화면 잘림(%u바이트)", (unsigned)cap);
+    }
     esp_err_t r = send_page(req, "허브 관리", b, ADMIN_EXTRA);
     free(b);
     return r;
@@ -457,11 +466,57 @@ static esp_err_t admin_get(httpd_req_t *req)
     return authed(req) ? admin_page(req, NULL, false) : login_page(req, NULL);
 }
 
-/* 암호 맞히기 막기: 연달아 5번 틀리면 5분 동안 로그인 받지 않음(틀릴 때마다 1초 지연은 그대로) */
+/* 암호 맞히기 막기: 같은 주소에서 연달아 5번 틀리면 그 주소만 5분 동안 로그인 받지 않음(틀릴 때마다 1초 지연은 그대로).
+ * 주소별이라 LAN 의 다른 기기가 일부러 틀려 관리자를 계속 막을 수는 없다. 표는 작게(넘치면 가장 오래된 칸을 씀). */
 #define LOGIN_MAX_FAIL 5
 #define LOGIN_LOCK_US  (5LL * 60 * 1000000)
-static int s_login_fail;
-static int64_t s_login_lock_until;
+#define LOGIN_SLOTS    8
+static struct {
+    uint32_t ip;
+    int fail;
+    int64_t until, last;
+} s_login[LOGIN_SLOTS];
+
+static uint32_t req_ip(httpd_req_t *req)
+{
+    struct sockaddr_storage a;
+    socklen_t l = sizeof(a);
+    if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&a, &l) < 0) {
+        return 0;
+    }
+    if (a.ss_family == AF_INET) {
+        return ((struct sockaddr_in *)&a)->sin_addr.s_addr;
+    }
+#if LWIP_IPV6
+    if (a.ss_family == AF_INET6) {
+        uint32_t v;
+        memcpy(&v, &((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr[12], 4);
+        return v;
+    }
+#endif
+    return 0;
+}
+
+static int login_slot(uint32_t ip, bool make)
+{
+    int old = 0;
+    for (int i = 0; i < LOGIN_SLOTS; i++) {
+        if (s_login[i].ip == ip && s_login[i].last) {
+            return i;
+        }
+        if (s_login[i].last < s_login[old].last) {
+            old = i;
+        }
+    }
+    if (!make) {
+        return -1;
+    }
+    s_login[old].ip = ip;
+    s_login[old].fail = 0;
+    s_login[old].until = 0;
+    s_login[old].last = esp_timer_get_time();
+    return old;
+}
 
 static esp_err_t login_post(httpd_req_t *req)
 {
@@ -470,7 +525,9 @@ static esp_err_t login_post(httpd_req_t *req)
     if (!s_st->provisioned || read_body(req, body, sizeof(body)) < 0) {
         return redirect(req, "/");
     }
-    if (esp_timer_get_time() < s_login_lock_until) {
+    uint32_t ip = req_ip(req);
+    int ls = login_slot(ip, false);
+    if (ls >= 0 && esp_timer_get_time() < s_login[ls].until) {
         memset(body, 0, sizeof(body));
         return login_page(req, "암호를 여러 번 틀려 5분 동안 잠겼습니다. 잠시 뒤 다시 하세요");
     }
@@ -480,15 +537,19 @@ static esp_err_t login_post(httpd_req_t *req)
     memset(pw, 0, sizeof(pw));
     if (!ok) {
         vTaskDelay(pdMS_TO_TICKS(1000));             /* 암호 맞히기 늦추기 */
-        if (++s_login_fail >= LOGIN_MAX_FAIL) {
-            s_login_fail = 0;
-            s_login_lock_until = esp_timer_get_time() + LOGIN_LOCK_US;
-            ESP_LOGW(TAG, "관리자 암호 %d번 틀림 — 5분 잠금", LOGIN_MAX_FAIL);
+        ls = login_slot(ip, true);
+        s_login[ls].last = esp_timer_get_time();
+        if (++s_login[ls].fail >= LOGIN_MAX_FAIL) {
+            s_login[ls].fail = 0;
+            s_login[ls].until = esp_timer_get_time() + LOGIN_LOCK_US;
+            ESP_LOGW(TAG, "관리자 암호 %d번 틀림(" IPSTR ") — 그 주소 5분 잠금", LOGIN_MAX_FAIL, IP2STR((esp_ip4_addr_t *)&ip));
             return login_page(req, "암호를 여러 번 틀려 5분 동안 잠겼습니다");
         }
         return login_page(req, "암호가 맞지 않습니다");
     }
-    s_login_fail = 0;
+    if (ls >= 0) {
+        s_login[ls].fail = 0;
+    }
     uint8_t rnd[16];
     esp_fill_random(rnd, sizeof(rnd));
     for (int i = 0; i < 16; i++) {
@@ -548,11 +609,11 @@ static esp_err_t pairs_post(httpd_req_t *req)
     if (!authed(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
-    char *body = calloc(1, 2048), msg[96] = "";
+    char *body = calloc(1, FORM_MAX), msg[160] = "";
     if (!body) {
         return httpd_resp_send_500(req);
     }
-    bool ok = read_body(req, body, 2048) >= 0 && hub_pairs_apply(body, msg, sizeof(msg));
+    bool ok = read_body(req, body, FORM_MAX) >= 0 && hub_pairs_apply(body, msg, sizeof(msg));
     free(body);
     return admin_page(req, ok ? msg : (msg[0] ? msg : "잘못된 요청"), ok);
 }
@@ -563,11 +624,11 @@ static esp_err_t devicedel_post(httpd_req_t *req)
     if (!authed(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
-    char *body = calloc(1, 1024), msg[96] = "";
+    char *body = calloc(1, FORM_MAX), msg[96] = "";   /* 기기 폼 전체가 온다(이름 비워 삭제) */
     if (!body) {
         return httpd_resp_send_500(req);
     }
-    bool ok = read_body(req, body, 1024) >= 0 && hub_pairs_delete(body, msg, sizeof(msg));
+    bool ok = read_body(req, body, FORM_MAX) >= 0 && hub_pairs_delete(body, msg, sizeof(msg));
     free(body);
     return admin_page(req, ok ? msg : (msg[0] ? msg : "잘못된 요청"), ok);
 }
@@ -578,11 +639,11 @@ static esp_err_t expose_post(httpd_req_t *req)
     if (!authed(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
-    char *body = calloc(1, 1024), err[96] = "";
+    char *body = calloc(1, 2048), err[160] = "";
     if (!body) {
         return httpd_resp_send_500(req);
     }
-    bool ok = read_body(req, body, 1024) >= 0 && hub_expose_apply(body, err, sizeof(err));
+    bool ok = read_body(req, body, 2048) >= 0 && hub_expose_apply(body, err, sizeof(err));
     free(body);
     return admin_page(req, ok ? "노출 설정을 저장했습니다 (바로 적용)" : (err[0] ? err : "잘못된 요청"), ok);
 }

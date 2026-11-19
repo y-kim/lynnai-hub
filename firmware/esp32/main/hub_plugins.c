@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "nvs.h"
@@ -312,17 +313,26 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
     }
     char k[16];
     nvs_key(k, sizeof(k), p->id, "en");
-    hs_set_u8(h, k, on);
-    for (int f = 0; f < p->nfields; f++) {
+    esp_err_t e = hs_set_u8(h, k, on);
+    for (int f = 0; e == ESP_OK && f < p->nfields; f++) {
         nvs_key(k, sizeof(k), p->id, p->fields[f].key);
-        hs_set_i32(h, k, vals[f]);
+        e = hs_set_i32(h, k, vals[f]);
     }
-    nvs_commit(h);
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
     nvs_close(h);
+    if (e != ESP_OK) {
+        snprintf(err, errlen, "저장하지 못했습니다(%s)", esp_err_to_name(e));
+        return false;
+    }
     s_on[idx] = on;
     memcpy(s_val[idx], vals, sizeof(vals));
     if (!strcmp(op, "save")) {
-        hub_expose_apply_bit(form, p->expose_bit);   /* 같은 폼의 노출 체크(통로별) */
+        if (!hub_expose_apply_bit(form, p->expose_bit)) {   /* 같은 폼의 노출 체크(통로별) */
+            snprintf(err, errlen, "노출 설정을 저장하지 못했습니다");
+            return false;
+        }
     }
     ESP_LOGI(TAG, "%s %s", p->name, !on ? "삭제" : !strcmp(op, "add") ? "추가" : "저장");
     return true;
@@ -340,5 +350,19 @@ bool hub_plugins_action(const char *form, char *msg, size_t msglen)
         snprintf(msg, msglen, "값이 필요합니다");
         return false;
     }
+    /* 폼 값은 URL 인코딩: "1676,47" 은 "1676%2C47" 로 온다 */
+    char *w = value;
+    for (const char *r = value; *r; r++) {
+        if (*r == '+') {
+            *w++ = ' ';
+        } else if (r[0] == '%' && isxdigit((unsigned char)r[1]) && isxdigit((unsigned char)r[2])) {
+            char hx[3] = { r[1], r[2], 0 };
+            *w++ = (char)strtol(hx, NULL, 16);
+            r += 2;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = 0;
     return s_act_fn[idx](value, msg, msglen);
 }

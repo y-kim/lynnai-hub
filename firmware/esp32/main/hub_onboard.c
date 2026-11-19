@@ -31,15 +31,34 @@ static const char *TAG = "HUB_ONBOARD";
 static const hub_state_t *s_st;
 static volatile bool s_running;
 
+/* XML 글자 이스케이프(&, <, >, ", ') — AP 이름·암호에 이런 글자가 있어도 등록되게 */
+static void xml_esc(const char *in, char *out, size_t cap)
+{
+    size_t k = 0;
+    for (; *in && k + 7 < cap; in++) {
+        const char *r = *in == '&' ? "&amp;" : *in == '<' ? "&lt;" : *in == '>' ? "&gt;" : *in == '"' ? "&quot;"
+                        : *in == '\'' ? "&apos;" : NULL;
+        if (r) {
+            k += (size_t)snprintf(out + k, cap - k, "%s", r);
+        } else {
+            out[k++] = *in;
+        }
+    }
+    out[k] = 0;
+}
+
 /* 보일러에 허브 AP 정보를 넘긴다. 성공 = 응답 본문에 <status>ok</status>. */
 static bool post_network(const char *ap_ssid, const char *ap_pass)
 {
     /* 실제 앱 바디엔 <security> 가 없다(보안 분기는 미호출 죽은 코드). 모듈이 스스로 판단.
      * 안 되면 그때 <security>WPA-PERSONAL</security> 추가 시도(문서 권고 순서). */
-    char body[200];
+    char es[33 * 6], ep[65 * 6];
+    xml_esc(ap_ssid, es, sizeof(es));
+    xml_esc(ap_pass, ep, sizeof(ep));
+    char body[sizeof(es) + sizeof(ep) + 48];
     int bl = snprintf(body, sizeof(body),
-                      "<ssid>%s</ssid><password>%s</password>", ap_ssid, ap_pass);
-    char req[384];
+                      "<ssid>%s</ssid><password>%s</password>", es, ep);
+    char req[sizeof(body) + 200];
     int rl = snprintf(req, sizeof(req),
                       "POST http://" BOILER_AP_GW "/gainspan/system/config/network HTTP/1.1\r\n"
                       "Host: ckpush.com\r\nContent-Type: text/xml\r\n"

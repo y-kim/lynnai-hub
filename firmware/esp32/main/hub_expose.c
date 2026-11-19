@@ -13,6 +13,18 @@
 #include "hub_uplink.h"
 #include "hub_rinnai.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+static SemaphoreHandle_t s_exp_mx;
+static SemaphoreHandle_t s_exp_mx_get(void)
+{
+    if (!s_exp_mx) {
+        s_exp_mx = xSemaphoreCreateRecursiveMutex();   /* 처음 부르는 곳 = app_main 의 load(다른 태스크 전) */
+    }
+    return s_exp_mx;
+}
+#define LOCK()   xSemaphoreTakeRecursive(s_exp_mx_get(), portMAX_DELAY)
+#define UNLOCK() xSemaphoreGiveRecursive(s_exp_mx_get())
 static const char *TAG = "HUB_EXPOSE";
 
 /* 키 '3': 노출 방식이 기기별+종류별로 바뀌어 옛 마스크(zb2/lan2/mt2)는 뜻이 달라 무시 → 전부 보임으로 시작 */
@@ -100,9 +112,9 @@ static uint32_t migrate_mask(uint32_t old)
     return m;
 }
 
-static void save(void);
+static esp_err_t save(void);
 
-void hub_expose_load(void)
+static void hub_expose_load_l(void)
 {
     nvs_handle_t h;
     bool migrated = false;
@@ -129,6 +141,18 @@ void hub_expose_load(void)
         if (nvs_get_blob(h, "lgdone", s_lgdone, &n) == ESP_OK) {
             s_nlgdone = (int)(n / 4);
         }
+        if (s_nlgdone && !migrated) {
+            /* 지난 부팅에 이미 기기별로 옮겼다 — 옛 값은 이제 지운다(나중에 새로 붙는 기기에 옛 숨김이 걸리지 않게).
+             * 그 부팅에 안 보였던 기기는 옛 숨김 없이(보이는 채로) 시작한다. */
+            for (int c = 0; c < EXPOSE_NCH; c++) {
+                nvs_erase_key(h, OLD_KEY[c]);
+                s_has_old[c] = false;
+            }
+            nvs_erase_key(h, "lgdone");
+            nvs_commit(h);
+            s_nlgdone = 0;
+            ESP_LOGI(TAG, "옛 노출 설정 정리 끝");
+        }
         nvs_close(h);
     }
     if (migrated) {
@@ -138,22 +162,29 @@ void hub_expose_load(void)
              (unsigned long)s_mask[1], s_nhid[1]);
 }
 
-static void save(void)
+static esp_err_t save(void)
 {
     nvs_handle_t h;
-    if (nvs_open("expose", NVS_READWRITE, &h) != ESP_OK) {
-        return;
+    esp_err_t e = nvs_open("expose", NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
     }
-    for (int c = 0; c < EXPOSE_NCH; c++) {
-        hs_set_u32(h, CH_KEY[c], s_mask[c]);
-        if (s_nhid[c]) {
-            hs_set_blob(h, HID_KEY[c], s_hid[c], s_nhid[c] * sizeof(hid_t));
-        } else {
+    for (int c = 0; e == ESP_OK && c < EXPOSE_NCH; c++) {
+        e = hs_set_u32(h, CH_KEY[c], s_mask[c]);
+        if (e == ESP_OK && s_nhid[c]) {
+            e = hs_set_blob(h, HID_KEY[c], s_hid[c], s_nhid[c] * sizeof(hid_t));
+        } else if (e == ESP_OK) {
             hs_erase(h, HID_KEY[c]);
         }
     }
-    nvs_commit(h);
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
     nvs_close(h);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "노출 설정 저장 실패(%s)", esp_err_to_name(e));
+    }
+    return e;
 }
 
 static hid_t *hid_find(int c, uint8_t kind, const uint8_t mac3[3])
@@ -190,7 +221,7 @@ static void hid_set(int c, uint8_t kind, const uint8_t mac3[3], uint8_t hid)
     }
 }
 
-void hub_expose_forget(uint8_t kind, const uint8_t mac3[3])
+static void hub_expose_forget_l(uint8_t kind, const uint8_t mac3[3])
 {
     for (int c = 0; c < EXPOSE_NCH; c++) {
         hid_set(c, kind, mac3, 0);
@@ -239,8 +270,7 @@ static void migrate_devices(void)
         s_nlgdone++;
         changed = true;
     }
-    if (changed) {
-        save();                                      /* 숨김 정보를 먼저 저장하고 */
+    if (changed && save() == ESP_OK) {               /* 숨김 정보를 먼저 저장하고(실패하면 표시도 안 남겨 다음에 다시) */
         nvs_handle_t h;
         if (nvs_open("expose", NVS_READWRITE, &h) == ESP_OK) {   /* 그다음 '옮김' 표시(사이에 꺼지면 다음에 다시 옮김) */
             nvs_set_blob(h, "lgdone", s_lgdone, s_nlgdone * 4);
@@ -251,9 +281,9 @@ static void migrate_devices(void)
     }
 }
 
-void hub_expose_prepare(void) { migrate_devices(); }
+static void hub_expose_prepare_l(void) { migrate_devices(); }
 
-void hub_expose_send_all(void)
+static void hub_expose_send_all_l(void)
 {
     migrate_devices();
     for (int c = 0; c < EXPOSE_NCH; c++) {
@@ -312,7 +342,7 @@ static void ctl_rows(char *o, size_t cap, const ctl_t *list, int n)
     }
 }
 
-void hub_expose_render_types(char *o, size_t cap)
+static void hub_expose_render_types_l(char *o, size_t cap)
 {
     strlcat(o, "<h2>노출 설정</h2><div class=card><p class=muted>"
                "기기 종류마다 플랫폼(SmartThings 등)에 보일 컨트롤을 고릅니다. 같은 종류의 모든 기기에 적용됩니다. "
@@ -329,7 +359,7 @@ void hub_expose_render_types(char *o, size_t cap)
     strlcat(o, "</div><button class=sv>저장</button></form></div>", cap);
 }
 
-void hub_expose_render_dev(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], int sub)
+static void hub_expose_render_dev_l(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], int sub)
 {
     char name[24];
     snprintf(name, sizeof(name), "h%d_%02x%02x%02x_%d", kind, mac3[0], mac3[1], mac3[2], sub);
@@ -338,14 +368,14 @@ void hub_expose_render_dev(char *o, size_t cap, uint8_t kind, const uint8_t mac3
 }
 
 /* 화면에 그린 기기·방을 폼에 적어 둔다 → 저장 때 그 사이 새로 붙은 기기를 '체크 안 됨=숨김'으로 오해하지 않게 */
-void hub_expose_render_dev_marker(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], uint8_t subs)
+static void hub_expose_render_dev_marker_l(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], uint8_t subs)
 {
     char t[64];
     snprintf(t, sizeof(t), "<input type=hidden name=x%d_%02x%02x%02x value=%u>", kind, mac3[0], mac3[1], mac3[2], subs);
     strlcat(o, t, cap);
 }
 
-void hub_expose_render_bit(char *o, size_t cap, int bit)
+static void hub_expose_render_bit_l(char *o, size_t cap, int bit)
 {
     char name[8];
     snprintf(name, sizeof(name), "b%d", bit);
@@ -379,7 +409,7 @@ static void apply_bits(const char *form, uint32_t scope)
     }
 }
 
-bool hub_expose_apply(const char *form, char *err, size_t errlen)
+static bool hub_expose_apply_l(const char *form, char *err, size_t errlen)
 {
     uint32_t scope = 0;
     for (int i = 0; i < NB; i++) {
@@ -392,23 +422,28 @@ bool hub_expose_apply(const char *form, char *err, size_t errlen)
         scope |= 1u << HUB_CTL[i].bit;
     }
     apply_bits(form, scope);
-    save();
+    esp_err_t e = save();
     ESP_LOGI(TAG, "컨트롤 노출 바뀜: Zigbee %08lx, LAN %08lx", (unsigned long)s_mask[0], (unsigned long)s_mask[1]);
     hub_expose_send_all();
+    if (e != ESP_OK) {
+        snprintf(err, errlen, "노출 설정을 저장하지 못했습니다(%s) — 재부팅하면 이전 값으로 돌아갑니다", esp_err_to_name(e));
+        return false;
+    }
     return true;
 }
 
-void hub_expose_apply_bit(const char *form, int bit)
+static bool hub_expose_apply_bit_l(const char *form, int bit)
 {
     if (bit != EXPOSE_ROOM_DEV && bit != EXPOSE_GAS_DEV) {
-        return;
+        return true;
     }
     apply_bits(form, 1u << bit);
-    save();
+    esp_err_t e = save();
     hub_expose_send_all();
+    return e == ESP_OK;
 }
 
-void hub_expose_apply_devices(const char *form)
+static bool hub_expose_apply_devices_l(const char *form)
 {
     hub_dev_t dev[8];
     int nd = hub_rinnai_snapshot(dev, 8);
@@ -436,6 +471,90 @@ void hub_expose_apply_devices(const char *form)
             hid_set(c, dev[i].kind, dev[i].mac3, hid);
         }
     }
-    save();
+    esp_err_t e = save();
     hub_expose_send_all();
+    return e == ESP_OK;
+}
+
+/* ---------------------------------------------------------------- 잠금 래퍼
+ * 관리 화면(웹 서버 태스크)이 쓰고, 상태 전송(hub_rinnai)·Zigbee 태스크가 읽는다 — 같은 뮤텍스로 감싼다.
+ * 잠금 순서: hub_pairs → hub_expose (반대로 부르는 곳 없음). */
+void hub_expose_load(void)
+{
+    LOCK();
+    hub_expose_load_l();
+    UNLOCK();
+}
+
+void hub_expose_forget(uint8_t kind, const uint8_t mac3[3])
+{
+    LOCK();
+    hub_expose_forget_l(kind, mac3);
+    UNLOCK();
+}
+
+void hub_expose_prepare(void)
+{
+    LOCK();
+    hub_expose_prepare_l();
+    UNLOCK();
+}
+
+void hub_expose_send_all(void)
+{
+    LOCK();
+    hub_expose_send_all_l();
+    UNLOCK();
+}
+
+void hub_expose_render_types(char *o, size_t cap)
+{
+    LOCK();
+    hub_expose_render_types_l(o, cap);
+    UNLOCK();
+}
+
+void hub_expose_render_dev(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], int sub)
+{
+    LOCK();
+    hub_expose_render_dev_l(o, cap, kind, mac3, sub);
+    UNLOCK();
+}
+
+void hub_expose_render_dev_marker(char *o, size_t cap, uint8_t kind, const uint8_t mac3[3], uint8_t subs)
+{
+    LOCK();
+    hub_expose_render_dev_marker_l(o, cap, kind, mac3, subs);
+    UNLOCK();
+}
+
+void hub_expose_render_bit(char *o, size_t cap, int bit)
+{
+    LOCK();
+    hub_expose_render_bit_l(o, cap, bit);
+    UNLOCK();
+}
+
+bool hub_expose_apply(const char *form, char *err, size_t errlen)
+{
+    LOCK();
+    bool r = hub_expose_apply_l(form, err, errlen);
+    UNLOCK();
+    return r;
+}
+
+bool hub_expose_apply_bit(const char *form, int bit)
+{
+    LOCK();
+    bool r = hub_expose_apply_bit_l(form, bit);
+    UNLOCK();
+    return r;
+}
+
+bool hub_expose_apply_devices(const char *form)
+{
+    LOCK();
+    bool r = hub_expose_apply_devices_l(form);
+    UNLOCK();
+    return r;
 }

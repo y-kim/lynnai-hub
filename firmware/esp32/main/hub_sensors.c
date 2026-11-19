@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -345,7 +346,7 @@ static bool gas_calibrate(const char *value, char *msg, size_t msglen)
     }
     char *end;
     double m3 = strtod(v, &end);
-    if (*end || !hub_sensors_set_reading(m3)) {
+    if (end == v || *end || !isfinite(m3) || !hub_sensors_set_reading(m3)) {   /* "nan"·"inf" 도 거절 */
         snprintf(msg, msglen, "계량기 숫자를 확인해 주세요 (예: 1676.47)");
         return false;
     }
@@ -356,7 +357,7 @@ static bool gas_calibrate(const char *value, char *msg, size_t msglen)
 /* 관리 화면에서: 지금 계량기 숫자에 맞춘다 */
 bool hub_sensors_set_reading(double m3)
 {
-    if (m3 <= 0 || m3 > 4000000) {
+    if (!isfinite(m3) || m3 <= 0 || m3 > 4000000) {
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -410,8 +411,12 @@ static void room_apply(void)
         return;                                     /* 켜짐·핀 그대로면 온습도 태스크는 안 건드림 */
     }
     s_room_gen++;
-    for (int i = 0; i < 80 && s_room_alive; i++) {
-        vTaskDelay(pdMS_TO_TICKS(25));              /* 최대 ~2초: room_task 는 1초 주기 */
+    for (int i = 0; i < 400 && s_room_alive; i++) {
+        vTaskDelay(pdMS_TO_TICKS(25));              /* 최대 10초: room_task 는 1초 주기(센서 읽기가 길어도) */
+    }
+    if (s_room_alive) {                             /* 옛 태스크가 아직 버스를 쓰는 중 — 지우면 안 된다 */
+        ESP_LOGE(TAG, "온습도계 태스크가 끝나지 않아 다시 적용 못 함(관리 화면에서 다시 저장)");
+        return;
     }
     if (s_sht) {                                    /* 옛 room_task 가 끝난 뒤에만 I2C 정리 */
         i2c_master_bus_rm_device(s_sht);
@@ -436,8 +441,14 @@ static void room_apply(void)
  * 다른 센서와 보일러·각방 클라우드 중계는 그대로 둔다. */
 void hub_sensors_reload(void)
 {
+    static SemaphoreHandle_t mx;                    /* 다시 적용이 겹치지 않게(태스크·I2C 버스를 둘이 만들거나 지우지 않게) */
+    if (!mx) {
+        mx = xSemaphoreCreateMutex();
+    }
+    xSemaphoreTake(mx, portMAX_DELAY);
     gas_apply();
     room_apply();
+    xSemaphoreGive(mx);
     s_plug_dirty = true;                            /* 새 플러그인 목록을 플랫폼에 다시 알림 */
 }
 

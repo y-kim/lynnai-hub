@@ -14,6 +14,18 @@
 #include "hub_rinnai.h"
 #include "hub_expose.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+static SemaphoreHandle_t s_pairs_mx;
+static SemaphoreHandle_t s_pairs_mx_get(void)
+{
+    if (!s_pairs_mx) {
+        s_pairs_mx = xSemaphoreCreateRecursiveMutex();   /* 처음 부르는 곳 = app_main 의 load(다른 태스크 전) */
+    }
+    return s_pairs_mx;
+}
+#define LOCK()   xSemaphoreTakeRecursive(s_pairs_mx_get(), portMAX_DELAY)
+#define UNLOCK() xSemaphoreGiveRecursive(s_pairs_mx_get())
 static const char *TAG = "HUB_PAIRS";
 #define MAX_PAIRS 6
 
@@ -37,7 +49,7 @@ void hub_rinnai_resend(void);
 
 static void mac_hex(const uint8_t m[3], char out[7]) { snprintf(out, 7, "%02x%02x%02x", m[0], m[1], m[2]); }
 
-void hub_pairs_load(void)
+static void hub_pairs_load_l(void)
 {
     nvs_handle_t h;
     s_n = 0;
@@ -63,11 +75,12 @@ void hub_pairs_load(void)
     ESP_LOGI(TAG, "짝 %d개, 별명 %d개 불러옴", s_n, s_na);
 }
 
-static void save(void)
+static esp_err_t save(void)
 {
     nvs_handle_t h;
-    if (nvs_open("pairs", NVS_READWRITE, &h) != ESP_OK) {
-        return;
+    esp_err_t e = nvs_open("pairs", NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
     }
     for (int i = 0; i < MAX_PAIRS; i++) {
         char key[8];
@@ -75,13 +88,18 @@ static void save(void)
         if (i < s_n) {
             char buf[16];
             snprintf(buf, sizeof(buf), "%s>%s", s_pairs[i].f09, s_pairs[i].f06);   /* "f09>f06" */
-            hs_set_str(h, key, buf);
+            if (e == ESP_OK) {
+                e = hs_set_str(h, key, buf);
+            }
         } else {
             hs_erase(h, key);
         }
     }
-    nvs_commit(h);
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
     nvs_close(h);
+    return e;
 }
 
 /* ---------------------------------------------------------------- 별명 */
@@ -156,11 +174,12 @@ static void alias_set(const char *mac, const char *name)
     }
 }
 
-static void alias_save(void)
+static esp_err_t alias_save(void)
 {
     nvs_handle_t h;
-    if (nvs_open("alias", NVS_READWRITE, &h) != ESP_OK) {
-        return;
+    esp_err_t e = nvs_open("alias", NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
     }
     for (int i = 0; i < MAX_ALIAS; i++) {
         char key[8];
@@ -168,13 +187,18 @@ static void alias_save(void)
         if (i < s_na) {
             char buf[7 + ALIAS_LEN];
             snprintf(buf, sizeof(buf), "%s=%s", s_alias[i].mac, s_alias[i].name);
-            hs_set_str(h, key, buf);
+            if (e == ESP_OK) {
+                e = hs_set_str(h, key, buf);
+            }
         } else {
             hs_erase(h, key);
         }
     }
-    nvs_commit(h);
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
     nvs_close(h);
+    return e;
 }
 
 /* 폼 값 URL 디코드(%XX, +) — 한글 별명용 */
@@ -224,7 +248,7 @@ static void set_pair(const char *f09, const char *f06)
     }
 }
 
-int hub_pairs_blob(uint8_t *out, int cap)
+static int hub_pairs_blob_l(uint8_t *out, int cap)
 {
     int n = 0;
     for (int i = 0; i < s_n && n + 6 <= cap; i++) {
@@ -271,7 +295,7 @@ static void boiler_label(const char *mac, char *out, size_t cap)
     }
 }
 
-void hub_pairs_render(char *o, size_t cap)
+static void hub_pairs_render_l(char *o, size_t cap)
 {
     hub_expose_prepare();                            /* 옛 노출 설정이 남아 있으면 먼저 기기별로 옮김 */
     hub_dev_t dev[8];
@@ -340,6 +364,19 @@ void hub_pairs_render(char *o, size_t cap)
                          (cur && !solo && !strcmp(cur, f06s[k])) ? " selected" : "", esc(bl, eb, sizeof(eb)));
                 cat(o, cap, t);
             }
+            if (cur && !solo) {                          /* 짝 보일러가 지금 목록에 없어도(꺼짐·재부팅 직후) 선택된 채로 */
+                bool listed = false;
+                for (int k = 0; k < n6; k++) {
+                    listed |= !strcmp(cur, f06s[k]);
+                }
+                if (!listed) {
+                    char bl[ALIAS_LEN + 24], eb[sizeof(bl) * 6];
+                    boiler_label(cur, bl, sizeof(bl));
+                    snprintf(t, sizeof(t), "<option value=%s selected>%s (지금 연결 안 됨)</option>", cur,
+                             esc(bl, eb, sizeof(eb)));
+                    cat(o, cap, t);
+                }
+            }
             cat(o, cap, "</select></span></div>");
             for (int z = 0; z < HUB_NROOMS; z++) {
                 if (!hub_room_present(&dev[i], z)) {
@@ -362,7 +399,7 @@ void hub_pairs_render(char *o, size_t cap)
 
 static bool hex6(const char *s) { for (int i = 0; i < 6; i++) if (!isxdigit((unsigned char)s[i])) return false; return s[6] == 0; }
 
-bool hub_pairs_apply(const char *form, char *msg, size_t msglen)
+static bool hub_pairs_apply_l(const char *form, char *msg, size_t msglen)
 {
     hub_dev_t dev[8];
     int nd = hub_rinnai_snapshot(dev, 8);
@@ -384,16 +421,20 @@ bool hub_pairs_apply(const char *form, char *msg, size_t msglen)
             }
         }
     }
-    alias_save();
-    save();
-    hub_expose_apply_devices(form);                  /* 기기·방별 노출(같은 폼) */
+    esp_err_t e1 = alias_save(), e2 = save();
+    bool ex = hub_expose_apply_devices(form);        /* 기기·방별 노출(같은 폼) */
     hub_rinnai_resend();
+    if (e1 != ESP_OK || e2 != ESP_OK || !ex) {
+        snprintf(msg, msglen, "일부를 저장하지 못했습니다(%s) — 재부팅하면 이전 값으로 돌아갈 수 있습니다",
+                 esp_err_to_name(e1 != ESP_OK ? e1 : e2 != ESP_OK ? e2 : ESP_FAIL));
+        return false;
+    }
     snprintf(msg, msglen, "저장했습니다");
     return true;
 }
 
 /* 기기 삭제: 폼의 del=<MAC6> 를 허브에서 잊고, 별명·짝도 지운다. */
-bool hub_pairs_delete(const char *form, char *msg, size_t msglen)
+static bool hub_pairs_delete_l(const char *form, char *msg, size_t msglen)
 {
     char mac[8];
     if (httpd_query_key_value(form, "del", mac, sizeof(mac)) != ESP_OK || !hex6(mac)) {
@@ -418,8 +459,52 @@ bool hub_pairs_delete(const char *form, char *msg, size_t msglen)
             i++;
         }
     }
-    alias_save();
-    save();
+    esp_err_t e1 = alias_save(), e2 = save();
+    if (e1 != ESP_OK || e2 != ESP_OK) {
+        snprintf(msg, msglen, "삭제를 저장하지 못했습니다(%s)", esp_err_to_name(e1 != ESP_OK ? e1 : e2));
+        return false;
+    }
     snprintf(msg, msglen, "기기를 삭제했습니다");
     return true;
+}
+
+/* ---------------------------------------------------------------- 잠금 래퍼
+ * 관리 화면(웹 서버 태스크)이 쓰고, 상태 전송(hub_rinnai)·Zigbee 태스크가 읽는다 — 같은 뮤텍스로 감싼다.
+ * 잠금 순서: hub_pairs → hub_expose (반대로 부르는 곳 없음). */
+void hub_pairs_load(void)
+{
+    LOCK();
+    hub_pairs_load_l();
+    UNLOCK();
+}
+
+int hub_pairs_blob(uint8_t *out, int cap)
+{
+    LOCK();
+    int r = hub_pairs_blob_l(out, cap);
+    UNLOCK();
+    return r;
+}
+
+void hub_pairs_render(char *o, size_t cap)
+{
+    LOCK();
+    hub_pairs_render_l(o, cap);
+    UNLOCK();
+}
+
+bool hub_pairs_apply(const char *form, char *msg, size_t msglen)
+{
+    LOCK();
+    bool r = hub_pairs_apply_l(form, msg, msglen);
+    UNLOCK();
+    return r;
+}
+
+bool hub_pairs_delete(const char *form, char *msg, size_t msglen)
+{
+    LOCK();
+    bool r = hub_pairs_delete_l(form, msg, msglen);
+    UNLOCK();
+    return r;
 }

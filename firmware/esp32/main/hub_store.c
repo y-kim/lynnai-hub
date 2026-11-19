@@ -99,13 +99,36 @@ static void ckey(char out[NVS_KEY_NAME_MAX_SIZE], const char *key)
     snprintf(out, NVS_KEY_NAME_MAX_SIZE, "%.*s#", NVS_KEY_NAME_MAX_SIZE - 2, key);
 }
 
+/* 쓰는 중 표시: 새 값의 검사값을 먼저 적어 두고(값 → 검사값 사이에 전원이 끊겨도 '쓰던 값'임을 알 수 있게) */
+static void pkey(char out[NVS_KEY_NAME_MAX_SIZE], const char *key)
+{
+    snprintf(out, NVS_KEY_NAME_MAX_SIZE, "%.*s%%", NVS_KEY_NAME_MAX_SIZE - 2, key);
+}
+
+static void begin_write(nvs_handle_t h, const char *key, uint32_t c)
+{
+    char pk[NVS_KEY_NAME_MAX_SIZE];
+    pkey(pk, key);
+    nvs_set_u32(h, pk, c);
+}
+
+static bool was_writing(nvs_handle_t h, const char *key, uint32_t got)
+{
+    char pk[NVS_KEY_NAME_MAX_SIZE];
+    uint32_t p;
+    pkey(pk, key);
+    return nvs_get_u32(h, pk, &p) == ESP_OK && p == got;
+}
+
 static uint32_t crc(const void *d, size_t n) { return esp_rom_crc32_le(0, d, n); }
 
 static void put_crc(nvs_handle_t h, const char *key, uint32_t c)
 {
-    char ck[NVS_KEY_NAME_MAX_SIZE];
+    char ck[NVS_KEY_NAME_MAX_SIZE], pk[NVS_KEY_NAME_MAX_SIZE];
     ckey(ck, key);
     if (nvs_set_u32(h, ck, c) == ESP_OK) {   /* 읽기 전용 핸들이면 실패 — 다음 저장 때 붙는다 */
+        pkey(pk, key);
+        nvs_erase_key(h, pk);                /* 쓰는 중 표시 지움(없으면 그만) */
         nvs_commit(h);
     }
 }
@@ -122,8 +145,10 @@ static esp_err_t check(nvs_handle_t h, const char *ns, const char *key, esp_err_
         if (cr == ESP_ERR_NVS_NOT_FOUND) {
             put_crc(h, key, got);                         /* 이 기능 전에 저장된 값: 검사값 붙임 */
         } else if (cr == ESP_OK && want != got) {
-            hub_store_report(ns, key, "검사값 불일치");
-            put_crc(h, key, got);                         /* 한 번 보고하고 맞춰 둠 */
+            if (!was_writing(h, key, got)) {              /* 값은 썼는데 검사값 전에 끊긴 경우는 손상이 아니다 */
+                hub_store_report(ns, key, "검사값 불일치");
+            }
+            put_crc(h, key, got);                         /* 맞춰 둠 */
         }
         return ESP_OK;
     }
@@ -136,9 +161,11 @@ static esp_err_t check(nvs_handle_t h, const char *ns, const char *key, esp_err_
 
 esp_err_t hs_set_str(nvs_handle_t h, const char *key, const char *v)
 {
+    uint32_t c = crc(v, strlen(v));
+    begin_write(h, key, c);
     esp_err_t e = nvs_set_str(h, key, v);
     if (e == ESP_OK) {
-        put_crc(h, key, crc(v, strlen(v)));
+        put_crc(h, key, c);
     }
     return e;
 }
@@ -151,9 +178,11 @@ esp_err_t hs_get_str(nvs_handle_t h, const char *ns, const char *key, char *out,
 
 esp_err_t hs_set_blob(nvs_handle_t h, const char *key, const void *v, size_t n)
 {
+    uint32_t c = crc(v, n);
+    begin_write(h, key, c);
     esp_err_t e = nvs_set_blob(h, key, v, n);
     if (e == ESP_OK) {
-        put_crc(h, key, crc(v, n));
+        put_crc(h, key, c);
     }
     return e;
 }
@@ -167,9 +196,11 @@ esp_err_t hs_get_blob(nvs_handle_t h, const char *ns, const char *key, void *out
 #define SCALAR(T, NV)                                                                       \
     esp_err_t hs_set_##NV(nvs_handle_t h, const char *key, T v)                            \
     {                                                                                       \
+        uint32_t c = crc(&v, sizeof(v));                                                    \
+        begin_write(h, key, c);                                                             \
         esp_err_t e = nvs_set_##NV(h, key, v);                                              \
         if (e == ESP_OK) {                                                                  \
-            put_crc(h, key, crc(&v, sizeof(v)));                                            \
+            put_crc(h, key, c);                                                             \
         }                                                                                   \
         return e;                                                                           \
     }                                                                                       \
@@ -192,6 +223,8 @@ esp_err_t hs_erase(nvs_handle_t h, const char *key)
 {
     char ck[NVS_KEY_NAME_MAX_SIZE];
     ckey(ck, key);
+    nvs_erase_key(h, ck);
+    pkey(ck, key);
     nvs_erase_key(h, ck);
     return nvs_erase_key(h, key);
 }
