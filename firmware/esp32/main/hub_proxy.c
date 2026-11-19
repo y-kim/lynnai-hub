@@ -29,6 +29,7 @@
 #include "wolfssl/ssl.h"
 #include "wolfssl/wolfcrypt/error-crypt.h"
 #include <time.h>
+#include <stdatomic.h>
 
 #include "nvs.h"
 #include "hub_store.h"
@@ -71,7 +72,8 @@ static size_t s_pem_len;                      /* 0 = 펌웨어 내장 인증서 
 static SemaphoreHandle_t s_dns_mx;
 static int64_t s_dns_at;                      /* 마지막 조회 성공 시각(0 = 아직) */
 static char s_dns_from[16];                   /* 그때 물어본 DNS 서버 */
-static volatile int s_links;
+static atomic_int s_links;
+#define RELAY_READ_SEC 10                    /* 중계 중 한 번 읽기의 최대 대기(레코드 일부만 오고 멈추면 끊음) */
 static volatile uint8_t s_mode = HUB_MODE_PROXY;
 static volatile uint32_t s_mode_gen;          /* 모드가 바뀔 때마다 +1 → 지금 연결들이 알아채고 닫음 */
 
@@ -470,19 +472,19 @@ static int peer_octet(int fd)
     return -1;
 }
 
-/* 이 요청이 들어온 '우리 쪽' 주소(IPv4, 네트워크 순서) — 허브 AP 로 왔는지 집 LAN(STA)으로 왔는지 가르는 데 쓴다 */
-static uint32_t local_ip(int fd)
+/* 상대 주소(IPv4, 네트워크 순서). IPv4-mapped IPv6 도 */
+static uint32_t peer_ip(int fd)
 {
     struct sockaddr_storage a;
     socklen_t l = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &l) < 0) {
+    if (getpeername(fd, (struct sockaddr *)&a, &l) < 0) {
         return 0;
     }
     if (a.ss_family == AF_INET) {
         return ((struct sockaddr_in *)&a)->sin_addr.s_addr;
     }
 #if LWIP_IPV6
-    if (a.ss_family == AF_INET6) {               /* IPv4-mapped(::ffff:a.b.c.d) */
+    if (a.ss_family == AF_INET6) {
         uint32_t v;
         memcpy(&v, &((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr[12], 4);
         return v;
@@ -779,9 +781,9 @@ static void link_task(void *arg)
         ESP_LOGI(TAG, "연결됨: 보일러(%s) <-> 허브(단독 모드)", wolfSSL_get_version(down));
         hub_event(EV_LINK_UP, NULL, dev, 1);         /* b=1: 단독 */
         t_up = esp_timer_get_time();
-        tv.tv_sec = 0;
+        tv.tv_sec = RELAY_READ_SEC;
         setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        tap = hub_rinnai_link_open();
+        tap = hub_rinnai_link_open(peer_ip(down_fd));
         closer = broker_loop(down, down_fd, buf, tap, gen);
         goto out;
     }
@@ -799,10 +801,10 @@ static void link_task(void *arg)
     hub_event(EV_LINK_UP, NULL, dev, 0);
     t_up = esp_timer_get_time();
 
-    tv.tv_sec = 0;                                   /* 중계 중엔 select 로 기다리므로 읽기 제한시간 해제 */
+    tv.tv_sec = RELAY_READ_SEC;                      /* select 뒤 읽기: TLS 레코드를 반만 보내고 멈추는 상대에 매달리지 않게 */
     setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(up_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    tap = hub_rinnai_link_open();
+    tap = hub_rinnai_link_open(peer_ip(down_fd));
     int64_t last_io = esp_timer_get_time();
     for (;;) {
         if (s_mode_gen != gen) {                     /* 단독 모드로 바뀜 → 끊고 다시 받기 */
@@ -887,7 +889,7 @@ done:
         uint8_t who[6] = { (uint8_t)closer };
         hub_event(EV_LINK_CLOSE, who, dev, t_up ? (int32_t)((esp_timer_get_time() - t_up) / 1000) : 0);
     }
-    s_links--;
+    atomic_fetch_sub(&s_links, 1);
     vTaskDelete(NULL);
 }
 
@@ -924,6 +926,9 @@ static void listen_task(void *arg)
         }
     }
     s_cli_ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
+    if (s_cli_ctx && wolfSSL_CTX_SetMinVersion(s_cli_ctx, WOLFSSL_TLSV1_2) != WOLFSSL_SUCCESS) {   /* 클라우드는 TLS 1.3 */
+        ESP_LOGW(TAG, "클라우드 쪽 TLS 최소 버전(1.2) 설정 실패");
+    }
     if (!s_srv_ctx || !s_cli_ctx) {
         ESP_LOGE(TAG, "TLS 준비 실패");
         vTaskDelete(NULL);
@@ -956,11 +961,17 @@ static void listen_task(void *arg)
         socklen_t fl = sizeof(from);
         int c = accept(ls, (struct sockaddr *)&from, &fl);
         if (c < 0) {
+            vTaskDelay(pdMS_TO_TICKS(100));          /* 소켓 고갈 등 — 헛돌지 않게 */
             continue;
         }
         char ip[16];
         inet_ntoa_r(from.sin_addr, ip, sizeof(ip));
-        if (s_links >= MAX_LINKS) {
+        if (!hub_wifi_is_ap_peer(from.sin_addr.s_addr)) {   /* 기기는 허브 AP 에만 있다 — 집 LAN 쪽 접속은 받지 않음 */
+            ESP_LOGW(TAG, "%s 접속 거절(허브 AP 대역 아님)", ip);
+            close(c);
+            continue;
+        }
+        if (atomic_load(&s_links) >= MAX_LINKS) {
             ESP_LOGW(TAG, "%s 접속 거절(동시 연결 %d개 초과)", ip, MAX_LINKS);
             hub_event(EV_LINK_REJECT, NULL, (int)(ntohl(from.sin_addr.s_addr) & 0xff), 0);
             close(c);
@@ -968,9 +979,9 @@ static void listen_task(void *arg)
         }
         ESP_LOGI(TAG, "%s 접속", ip);
         hub_event(EV_LINK_OPEN, NULL, (int)(ntohl(from.sin_addr.s_addr) & 0xff), 0);
-        s_links++;
+        atomic_fetch_add(&s_links, 1);
         if (xTaskCreate(link_task, "hub_link", 20480, (void *)(intptr_t)c, 5, NULL) != pdPASS) {
-            s_links--;
+            atomic_fetch_sub(&s_links, 1);
             close(c);
         }
     }
@@ -1105,7 +1116,7 @@ static esp_err_t boot_send(httpd_req_t *req, int code, const char *body)
  *           클라우드가 오류로 답하면 그 상태·본문 그대로(저장 안 함),
  *           클라우드가 답을 못 하면(끊김·잘림) 이 기기의 저장된 답, 그것도 없으면 502.
  *   단독  : 허브가 만든 답(BOOT_LOCAL)만 — 저장한 클라우드 계정·암호는 단독에서 내주지 않는다.
- *   허브 AP 로 온 요청만 받는다(집 LAN 쪽은 403). */
+ *   허브 AP 대역에서 온 요청만 받는다(집 LAN 쪽은 403). */
 esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
 {
     char svc[32] = "", mac[32] = "", key[16];
@@ -1113,9 +1124,8 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
     httpd_req_get_hdr_value_str(req, "Ck-Mac", mac, sizeof(mac));
     boot_key(svc, mac, key);
     bool sa = s_mode == HUB_MODE_STANDALONE;
-    /* 기기 전용 망(허브 AP)으로 온 요청만 받는다 — 집 LAN 의 다른 기기가 기기 계정·암호를 받아 가지 못하게 */
-    uint32_t lip = local_ip(httpd_req_to_sockfd(req));
-    if (!lip || lip != hub_wifi_ap_ip()) {
+    /* 기기 전용 망(허브 AP 대역)에서 온 요청만 받는다 — 집 LAN 의 다른 기기가 기기 계정·암호를 받아 가지 못하게 */
+    if (!hub_wifi_is_ap_peer(peer_ip(httpd_req_to_sockfd(req)))) {
         ESP_LOGW(TAG, "부트스트랩 거절: 허브 AP 가 아닌 곳에서 온 요청");
         httpd_resp_set_status(req, "403 Forbidden");
         return httpd_resp_send(req, "forbidden", HTTPD_RESP_USE_STRLEN);

@@ -27,7 +27,7 @@ typedef struct {
 typedef struct hub_link_tap hub_link_tap_t;
 
 /* 링크(기기 하나의 중계 연결)마다 하나. 링크 태스크에서만 부른다. */
-hub_link_tap_t *hub_rinnai_link_open(void);
+hub_link_tap_t *hub_rinnai_link_open(uint32_t peer_ip);   /* peer_ip = 상대 주소(토픽 MAC 대조용, 0 = 대조 안 함) */
 void hub_rinnai_link_close(hub_link_tap_t *t);
 void hub_rinnai_tap_down(hub_link_tap_t *t, const uint8_t *data, int n);   /* 기기 → 클라우드 바이트 */
 void hub_rinnai_tap_up(hub_link_tap_t *t, const uint8_t *data, int n);     /* 클라우드 → 기기 바이트 */

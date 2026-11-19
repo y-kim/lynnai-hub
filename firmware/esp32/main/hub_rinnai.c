@@ -16,6 +16,7 @@
 #include "freertos/queue.h"
 
 #include "hub_rinnai.h"
+#include "hub_wifi.h"
 #include "hub_proxy.h"
 #include "hub_uplink.h"
 #include "hub_pairs.h"
@@ -52,6 +53,8 @@ struct hub_link_tap {
     uint8_t mac3[3];                /* MAC 끝 3바이트 = instance */
     char base[72];                  /* rinnai/RK/01/RK/f06/23/<MAC> */
     QueueHandle_t cmds;
+    uint32_t peer_ip;               /* 이 연결의 상대 주소(허브 AP 대역) */
+    bool refused;                   /* 토픽 MAC 이 상대와 안 맞아 거절함(로그 한 번만) */
     bool used;
     bool poll_now;                  /* 단독 모드: 기기가 /get 을 구독하면 곧바로 상태 요청(fa) */
 };
@@ -86,7 +89,7 @@ static void kick(void)
 
 static bool mac3_eq(const uint8_t *a, const uint8_t *b) { return !memcmp(a, b, 3); }
 
-/* base 토픽의 마지막 세그먼트(MAC "34:5f:45:00:00:01")에서 끝 3바이트를 뽑는다 */
+/* base 토픽의 마지막 세그먼트(MAC "AA:BB:CC:A1:B2:C3")에서 끝 3바이트를 뽑는다 */
 static bool parse_mac3(const char *base, uint8_t out[3])
 {
     const char *m = strrchr(base, '/');
@@ -195,11 +198,44 @@ static bool framer_at_boundary(const framer_t *f) { return !f->in_body && f->hle
 /* 기기가 보낸 PUBLISH 에서 토픽·상태 블롭을 뽑는다 */
 static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j);
 
+/* base 토픽 끝의 MAC 6바이트 */
+static bool parse_mac6(const char *base, int len, uint8_t out[6])
+{
+    char tmp[80];
+    if (len <= 0 || len >= (int)sizeof(tmp)) {
+        return false;
+    }
+    memcpy(tmp, base, len);
+    tmp[len] = 0;
+    const char *m = strrchr(tmp, '/');
+    m = m ? m + 1 : tmp;
+    int n = 0;
+    for (const char *p = m; *p && n < 6;) {
+        if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1])) {
+            return false;
+        }
+        char hx[3] = { p[0], p[1], 0 };
+        out[n++] = (uint8_t)strtoul(hx, NULL, 16);
+        p += 2;
+        if (*p == ':') {
+            p++;
+        }
+    }
+    return n == 6;
+}
+
 /* 이 링크의 기기 토픽(base = 마지막 '/' 앞)과 종류를 배운다 */
 static void learn_base(hub_link_tap_t *t, const char *topic, const char *slash)
 {
     uint8_t kind = strstr(topic, "/f06/") ? HUB_KIND_F06 : strstr(topic, "/f09/") ? HUB_KIND_F09 : 0;
-    if (!kind || slash - topic >= (int)sizeof(t->base) || t->kind == kind) {
+    if (!kind || slash - topic >= (int)sizeof(t->base) || t->kind == kind || t->refused) {
+        return;
+    }
+    /* 토픽의 MAC 이 실제로 이 연결의 상대(허브 AP 에 붙은 그 단말)인지 — 남의 기기 행세 막기 */
+    uint8_t mac6[6];
+    if (!parse_mac6(topic, slash - topic, mac6) || (t->peer_ip && !hub_wifi_ap_peer_is(t->peer_ip, mac6))) {
+        t->refused = true;
+        ESP_LOGW(TAG, "토픽의 기기 MAC 이 연결한 단말과 다름 — 이 연결은 기기로 보지 않음: %.*s", (int)(slash - topic), topic);
         return;
     }
     lock();
@@ -298,9 +334,12 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
             char hx[3] = { (char)pl[j], (char)pl[j + 1], 0 };
             blob[bn++] = (uint8_t)strtoul(hx, NULL, 16);
         }
+        if (!bn) {                                   /* 빈 상태("data":"") — 기기표 칸을 차지하지 않게 */
+            return;
+        }
         lock();
         rk_dev_t *d = dev_get(kind, t->mac3);
-        if (d && bn && (d->n != bn || memcmp(d->blob, blob, bn))) {
+        if (d && (d->n != bn || memcmp(d->blob, blob, bn))) {
             memcpy(d->blob, blob, bn);
             d->n = bn;
             d->dirty = true;
@@ -316,7 +355,7 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
 
 /* ---------------------------------------------------------------- 링크 */
 
-hub_link_tap_t *hub_rinnai_link_open(void)
+hub_link_tap_t *hub_rinnai_link_open(uint32_t peer_ip)
 {
     lock();
     hub_link_tap_t *t = NULL;
@@ -334,6 +373,8 @@ hub_link_tap_t *hub_rinnai_link_open(void)
         t->kind = 0;
         t->base[0] = 0;
         memset(t->mac3, 0, 3);
+        t->peer_ip = peer_ip;
+        t->refused = false;
         if (!t->cmds) {
             t->cmds = xQueueCreate(4, sizeof(cmd_t *));
         }
@@ -401,6 +442,20 @@ static bool token_ok(const char *s, int n, int max)
         }
     }
     return true;
+}
+
+/* 기기에 보내도 되는 쓰기 코드(드라이버가 쓰는 것, 실기로 확인한 것). 새 기능은 여기에 더한다.
+ *   80 전원  b1 난방  b3 외출  b4 난방 방식  d1 온수 온도  df (d1 과 같이)  d2 난방수 온도  d4 실내 온도
+ *   a0 각방 번호  96 예약 켜기  97 예약 간격 */
+static bool code_allowed(const char *c)
+{
+    static const char *const OK[] = { "80", "b1", "b3", "b4", "d1", "df", "d2", "d4", "a0", "96", "97" };
+    for (size_t i = 0; i < sizeof(OK) / sizeof(OK[0]); i++) {
+        if (!strcmp(c, OK[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void command_one(const char *text, int len);
@@ -528,6 +583,9 @@ static void command_one(const char *text, int len)
                 mac3[i] = (uint8_t)strtoul(hx, NULL, 16);
             }
             target = mac3;
+        } else {                                     /* @ 뒤가 MAC 이 아니면 아무 기기로 보내지 않고 버린다 */
+            ESP_LOGW(TAG, "대상 MAC 형식 틀림 — 버림: %s", s);
+            return;
         }
         rest = strchr(rest, ' ');
         if (!rest) {
@@ -551,6 +609,10 @@ static void command_one(const char *text, int len)
             return;
         }
         *eq = 0;
+        if (!code_allowed(tok)) {                    /* 확인한 쓰기 코드만(검증 안 된 코드로 보일러를 건드리지 않게) */
+            ESP_LOGW(TAG, "허용 안 된 코드 %s — 명령 버림", tok);
+            return;
+        }
         r += snprintf(rpc + r, sizeof(rpc) - r, "%s{\"id\":\"%s\",\"data\":\"%s\"}", items ? "," : "", tok, eq + 1);
         items++;
         if (r >= (int)sizeof(rpc) - 8) {
@@ -639,7 +701,9 @@ static void zb_task(void *arg)
             uint8_t kind, mac3[3], blob[HUB_BLOB_MAX];
             int bn = 0;
             lock();
-            if (s_dev[i].used && s_dev[i].n && (s_dev[i].dirty || beat)) {
+            /* 주기 재전송은 연결된 기기만 — 끊긴 기기의 옛 상태를 보내면 드라이버가 온라인으로 되돌렸다 다시 끊김 처리(깜빡임) */
+            if (s_dev[i].used && s_dev[i].n &&
+                (s_dev[i].dirty || (beat && find_tap(s_dev[i].kind, s_dev[i].mac3)))) {
                 kind = s_dev[i].kind;
                 memcpy(mac3, s_dev[i].mac3, 3);
                 bn = s_dev[i].n;

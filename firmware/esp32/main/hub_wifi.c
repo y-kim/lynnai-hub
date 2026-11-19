@@ -222,6 +222,40 @@ uint32_t hub_wifi_ap_ip(void)
     return 0;
 }
 
+/* 상대 주소가 허브 AP 대역(기기 전용 망)인가. lwIP 는 다른 인터페이스 주소로 온 패킷도 받으므로(약한 호스트 모델)
+ * '우리 쪽 주소'가 아니라 '상대 주소'로 가른다 — TCP 라 집 LAN 에서 AP 대역 주소를 사칭하면 답이 AP 로 나가 연결이 안 된다. */
+bool hub_wifi_is_ap_peer(uint32_t ip)
+{
+    esp_netif_ip_info_t a;
+    if (!s_ap_netif || esp_netif_get_ip_info(s_ap_netif, &a) != ESP_OK || !a.ip.addr) {
+        return false;
+    }
+    return ip && ip != a.ip.addr && (ip & a.netmask.addr) == (a.ip.addr & a.netmask.addr);
+}
+
+/* 토픽에 적힌 기기 MAC 이 실제로 허브 AP 에 붙은 단말이고, 그 단말이 DHCP 로 받은 주소가 이 연결의 상대 주소인가.
+ * 다른 단말이 남의 MAC 을 토픽에 적어 그 기기 행세를 하지 못하게. DHCP 표를 못 읽으면(드묾) 붙어 있는 것만 본다. */
+bool hub_wifi_ap_peer_is(uint32_t ip, const uint8_t mac[6])
+{
+    wifi_sta_list_t list;
+    if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) {
+        return false;
+    }
+    bool assoc = false;
+    for (int i = 0; i < list.num; i++) {
+        assoc |= !memcmp(list.sta[i].mac, mac, 6);
+    }
+    if (!assoc) {
+        return false;
+    }
+    esp_netif_pair_mac_ip_t pair = { 0 };
+    memcpy(pair.mac, mac, 6);
+    if (!s_ap_netif || esp_netif_dhcps_get_clients_by_mac(s_ap_netif, 1, &pair) != ESP_OK || !pair.ip.addr) {
+        return true;
+    }
+    return pair.ip.addr == ip;
+}
+
 /* ---- 보일러 온보딩 보조: 스캔 / 임시 STA 전환 / 복귀 ---- */
 
 /* prefix 로 시작하는 AP SSID 를 찾아 out 에 채운다(대소문자 무시). 스캔 중 AP/Zigbee 가 잠깐 끊길 수 있다. */

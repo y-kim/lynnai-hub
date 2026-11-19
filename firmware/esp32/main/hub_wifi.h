@@ -23,6 +23,8 @@ esp_err_t hub_wifi_sta_temp_open(const char *ssid, uint32_t *ip_out);
 
 /* 허브 AP 쪽 IP(네트워크 바이트 순서) */
 uint32_t hub_wifi_ap_ip(void);
+bool hub_wifi_is_ap_peer(uint32_t ip);
+bool hub_wifi_ap_peer_is(uint32_t ip, const uint8_t mac[6]);   /* 이 MAC 이 AP 에 붙어 있고 그 주소가 ip 인가 */   /* 상대 IPv4(네트워크 순서)가 허브 AP 대역인가 */
 
 /* 2.4GHz 라디오 공유: Zigbee 가입(steering) 동안 Wi-Fi 를 멈췄다가 다시 켠다. */
 void hub_wifi_radio_pause(void);
