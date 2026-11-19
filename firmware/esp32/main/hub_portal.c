@@ -59,6 +59,7 @@ static const char HEAD2[] =
     "margin:0;padding:8px;background:transparent;border:0;color:#aaa;line-height:0}"
     "h2{font-size:16px;margin-top:24px}h3{font-size:15px;margin:0 0 6px}a{color:#8af}"
     "button.ghost{background:#2a2a2a;border:1px solid #555}.ok{color:#8d8}"
+    "button.lnk{width:auto;display:inline;background:none;border:0;padding:0;margin:0;color:#8af;font:inherit;cursor:pointer}"
     "button.ic{width:auto;display:inline-block;margin:0;padding:6px 9px;background:#2a2a2a;border:1px solid #555;font-weight:400;vertical-align:middle}"
     "button.sv{background:#2a2a2a;border:1px solid #555;color:#999}button.sv.on{background:#c33;border:1px solid #c33;color:#fff}"
     ".chg{outline:1px solid #666;outline-offset:3px;border-radius:6px}"
@@ -419,7 +420,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     }
     strlcat(b, "<h1>LYNNAI 허브 관리</h1><p class=muted>기기 ", cap);
     cat_esc(b, cap, s_st->device_id);
-    strlcat(b, " · <a href=/logout>로그아웃</a></p>", cap);
+    strlcat(b, " · <form method=post action=/logout style='display:inline'><button class=lnk>로그아웃</button></form></p>", cap);
     if (msg) {
         strlcat(b, ok ? "<p class=ok>" : "<p class=warn>", cap); cat_esc(b, cap, msg); strlcat(b, "</p>", cap);
     }
@@ -481,10 +482,19 @@ static esp_err_t login_post(httpd_req_t *req)
     return redirect(req, "/admin");
 }
 
+/* 로그아웃: 지금 세션 쿠키를 가진 요청(POST)만 세션을 끝낸다. 남이 링크·이미지로 GET 을 보내 관리자를
+ * 쫓아내지 못하게 GET 은 아무것도 안 하고 관리 화면으로 보낸다. */
+static esp_err_t logout_post(httpd_req_t *req)
+{
+    if (authed(req)) {
+        s_sess[0] = 0;
+        httpd_resp_set_hdr(req, "Set-Cookie", "lynnai_s=; Path=/; Max-Age=0");
+    }
+    return redirect(req, "/admin");
+}
+
 static esp_err_t logout_get(httpd_req_t *req)
 {
-    s_sess[0] = 0;
-    httpd_resp_set_hdr(req, "Set-Cookie", "lynnai_s=; Path=/; Max-Age=0");
     return redirect(req, "/admin");
 }
 
@@ -658,6 +668,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     const httpd_uri_t adm = { .uri = "/admin", .method = HTTP_GET, .handler = admin_get };
     const httpd_uri_t lin = { .uri = "/login", .method = HTTP_POST, .handler = login_post };
     const httpd_uri_t lout = { .uri = "/logout", .method = HTTP_GET, .handler = logout_get };
+    const httpd_uri_t loutp = { .uri = "/logout", .method = HTTP_POST, .handler = logout_post };
     const httpd_uri_t plug = { .uri = "/admin/plugin", .method = HTTP_POST, .handler = plugin_post };
     const httpd_uri_t gas = { .uri = "/admin/plugin-action", .method = HTTP_POST, .handler = plugin_action_post };
     const httpd_uri_t expo = { .uri = "/admin/expose", .method = HTTP_POST, .handler = expose_post };
@@ -669,6 +680,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &adm);
     httpd_register_uri_handler(srv, &lin);
     httpd_register_uri_handler(srv, &lout);
+    httpd_register_uri_handler(srv, &loutp);
     httpd_register_uri_handler(srv, &plug);
     httpd_register_uri_handler(srv, &gas);
     const httpd_uri_t apit = { .uri = "/admin/api", .method = HTTP_POST, .handler = apitoken_post };
