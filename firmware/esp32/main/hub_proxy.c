@@ -208,6 +208,7 @@ static void mode_load(void)
     uint8_t m = HUB_MODE_PROXY;
     if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
         hs_get_u8(h, "proxy", "mode", &m);
+        hs_erase(h, "boot");                         /* 예전 공용 부트스트랩 캐시(이제 기기별 bt########) */
         size_t n = sizeof(s_up.ip);
         if (hs_get_str(h, "proxy", "up_ip", s_up.ip, &n) != ESP_OK || !s_up.ip[0]) {
             strlcpy(s_up.ip, DEF_UP_IP, sizeof(s_up.ip));
@@ -937,88 +938,104 @@ void hub_proxy_start(void)
     xTaskCreate(listen_task, "hub_proxy", 6144, NULL, 5, NULL);
 }
 
-/* 마지막으로 받은 /key/server 답(본문)을 저장/읽기 — 단독 모드나 클라우드가 안 될 때 재사용 */
-static void boot_cache_put(const char *body)
+/* ---------------------------------------------------------------- /key/server (부트스트랩)
+ * 응답(XML): <result><error>S000001</error><message>success</message><ip>www.rkiot.net</ip>
+ *            <port><mqtt>8883</mqtt>…</port><uid>…</uid><pass>…</pass></result>
+ * uid/pass 는 기기마다 다를 수 있으므로 캐시는 (서비스, 기기 MAC)별로, 완전하고 성공인 응답만 저장한다. */
+#define BOOT_CAP 2048
+
+/* 캐시 키: "bt" + (서비스|MAC) 의 FNV-1a 32비트(NVS 키는 15자 제한) */
+static void boot_key(const char *svc, const char *mac, char key[16])
+{
+    uint32_t h = 2166136261u;
+    for (const char *p = svc; *p; p++) {
+        h = (h ^ (uint8_t)*p) * 16777619u;
+    }
+    h = (h ^ '|') * 16777619u;
+    for (const char *p = mac; *p; p++) {
+        h = (h ^ (uint8_t)*p) * 16777619u;
+    }
+    snprintf(key, 16, "bt%08lx", (unsigned long)h);
+}
+
+/* 정상 응답인가: 결과 XML 이 끝까지 있고 성공 코드와 접속 정보가 들어 있음 */
+static bool boot_valid(const char *body)
+{
+    return strstr(body, "<result>") && strstr(body, "</result>") && strstr(body, "<error>S000001</error>") &&
+           strstr(body, "<uid>") && strstr(body, "<pass>") && strstr(body, "<ip>");
+}
+
+static void boot_cache_put(const char *key, const char *body)
 {
     nvs_handle_t h;
-    size_t n = 2048;
+    size_t n = BOOT_CAP;
     char *old = malloc(n);
     if (old && nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
-        if (hs_get_str(h, "proxy", "boot", old, &n) != ESP_OK || strcmp(old, body)) {   /* 바뀌었을 때만 씀 */
-            hs_set_str(h, "boot", body);
-            nvs_commit(h);
+        if (hs_get_str(h, "proxy", key, old, &n) != ESP_OK || strcmp(old, body)) {   /* 바뀌었을 때만 씀 */
+            if (hs_set_str(h, key, body) == ESP_OK) {
+                nvs_commit(h);
+            }
         }
         nvs_close(h);
     }
     free(old);
 }
 
-static bool boot_cache_get(char *out, size_t cap)
+static bool boot_cache_get(const char *key, char *out, size_t cap)
 {
     nvs_handle_t h;
     size_t n = cap;
     bool ok = false;
     if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
-        ok = hs_get_str(h, "proxy", "boot", out, &n) == ESP_OK && out[0];
+        ok = hs_get_str(h, "proxy", key, out, &n) == ESP_OK && boot_valid(out);
         nvs_close(h);
     }
     return ok;
 }
 
-/* 클라우드에 /key/server 를 다시 물어 본문을 buf 에 받는다. 본문 시작 포인터(없으면 NULL) */
-static char *boot_fetch(const char *svc, const char *mac, char *buf, int cap)
+/* 클라우드에 /key/server 를 다시 묻는다. 돌려주는 값 = HTTP 상태 코드(완전한 응답일 때), -1 = 응답 없음/잘림.
+ * *body 는 buf 안의 본문 시작. */
+static int boot_fetch(const char *svc, const char *mac, char *buf, int cap, char **body)
 {
+    *body = NULL;
     if (sta_ready(15)) {
         resolve_up(false);
     }
     int s = tcp_connect(s_up.ip, BOOT_PORT, 8);
     if (s < 0) {
-        return NULL;
+        return -1;
     }
     int n = snprintf(buf, cap, "GET /key/server HTTP/1.0\r\nHost: %s\r\nCk-Service: %s\r\nCk-Mac: %s\r\n\r\n",
                      s_up.host, svc, mac);
     send(s, buf, n, 0);
-    int got = 0, r;
+    int got = 0, r = 0;
     while (got < cap - 1 && (r = recv(s, buf + got, cap - 1 - got, 0)) > 0) {
         got += r;
     }
     close(s);
     buf[got] = '\0';
-    char *body = strstr(buf, "\r\n\r\n");
-    return body ? body + 4 : NULL;
+    if (r < 0 || got >= cap - 1) {
+        return -1;                                   /* 시간 초과·오류, 또는 버퍼가 차서 잘렸을 수 있음 */
+    }
+    int code = 0;
+    char *b = strstr(buf, "\r\n\r\n");
+    if (!b || sscanf(buf, "HTTP/%*d.%*d %d", &code) != 1) {
+        return -1;
+    }
+    *body = b + 4;
+    return code;
 }
 
-/* 보일러의 GET /key/server: 프록시 모드면 클라우드에 다시 물어 답하고(그 답을 저장), 클라우드가 안 되거나
- * 단독 모드면 저장해 둔 마지막 답을 준다(기기에 알려 줄 접속 주소는 같은 rkiot.net → 허브 DNS 가 허브로). */
-esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
-{
-    char svc[32] = "", mac[32] = "";
-    httpd_req_get_hdr_value_str(req, "Ck-Service", svc, sizeof(svc));
-    httpd_req_get_hdr_value_str(req, "Ck-Mac", mac, sizeof(mac));
-    ESP_LOGI(TAG, "부트스트랩 요청 (Ck-Mac %s, %s 모드)", mac, s_mode == HUB_MODE_STANDALONE ? "단독" : "프록시");
+/* 단독 모드에서 이 기기의 저장된 답이 없을 때: 허브가 답을 만든다. 허브(단독)는 어떤 아이디/암호든 받으므로
+ * uid/pass 는 자리 표시. 이 값으로 등록된 기기를 나중에 프록시로 바꾸면 클라우드가 거절할 수 있다
+ * (그 기기가 다시 /key/server 를 물으면 진짜 값을 받는다 — 안 되면 버튼 길게로 다시 등록). */
+static const char BOOT_LOCAL[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><result><tid></tid><error>S000001</error><message>success</message>"
+    "<ip>" UP_HOST "</ip><port><mqtt>8883</mqtt><ws>6002</ws><ssl>true</ssl></port>"
+    "<uid>lynnai</uid><pass>standalone</pass></result>";
 
-    char *buf = malloc(2048);
-    char *body = NULL;
-    if (buf && s_mode == HUB_MODE_PROXY) {
-        body = boot_fetch(svc, mac, buf, 2048);
-        if (body && body[0]) {
-            boot_cache_put(body);
-        } else {
-            body = NULL;
-            ESP_LOGW(TAG, "부트스트랩: 클라우드 응답 없음 — 저장해 둔 답 사용");
-        }
-    }
-    if (buf && !body && boot_cache_get(buf, 2048)) {
-        body = buf;
-    }
-    if (!body) {
-        free(buf);
-        ESP_LOGW(TAG, "부트스트랩: 줄 답이 없음(클라우드 실패 + 저장된 답 없음)");
-        hub_event(EV_BOOTSTRAP, NULL, peer_octet(httpd_req_to_sockfd(req)), 0);
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "upstream");
-    }
-    ESP_LOGI(TAG, "부트스트랩 응답 (%d바이트)", (int)strlen(body));
-    hub_event(EV_BOOTSTRAP, NULL, peer_octet(httpd_req_to_sockfd(req)), 1);
+static esp_err_t boot_send(httpd_req_t *req, int code, const char *body)
+{
     /* Pi fakesrv 처럼 헤더+본문을 '한 번에' 보낸다. httpd_resp_send 는 헤더와 본문을 따로 보내서
      * (TCP 조각 2개) GainSpan 이 첫 조각만 읽고 실패 처리하는 것으로 의심됨. */
     int bl = (int)strlen(body);
@@ -1026,13 +1043,64 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
     esp_err_t e = ESP_FAIL;
     if (out) {
         int ol = snprintf(out, bl + 160,
-                          "HTTP/1.1 200 OK\r\nContent-Type: application/xml; charset=utf-8\r\n"
-                          "Content-Length: %d\r\n\r\n%s", bl, body);
+                          "HTTP/1.1 %d %s\r\nContent-Type: application/xml; charset=utf-8\r\n"
+                          "Content-Length: %d\r\n\r\n%s", code, code == 200 ? "OK" : "Error", bl, body);
         e = httpd_send(req, out, ol) == ol ? ESP_OK : ESP_FAIL;
         free(out);
     }
-    free(buf);
     /* 다 보낸 뒤 연결을 닫아 응답 끝을 알린다(Pi fakesrv 와 동일). */
     httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
+    return e;
+}
+
+/* 보일러의 GET /key/server
+ *   프록시: 클라우드에 다시 묻는다 → 정상(200 + 성공 XML)이면 이 기기 몫으로 저장하고 그대로,
+ *           클라우드가 오류로 답하면 그 상태·본문 그대로(저장 안 함),
+ *           클라우드가 답을 못 하면(끊김·잘림) 이 기기의 저장된 답, 그것도 없으면 502.
+ *   단독  : 이 기기의 저장된 답, 없으면 허브가 만든 답(BOOT_LOCAL). */
+esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
+{
+    char svc[32] = "", mac[32] = "", key[16];
+    httpd_req_get_hdr_value_str(req, "Ck-Service", svc, sizeof(svc));
+    httpd_req_get_hdr_value_str(req, "Ck-Mac", mac, sizeof(mac));
+    boot_key(svc, mac, key);
+    bool sa = s_mode == HUB_MODE_STANDALONE;
+    ESP_LOGI(TAG, "부트스트랩 요청 (Ck-Mac %s, %s 모드)", mac, sa ? "단독" : "프록시");
+    int dev = peer_octet(httpd_req_to_sockfd(req));
+    char *buf = malloc(BOOT_CAP);
+    if (!buf) {
+        return httpd_resp_send_500(req);
+    }
+    esp_err_t e;
+    if (!sa) {
+        char *body;
+        int code = boot_fetch(svc, mac, buf, BOOT_CAP, &body);
+        if (code == 200 && boot_valid(body)) {
+            boot_cache_put(key, body);
+            ESP_LOGI(TAG, "부트스트랩 중계 (%d바이트, 저장)", (int)strlen(body));
+            hub_event(EV_BOOTSTRAP, NULL, dev, 1);
+            e = boot_send(req, 200, body);
+        } else if (code > 0) {
+            ESP_LOGW(TAG, "부트스트랩: 클라우드가 %d / 성공 아님 — 그대로 전달(저장 안 함)", code);
+            hub_event(EV_BOOTSTRAP, NULL, dev, 0);
+            e = boot_send(req, code, body);
+        } else if (boot_cache_get(key, buf, BOOT_CAP)) {
+            ESP_LOGW(TAG, "부트스트랩: 클라우드 응답 없음 — 이 기기의 저장된 답 사용");
+            hub_event(EV_BOOTSTRAP, NULL, dev, 1);
+            e = boot_send(req, 200, buf);
+        } else {
+            ESP_LOGW(TAG, "부트스트랩: 클라우드 응답 없음 + 저장된 답 없음 → 502");
+            hub_event(EV_BOOTSTRAP, NULL, dev, 0);
+            free(buf);
+            httpd_resp_set_status(req, "502 Bad Gateway");
+            return httpd_resp_send(req, "upstream", HTTPD_RESP_USE_STRLEN);
+        }
+    } else {
+        bool cached = boot_cache_get(key, buf, BOOT_CAP);
+        ESP_LOGI(TAG, "부트스트랩(단독): %s", cached ? "이 기기의 저장된 답" : "허브가 만든 답");
+        hub_event(EV_BOOTSTRAP, NULL, dev, 1);
+        e = boot_send(req, 200, cached ? buf : BOOT_LOCAL);
+    }
+    free(buf);
     return e;
 }
