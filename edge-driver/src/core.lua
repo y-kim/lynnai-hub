@@ -35,8 +35,9 @@ local SWITCH = {
   heat = { pos = 2, code = "b1" },
   hotwater = { pos = 3, code = "d7" },
   preheat = { pos = 5, code = "b6" },
-  outing = { pos = 19, code = "b3" },
 }
+-- 외출은 보일러(f06 b3) 가 아니라 각방 조절기의 방마다(f09 a0=<방>,b3=1) — f06 b3 는 실측으로 안 먹힘.
+-- 보일러의 '외출' = 그 보일러에 붙은 방이 모두 외출(update_outing), 외출 명령은 방마다 보낸다(outing_cmds).
 local SWITCH_COMPONENT = { power = "main", hotwater = "hotwater", preheat = "preheat" }
 local HEAT_STATES = { "난방", "외출", "끄기" }
 local HEAT_MODES = { [0] = "온돌", [1] = "실내" }
@@ -178,6 +179,44 @@ local function the_boiler(parent, tmac)
   return nil, nil
 end
 
+-- 이 보일러(실 f06 / 가상 = 그 f09)에 붙은 써머스탯 mac 목록
+local function thermos_of(parent, kind, mac)
+  if kind == "vboiler" then return { mac } end
+  local out = {}
+  for tmac in pairs(hub_state(parent).thermos) do
+    if the_boiler(parent, tmac) == mac then out[#out + 1] = tmac end
+  end
+  return out
+end
+
+local function outing_of(parent, kind, mac)
+  local any, all = false, true
+  for _, tmac in ipairs(thermos_of(parent, kind, mac)) do
+    for _, z in pairs(hub_state(parent).thermos[tmac] or {}) do
+      any = true
+      if not z.outing then all = false end
+    end
+  end
+  return any and all
+end
+
+local function update_outing(parent)
+  local s = hub_state(parent)
+  for bmac, m in pairs(s.boilers) do m.outing = outing_of(parent, "boiler", bmac) end
+  for tmac, vb in pairs(s.vboilers or {}) do vb.outing = outing_of(parent, "vboiler", tmac) end
+end
+
+-- 재시작 직후 판단 막기: 연결 목록을 받았고, 목록의 기기가 모두 한 번씩 상태를 보냈나
+-- (그 전엔 자동화·가상 보일러 만들기/지우기를 하지 않는다 — 일부만 보고 '전부 꺼짐'·'단독'으로 오판하지 않게)
+local function all_reported(parent)
+  local s = hub_state(parent)
+  if not s.linked then return false end
+  for key in pairs(s.linked) do
+    if not (s.seen and s.seen[key]) then return false end
+  end
+  return true
+end
+
 -- ------------------------------------------------------------------ 허브로 명령
 local send_hook
 local SUFFIX = ""
@@ -200,12 +239,20 @@ end
 
 -- ------------------------------------------------------------------ 화면 갱신
 local sent = {}
+-- 값 → 비교용 문자열(표는 키 순서대로 펼침 — 설정 범위처럼 값이 표인 이벤트도 중복 억제가 되게)
+local function ser(v)
+  if type(v) ~= "table" then return tostring(v) end
+  local kv = {}
+  for k, x in pairs(v) do kv[#kv + 1] = { tostring(k), x } end
+  table.sort(kv, function(a, b) return a[1] < b[1] end)
+  local out = {}
+  for _, e in ipairs(kv) do out[#out + 1] = e[1] .. "=" .. ser(e[2]) end
+  return "{" .. table.concat(out, ",") .. "}"
+end
 local function emit(device, comp, ev)
   if not device:supports_capability_by_id(ev.capability.ID, comp) then return end
   local key = table.concat({ device.id, comp, ev.capability.ID, ev.attribute.NAME }, "|")
-  local v = ev.value
-  local val = type(v) == "table" and table.concat({ tostring(v.value), tostring(v.minimum), tostring(v.maximum),
-    tostring(v[1]), tostring(#v) }, ",") or tostring(v)
+  local val = ser(ev.value)
   if sent[key] == val then return end
   sent[key] = val
   device:emit_component_event(device.profile.components[comp], ev)
@@ -273,10 +320,11 @@ local prev_all_off = {}        -- bmac -> 직전 '전부 꺼짐' 여부
 local function auto_boiler(parent, bmac)
   local s = hub_state(parent)
   local m = s.boilers[bmac]
-  if not m then return end
+  if not m or not all_reported(parent) then return end                  -- 재시작 직후 일부 상태로는 판단 안 함
   local has_thermo, all_off = false, true
   for tmac, zones in pairs(s.thermos) do
     if the_boiler(parent, tmac) == bmac then
+      if next(zones) == nil then return end                              -- 방 정보 없음 = 모름(꺼짐으로 치지 않음)
       has_thermo = true
       for _, z in pairs(zones) do if z.on then all_off = false end end   -- z.on = 방 자신의 on/off
     end
@@ -293,7 +341,6 @@ local function auto_boiler(parent, bmac)
   elseif not all_off and was then                                        -- 방 켜짐
     local list = {}
     if not m.power then list[#list + 1] = "f06@" .. bmac .. " 80=1" end
-    if m.outing then list[#list + 1] = "f06@" .. bmac .. " b3=0" end
     if not m.heat then list[#list + 1] = "f06@" .. bmac .. " b1=1" end
     if #list > 0 then
       log.info("방 켜짐 → 보일러 " .. bmac .. " 깨움")
@@ -357,7 +404,9 @@ local function refresh_all(parent)
   for mac in pairs(s.thermos) do
     for _, id in ipairs(ZONE_ORDER) do refresh_zone(parent, mac, id) end
     local vchild = parent:get_child_by_parent_assigned_key(vbkey(mac))
-    if is_standalone(parent, mac) then
+    if not all_reported(parent) then
+      refresh_vboiler(parent, mac)  -- 다 모이기 전엔 만들거나 지우지 않고 있는 것만 갱신
+    elseif is_standalone(parent, mac) then
       create_vboiler(parent, mac)
       refresh_vboiler(parent, mac)
     elseif vchild then
@@ -367,8 +416,12 @@ local function refresh_all(parent)
 end
 
 -- ------------------------------------------------------------------ 자식 기기 만들기
+local creating = {}             -- [parent.id|key] = 만들기 요청한 시각(만들어지는 동안 같은 요청을 또 보내지 않게)
 local function create_child(parent, key, label, profile, model)
-  if parent:get_child_by_parent_assigned_key(key) then return end
+  if parent:get_child_by_parent_assigned_key(key) then creating[parent.id .. "|" .. key] = nil; return end
+  local ck = parent.id .. "|" .. key
+  if creating[ck] and os.time() - creating[ck] < 60 then return end
+  creating[ck] = os.time()
   log.info("자식 기기 만들기: " .. key .. " " .. label)
   label = label .. SUFFIX
   driver:try_create_device({
@@ -383,6 +436,9 @@ function create_vboiler(parent, mac) create_child(parent, vbkey(mac), "보일러
 
 function delete_child(child)
   log.info("기기 빼기: " .. tostring(child.parent_assigned_child_key))
+  for ck in pairs(creating) do                 -- 지운 뒤 다시 보이면 곧바로 다시 만들 수 있게
+    if ck:sub(-(#child.parent_assigned_child_key + 1)) == "|" .. child.parent_assigned_child_key then creating[ck] = nil end
+  end
   if driver.try_delete_device then driver:try_delete_device(child.id) end
 end
 
@@ -456,6 +512,8 @@ local function on_state(parent, b)
   local blob = b:sub(5)
   local s = hub_state(parent)
   s.online[kind .. ":" .. mac] = true
+  s.seen = s.seen or {}
+  s.seen[kind .. ":" .. mac] = true
   if kind == KIND_F06 then
     s.boilers[mac] = decode_boiler(blob)
     if shown(parent, KIND_F06, mac, 0) then create_boiler(parent, mac) end
@@ -464,21 +522,30 @@ local function on_state(parent, b)
     s.thermos[mac] = decode_rooms(blob)
     s.vboilers = s.vboilers or {}
     s.vboilers[mac] = decode_vboiler(blob, s.thermos[mac])
+    s.absent = s.absent or {}
     for _, id in ipairs(ZONE_ORDER) do
-      if s.thermos[mac][id] and shown(parent, KIND_F09, mac, ZONES[id].n) then   -- 기기가 리포트한 방만 생성
-        create_zone(parent, mac, id)
-      else                                                            -- 없는 방/숨긴 방의 옛 기기는 정리
-        local c = parent:get_child_by_parent_assigned_key(zkey(mac, id))
+      local zk = zkey(mac, id)
+      local c = parent:get_child_by_parent_assigned_key(zk)
+      if not shown(parent, KIND_F09, mac, ZONES[id].n) then           -- 숨긴 방: 바로 정리
+        s.absent[zk] = nil
         if c then delete_child(c) end
+      elseif s.thermos[mac][id] then                                  -- 기기가 리포트한 방만 생성
+        s.absent[zk] = nil
+        create_zone(parent, mac, id)
+      else                                                            -- 안 보이는 방: 3번 연속일 때만 정리(기기 ID 유지)
+        s.absent[zk] = (s.absent[zk] or 0) + 1
+        if c and s.absent[zk] >= 3 then delete_child(c) end
       end
       refresh_zone(parent, mac, id)
     end
-    if is_standalone(parent, mac) then
+    if is_standalone(parent, mac) and all_reported(parent) then
       create_vboiler(parent, mac)
       refresh_vboiler(parent, mac)
     end
   end
+  update_outing(parent)
   for bmac in pairs(s.boilers) do auto_boiler(parent, bmac) end   -- 방 집계 바뀌면 보일러 맞춤(끔/깸)
+  if kind == KIND_F09 then for bmac in pairs(s.boilers) do refresh_boiler(parent, bmac) end end   -- 외출 표시
 end
 
 -- 보일러↔써머스탯 짝(관리 화면 수동): ([f09 mac3][f06 mac3])*n
@@ -492,18 +559,23 @@ local function on_pairs(parent, b)
       s.pairs[f09] = f06
     end
   end
+  update_outing(parent)
   refresh_all(parent)
 end
 
 local function on_links(parent, b)
   local s = hub_state(parent)
   s.online = {}
-  for i = 1, #b, 4 do
+  s.linked = {}
+  for i = 1, #b - 3, 4 do
     local kind = b:byte(i)
-    if kind then
-      s.online[kind .. ":" .. string.format("%02x%02x%02x", b:byte(i + 1), b:byte(i + 2), b:byte(i + 3))] = true
+    if kind == KIND_F06 or kind == KIND_F09 then
+      local key = kind .. ":" .. string.format("%02x%02x%02x", b:byte(i + 1), b:byte(i + 2), b:byte(i + 3))
+      s.online[key] = true
+      s.linked[key] = true
     end
   end
+  update_outing(parent)
   refresh_all(parent)
 end
 
@@ -624,6 +696,19 @@ local function bstate(parent, kind, mac)
   return kind == "vboiler" and (s.vboilers or {})[mac] or s.boilers[mac]
 end
 
+-- 이 보일러에 붙은 방들의 외출을 on 으로(이미 그 상태인 방은 빼고). 방마다 한 줄.
+local function outing_cmds(parent, kind, mac, on, list)
+  for _, tmac in ipairs(thermos_of(parent, kind, mac)) do
+    for _, id in ipairs(ZONE_ORDER) do
+      local z = (hub_state(parent).thermos[tmac] or {})[id]
+      if z and z.outing ~= on then
+        list[#list + 1] = string.format("f09@%s a0=%d,b3=%s", tmac, ZONES[id].a0, on and "1" or "0")
+      end
+    end
+  end
+  return list
+end
+
 local function on_switch(on)
   return function(_, device, cmd)
     local parent = parent_of(device)
@@ -666,9 +751,10 @@ local function on_switch(on)
       if bmac then
         m = m or {}
         if m.power == false then list[#list + 1] = "f06@" .. bmac .. " 80=1" end
-        if m.outing then list[#list + 1] = "f06@" .. bmac .. " b3=0" end
         if m.heat == false then list[#list + 1] = "f06@" .. bmac .. " b1=1" end
       end
+      local zs = (hub_state(parent).thermos[mac] or {})[id]
+      if zs and zs.outing then list[#list + 1] = string.format("f09@%s a0=%d,b3=0", mac, z.a0) end   -- 이 방 외출 풀기
     end
     list[#list + 1] = string.format("f09@%s a0=%d,b1=%s", mac, z.a0, on and "1" or "0")
     boiler_cmds(parent, list)
@@ -716,13 +802,15 @@ local function set_mode(_, device, cmd)
   local kind, mac = parse_key(device.parent_assigned_child_key)
   if kind ~= "boiler" and kind ~= "vboiler" then return end
   local pre = boiler_prefix(kind, mac)
-  local m = bstate(parent, kind, mac) or {}
   local want = cmd.args.mode
-  if want == "외출" then return boiler_cmds(parent, { pre .. " b3=1" }) end
-  local list = {}
-  if m.outing then list[#list + 1] = pre .. " b3=0" end
-  list[#list + 1] = pre .. " b1=" .. (want == "난방" and "1" or "0")
-  boiler_cmds(parent, list)
+  if want ~= "외출" and want ~= "난방" and want ~= "끄기" then        -- 모르는 값은 무시(난방을 끄지 않게)
+    log.warn("모르는 난방 모드 무시: " .. tostring(want))
+    return
+  end
+  -- 외출 = 붙은 방마다 f09 a0,b3. 방마다 따로 보낸다(한 메시지가 길어지지 않게)
+  local list = outing_cmds(parent, kind, mac, want == "외출", {})
+  if want ~= "외출" then list[#list + 1] = pre .. " b1=" .. (want == "난방" and "1" or "0") end
+  for _, c in ipairs(list) do send_text(parent, c) end
 end
 
 local function set_heat_type(_, device, cmd)

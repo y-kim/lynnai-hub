@@ -235,7 +235,8 @@ print("[7] 모든 방 꺼짐 → 보일러 난방 off (자동, 보일러가 안 
 -- 존 stat 바이트(0=z1,7=z2,42=z3)에 on 비트(0x02)만 세팅한 54바이트 블롭
 local function f09_rooms(z1, z2, z3)
   local t = {}; for i = 1, 54 do t[i] = 0 end
-  t[1] = z1 and 2 or 0; t[8] = z2 and 2 or 0; t[43] = z3 and 2 or 0
+  t[1] = z1 and 0x83 or 0x81; t[8] = z2 and 0x83 or 0x81; t[43] = z3 and 0x83 or 0x81   -- 실기: 켜짐 0x83, 꺼짐 0x81
+  t[4] = 20; t[11] = 21; t[46] = 22                                                     -- 현재 온도(방이 있다는 표시)
   local s = {}; for i = 1, 54 do s[i] = string.format("%02x", t[i]) end
   return table.concat(s)
 end
@@ -408,6 +409,71 @@ sent_cmds = {}
 core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z1"], { component = "reserve", args = { mode = "3시간" } })
 local j1 = table.concat(sent_cmds, " | ")
 check(j1:find("a0=1,b1=1", 1, true) and j1:find("a0=1,96=1,97=03", 1, true), "꺼진 방1 에 3시간 → 켜고 97=03")
+
+print("[16] 재시작 직후: 연결된 조절기가 다 보고하기 전엔 자동화 판단 안 함")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" }, { 9, "eeff00" } })   -- 조절기 2대가 한 보일러(암묵)
+state(6, "a1b2c3", F06_OFF)
+sent_cmds = {}
+state(9, "d4e5f6", f09_rooms(false, false, false))   -- 첫 조절기만: 전부 꺼짐처럼 보이지만 아직 판단 안 함
+state(9, "eeff00", f09_rooms(true, false, false))    -- 둘째 도착(방 켜짐) — 여기서 처음 씨딩, 깨우지 않음
+check(not last_cmd_has("80=1") and not last_cmd_has("b1=1"), "둘째 조절기 도착을 '방 켜짐'으로 오판하지 않음")
+check(driver._children["vd4e5f6"] == nil and driver._children["veeff00"] == nil, "가상 보일러 만들었다 지우지 않음")
+sent_cmds = {}
+state(9, "eeff00", f09_rooms(false, false, false))
+check(last_cmd_has("f06@a1b2c3") == false, "보일러 난방이 이미 꺼짐 → 명령 없음")
+
+print("[17] 방이 한 번 안 보여도 기기 유지, 3번 연속이면 정리")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, false))
+check(driver._children["td4e5f6_z2"] ~= nil, "방2 있음")
+local gone = f09_rooms(true, false, false):sub(1, 14) .. "00000000" .. f09_rooms(true, false, false):sub(23)   -- 방2 슬롯 비움
+state(9, "d4e5f6", gone)
+check(driver._children["td4e5f6_z2"] ~= nil, "한 번 안 보임 → 그대로(기기 ID 유지)")
+state(9, "d4e5f6", f09_rooms(true, true, false))
+state(9, "d4e5f6", gone); state(9, "d4e5f6", gone)
+check(driver._children["td4e5f6_z2"] ~= nil, "다시 보였다 사라지면 횟수 처음부터")
+state(9, "d4e5f6", gone)
+check(driver._children["td4e5f6_z2"] == nil, "3번 연속 안 보임 → 정리")
+
+print("[18] 보일러 '외출' = 붙은 방마다 f09 a0,b3 (f06 b3 는 안 먹힘)")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, true))
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "외출" } })
+local jo = table.concat(sent_cmds, " | ")
+check(jo:find("f09@d4e5f6 a0=1,b3=1", 1, true) and jo:find("f09@d4e5f6 a0=2,b3=1", 1, true)
+  and jo:find("f09@d4e5f6 a0=7,b3=1", 1, true), "외출 → 방1·방2·거실 각각 b3=1")
+check(not jo:find("f06@a1b2c3 b3", 1, true), "f06 b3 는 안 보냄")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "이상한값" } })
+check(#sent_cmds == 0, "모르는 모드 → 무시(난방 끄지 않음)")
+-- 모든 방이 외출이면 보일러 모드도 '외출'로 보임
+local allout = f09_rooms(true, true, true):gsub("^(..)", "93")   -- 방1 stat 0x93(켜짐+외출)
+local t2 = {}
+for i = 1, #allout, 2 do t2[#t2 + 1] = allout:sub(i, i + 1) end
+t2[8] = "93"; t2[43] = "93"
+state(9, "d4e5f6", table.concat(t2))
+check(lastv("ba1b2c3", "heat", "mode") == "외출", "모든 방 외출 → 보일러 모드 '외출'")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "난방" } })
+local jn = table.concat(sent_cmds, " | ")
+check(jn:find("a0=1,b3=0", 1, true) and jn:find("f06@a1b2c3 b1=1", 1, true), "난방 → 방 외출 풀고 b1=1")
+
+print("[19] 표 값 이벤트(설정 범위)도 중복 억제")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "c0ffee" } })
+state(6, "a1b2c3", F06); state(9, "c0ffee", F09)   -- 새 MAC(앞 시나리오의 중복 억제 기록과 안 겹치게)
+local function count_range()
+  local n = 0
+  for _, e in ipairs(emitted) do if e.key == "tc0ffee_z1" and e.attr == "heatingSetpointRange" then n = n + 1 end end
+  return n
+end
+local n1 = count_range()
+core.on_message(hub, CMD.LINKS, string.char(6) .. mac3("a1b2c3") .. string.char(9) .. mac3("c0ffee"))
+check(n1 >= 1 and count_range() == n1, "같은 설정 범위는 다시 안 보냄")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)
