@@ -386,7 +386,7 @@ static esp_err_t login_page(httpd_req_t *req, const char *msg)
  * 저장 버튼은 class=sv 를 단다. 별명 칩은 editAlias('<mac>') 를 부르고, 팝업 [저장]은 숨은 a_<mac> 에 값을 넣고
  * 그 폼을 바로 제출한다(별도 저장 버튼을 또 누를 필요 없음). */
 static const char ADMIN_EXTRA[] =
-    "<dialog id=adlg><h3 style='margin-top:0'>별명</h3>"
+    "<dialog id=adlg><h3 style='margin-top:0'>이름</h3><p class=muted style='margin:0 0 8px'>비우고 저장하면 기기를 삭제합니다</p>"
     "<input id=adin maxlength=20 placeholder='예: 거실 보일러'>"
     "<div class=dbtn><button type=button id=adok>저장</button><button type=button id=adno class=ghost>취소</button></div>"
     "</dialog><script>(function(){"
@@ -400,9 +400,11 @@ static const char ADMIN_EXTRA[] =
     "var D=document.getElementById('adlg'),T=document.getElementById('adin');"
     "window.editAlias=function(m){var i=document.querySelector('[name=a_'+m+']');if(!i)return;"
     "T.value=i.value;D._m=m;D.showModal();T.focus();T.select()};"
-    "function ok(){var m=D._m,i=document.querySelector('[name=a_'+m+']');i.value=T.value.trim();"
-    "document.getElementById('al_'+m).textContent=i.value||'별명 없음';"
-    "D.close();i.form.submit()}"
+    "function ok(){var m=D._m,i=document.querySelector('[name=a_'+m+']'),v=T.value.trim(),f=i.form;"
+    "if(!v){if(!confirm('이름을 비우면 이 기기를 삭제합니다. 삭제할까요?'))return;"
+    "D.close();var h=document.createElement('input');h.type='hidden';h.name='del';h.value=m;f.appendChild(h);"
+    "f.action='/admin/device-del';f.submit();return}"
+    "i.value=v;document.getElementById('al_'+m).textContent=v;D.close();f.submit()}"
     "document.getElementById('adok').onclick=ok;document.getElementById('adno').onclick=function(){D.close()};"
     "T.addEventListener('keydown',function(e){if(e.key=='Enter'){e.preventDefault();ok()}})"
     "})();</script>";

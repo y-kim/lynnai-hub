@@ -283,8 +283,8 @@ void hub_pairs_render(char *o, size_t cap)
         }
     }
     cat(o, cap, "<h2>연결된 기기</h2><div class=card><p class=muted>"
-                "허브에 직접 붙어 있는 린나이 기기입니다. 별명(✏️)을 지으면 여기와 연결 선택에 그 이름으로 나옵니다 "
-                "(SmartThings 기기 이름은 ST 앱에서 바꿉니다). "
+                "허브에 직접 붙어 있는 린나이 기기입니다. 이름(✏️)을 지으면 여기와 연결 선택에 그 이름으로 나오고, "
+                "이름을 비워 저장하면 기기를 삭제합니다(SmartThings 기기 이름은 ST 앱에서 바꿉니다). "
                 "각 기기·방 옆 체크는 그 기기를 어느 플랫폼에 보일지입니다.</p>");
     if (nd == 0) {
         cat(o, cap, "<p class=muted>아직 연결된 기기가 없습니다.</p></div>");
@@ -307,25 +307,16 @@ void hub_pairs_render(char *o, size_t cap)
         if (f09) {
             snprintf(meta, sizeof(meta), " · 방 %d개", rooms);
         }
-        /* 기기 줄: 종류·MAC·상태 + 별명 칩(팝업) + 별명 있으면 삭제(🗑️) */
+        /* 기기 줄: 종류·MAC·상태 + 이름 칩(팝업, 비우고 저장 = 기기 삭제) */
         snprintf(t, sizeof(t), "<div class=row><span><b>%s</b> · %s%s · %s</span><span>"
-                 "<button type=button class=ic title=\"별명 수정\" onclick=\"editAlias('%s')\">✏️ <span id=al_%s>",
+                 "<button type=button class=ic title=\"이름 바꾸기\" onclick=\"editAlias('%s')\">✏️ <span id=al_%s>",
                  typ, mac, meta, dev[i].linked ? "연결됨" : "끊김", mac, mac);
         cat(o, cap, t);
-        cat(o, cap, al ? ea : "별명 없음");
+        cat(o, cap, al ? ea : "이름 없음");
         snprintf(t, sizeof(t), "</span></button><input name=a_%s value=\"", mac);
         cat(o, cap, t);
         cat(o, cap, ea);
-        cat(o, cap, "\" hidden>");
-        if (al) {
-            /* 이름은 data-n 으로 넘겨 JS 문자열에 직접 넣지 않는다(따옴표 든 별명 대비) */
-            snprintf(t, sizeof(t), " <button name=del value=%s formaction=/admin/device-del class=ic data-n=\"", mac);
-            cat(o, cap, t);
-            cat(o, cap, ea);
-            cat(o, cap, "\" title=\"기기 삭제\" onclick=\"return confirm(this.dataset.n+' 기기를 삭제할까요?')\">"
-                        "\U0001f5d1️</button>");
-        }
-        cat(o, cap, "</span></div>");
+        cat(o, cap, "\" hidden></span></div>");
 
         /* 하위 줄들 — 보일러 조절기: 기기 노출 / 온도 조절기: 보일러 연결 + 방(세부 기기)별 노출 */
         uint8_t subs = 0;
