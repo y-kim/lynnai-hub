@@ -10,7 +10,8 @@ lynnai-hub-watch·Prometheus 가 NAS 든 ESP32 든 똑같이 읽는다.
 GET /key/server(기기 부트스트랩, 인증 없음) — ESP32 hub_proxy_bootstrap_handler 와 같은 규칙:
   proxy      : 클라우드에 다시 묻고, 정상(200 + 성공 XML)이면 (서비스, MAC)별로 DATA_DIR/boot/ 에 저장해 그대로.
                클라우드 오류는 그 상태·본문 그대로(저장 안 함), 응답이 없으면 이 기기의 저장분, 없으면 502.
-  standalone : 이 기기의 저장분, 없으면 허브가 만든 답(uid/pass 는 자리 표시 — 단독 브로커는 무엇이든 받는다).
+  standalone : 허브가 만든 답만(uid/pass 는 자리 표시 — 단독 브로커는 무엇이든 받는다). 저장한 클라우드 계정은 안 내준다.
+  RINNAI_IPS 가 있으면 그 기기들의 요청만 받는다(나머지 403).
 """
 import json
 import os
@@ -22,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 KIND_F06, KIND_F09 = 6, 9
 DATA = os.environ.get("DATA_DIR", "/data")
 STANDALONE = os.environ.get("MODE", "proxy") == "standalone"
+# /key/server 는 등록된 린나이 기기에게만(집 LAN 의 다른 기기가 기기 계정·암호를 받아 가지 못하게). 비우면 제한 없음
+DEVICE_IP = {ip.strip() for ip in os.environ.get("RINNAI_IPS", "").replace(";", ",").split(",") if ip.strip()}
 BOOT_LOCAL = (b'<?xml version="1.0" encoding="UTF-8"?><result><tid></tid><error>S000001</error><message>success</message>'
               b'<ip>www.rkiot.net</ip><port><mqtt>8883</mqtt><ws>6002</ws><ssl>true</ssl></port>'
               b'<uid>lynnai</uid><pass>standalone</pass></result>')
@@ -167,6 +170,11 @@ def serve(core, hub_id, port, token, log=print):
             self.wfile.write(body)
 
         def _bootstrap(self):
+            if DEVICE_IP and self.client_address[0] not in DEVICE_IP:
+                log(f"[api] /key/server 거절: 등록 안 된 {self.client_address[0]}")
+                self.send_response(403)
+                self.end_headers()
+                return
             key = _boot_key(self.headers.get("Ck-Service", ""), self.headers.get("Ck-Mac", ""))
             path = os.path.join(DATA, "boot", key + ".xml")
             cached = None
@@ -178,8 +186,8 @@ def serve(core, hub_id, port, token, log=print):
             except OSError:
                 pass
             if STANDALONE:
-                log(f"[api] /key/server(단독): {'이 기기의 저장된 답' if cached else '허브가 만든 답'}")
-                return self._send_xml(200, cached or BOOT_LOCAL)
+                log("[api] /key/server(단독): 허브가 만든 답")
+                return self._send_xml(200, BOOT_LOCAL)
             status = body = None
             try:
                 import hub_bootstrap

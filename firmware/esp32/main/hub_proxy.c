@@ -470,6 +470,27 @@ static int peer_octet(int fd)
     return -1;
 }
 
+/* 이 요청이 들어온 '우리 쪽' 주소(IPv4, 네트워크 순서) — 허브 AP 로 왔는지 집 LAN(STA)으로 왔는지 가르는 데 쓴다 */
+static uint32_t local_ip(int fd)
+{
+    struct sockaddr_storage a;
+    socklen_t l = sizeof(a);
+    if (getsockname(fd, (struct sockaddr *)&a, &l) < 0) {
+        return 0;
+    }
+    if (a.ss_family == AF_INET) {
+        return ((struct sockaddr_in *)&a)->sin_addr.s_addr;
+    }
+#if LWIP_IPV6
+    if (a.ss_family == AF_INET6) {               /* IPv4-mapped(::ffff:a.b.c.d) */
+        uint32_t v;
+        memcpy(&v, &((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr[12], 4);
+        return v;
+    }
+#endif
+    return 0;
+}
+
 static const char *mqtt_name(uint8_t b0)
 {
     static const char *const n[16] = { "?", "CONNECT", "CONNACK", "PUBLISH", "PUBACK", "?", "?", "?", "SUBSCRIBE",
@@ -1083,7 +1104,8 @@ static esp_err_t boot_send(httpd_req_t *req, int code, const char *body)
  *   프록시: 클라우드에 다시 묻는다 → 정상(200 + 성공 XML)이면 이 기기 몫으로 저장하고 그대로,
  *           클라우드가 오류로 답하면 그 상태·본문 그대로(저장 안 함),
  *           클라우드가 답을 못 하면(끊김·잘림) 이 기기의 저장된 답, 그것도 없으면 502.
- *   단독  : 이 기기의 저장된 답, 없으면 허브가 만든 답(BOOT_LOCAL). */
+ *   단독  : 허브가 만든 답(BOOT_LOCAL)만 — 저장한 클라우드 계정·암호는 단독에서 내주지 않는다.
+ *   허브 AP 로 온 요청만 받는다(집 LAN 쪽은 403). */
 esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
 {
     char svc[32] = "", mac[32] = "", key[16];
@@ -1091,6 +1113,13 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
     httpd_req_get_hdr_value_str(req, "Ck-Mac", mac, sizeof(mac));
     boot_key(svc, mac, key);
     bool sa = s_mode == HUB_MODE_STANDALONE;
+    /* 기기 전용 망(허브 AP)으로 온 요청만 받는다 — 집 LAN 의 다른 기기가 기기 계정·암호를 받아 가지 못하게 */
+    uint32_t lip = local_ip(httpd_req_to_sockfd(req));
+    if (!lip || lip != hub_wifi_ap_ip()) {
+        ESP_LOGW(TAG, "부트스트랩 거절: 허브 AP 가 아닌 곳에서 온 요청");
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_send(req, "forbidden", HTTPD_RESP_USE_STRLEN);
+    }
     ESP_LOGI(TAG, "부트스트랩 요청 (Ck-Mac %s, %s 모드)", mac, sa ? "단독" : "프록시");
     int dev = peer_octet(httpd_req_to_sockfd(req));
     char *buf = malloc(BOOT_CAP);
@@ -1122,10 +1151,10 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
             return httpd_resp_send(req, "upstream", HTTPD_RESP_USE_STRLEN);
         }
     } else {
-        bool cached = boot_cache_get(key, buf, BOOT_CAP);
-        ESP_LOGI(TAG, "부트스트랩(단독): %s", cached ? "이 기기의 저장된 답" : "허브가 만든 답");
+        /* 단독: 클라우드 계정·암호(프록시 때 저장한 것)는 내주지 않고 허브용 로컬 값만 — 단독 브로커는 무엇이든 받는다 */
+        ESP_LOGI(TAG, "부트스트랩(단독): 허브가 만든 답");
         hub_event(EV_BOOTSTRAP, NULL, dev, 1);
-        e = boot_send(req, 200, cached ? buf : BOOT_LOCAL);
+        e = boot_send(req, 200, BOOT_LOCAL);
     }
     free(buf);
     return e;
