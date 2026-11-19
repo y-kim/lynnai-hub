@@ -156,9 +156,9 @@ static void cat(char *o, size_t cap, const char *s) { strlcat(o, s, cap); }
 
 void hub_plugins_render(char *o, size_t cap)
 {
-    char t[768];
+    char t[768];             /* 제목 줄(삭제 확인 문구 포함) + 설명이 한 번에 들어가게 */
     cat(o, cap, "<h2>설치된 플러그인</h2><p class=muted>노출을 모두 끄면 플랫폼에서 숨김(센서는 계속 읽음). "
-                "삭제 = 플러그인 제거.</p>");
+                "🗑️ = 플러그인 제거.</p>");
     bool any = false;
     for (int i = 0; i < NPLUG; i++) {
         const plugin_t *p = &PLUGINS[i];
@@ -166,7 +166,12 @@ void hub_plugins_render(char *o, size_t cap)
             continue;
         }
         any = true;
-        snprintf(t, sizeof(t), "<div class=card><h3>%s</h3><p class=muted>%s</p>", p->name, p->help);
+        /* 제목 줄: 이름 + 오른쪽 끝 삭제(따로 된 작은 폼 — 설정 폼에서 Enter 가 삭제를 누르지 않게) */
+        snprintf(t, sizeof(t), "<div class=card><div class=ptitle><h3>%s</h3>"
+                 "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>"
+                 "<button name=op value=del class=ic title=\"플러그인 삭제\" "
+                 "onclick=\"return confirm('플러그인을 삭제할까요? 센서를 더 이상 읽지 않고, 모든 플랫폼에서 기기가 빠집니다.')\">"
+                 "\U0001f5d1️</button></form></div><p class=muted>%s</p>", p->name, p->id, p->help);
         cat(o, cap, t);
         /* 설정 + 노출을 한 폼, 저장 하나로 */
         snprintf(t, sizeof(t), "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->id);
@@ -179,9 +184,7 @@ void hub_plugins_render(char *o, size_t cap)
         }
         cat(o, cap, "<div class=row><span>노출</span><span>");
         hub_expose_render_bit(o, cap, p->expose_bit);
-        cat(o, cap, "</span></div><button name=op value=save class=sv>저장</button>"
-                    "<button name=op value=del class=ghost onclick=\"return confirm('플러그인을 삭제할까요? 센서를 더 이상 읽지 않고, 모든 플랫폼에서 기기가 빠집니다.')\">삭제</button>"
-                    "</form>");
+        cat(o, cap, "</span></div><button name=op value=save class=sv>저장</button></form>");
         if (s_act_fn[i]) {                          /* 즉시 동작(예: 계량기 숫자 맞추기)은 따로 */
             snprintf(t, sizeof(t), "<form method=post action=/admin/plugin-action><input type=hidden name=id value=%s>"
                      "<label>%s</label><input name=value inputmode=decimal placeholder=\"%s\">"

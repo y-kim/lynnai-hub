@@ -64,6 +64,7 @@ static const char HEAD2[] =
     ".chg{outline:1px solid #666;outline-offset:3px;border-radius:6px}"
     "dialog{background:#1c1c1c;color:#eee;border:1px solid #555;border-radius:12px;padding:16px;width:min(320px,90vw)}"
     "dialog::backdrop{background:#000a}.dbtn{display:flex;gap:8px}"
+    ".ptitle{display:flex;justify-content:space-between;align-items:center;gap:8px}.ptitle h3{margin:0}.ptitle form{margin:0}"
     ".row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #2a2a2a}"
     "label.chk{display:inline-block;margin:0 0 0 10px;color:#ddd}label.chk input{width:auto;margin-right:4px}"
     "h3.grp{margin:14px 0 2px;color:#ccc}"
