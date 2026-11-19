@@ -4,7 +4,8 @@
 -- 연결: TCP 줄 단위(펌웨어 hub_lan.c)
 --   → "hello <토큰>"   ← "ok <id>" | "denied"(허브 버튼 짧게 누른 뒤 3분 안에 다시)
 --   ← "<명령 16진 2자리> <내용 16진>"   → "00 <명령 텍스트 16진>"   ← "ping"(30초마다)
--- 토큰은 기기마다 한 번 만들어 저장한다. 허브는 처음 붙는 드라이버를 믿고 기억한다.
+-- 토큰은 기기마다 한 번 만들어 저장한다. 허브는 버튼을 짧게 누른 뒤 3분(페어링 창) 안에 온 새 토큰만 기억한다.
+-- 허브가 "ok <id>" 로 답한 id 가 찾은 허브의 id 와 같아야 붙는다(다른 기기가 허브인 척 답해도 명령을 보내지 않게).
 local Driver = require "st.driver"
 local capabilities = require "st.capabilities"
 local cosock = require "cosock"
@@ -75,12 +76,31 @@ end
 
 -- ------------------------------------------------------------------ 연결
 
+-- 토큰 만들기: Edge 에는 암호 난수가 없어, 밖에서 알 수 없는 값(기기 UUID — SmartThings 가 무작위로 준다)과
+-- 시각·주소·메모리 상태를 섞는다. math.random(os.time 시드)만 쓰면 시각을 짐작해 토큰을 맞힐 수 있다.
+local function mix32(h, str)
+  for i = 1, #str do
+    h = ((h ~ str:byte(i)) * 16777619) & 0xFFFFFFFF          -- FNV-1a
+    h = ((h << 13) | (h >> 19)) & 0xFFFFFFFF
+  end
+  return h
+end
+local function new_token(device)
+  local pool = table.concat({ tostring(device.id), tostring(device.device_network_id), tostring(socket.gettime()),
+    tostring(os.clock()), tostring({}), tostring(collectgarbage("count")), tostring(math.random()) }, "|")
+  local out = {}
+  local h = 2166136261
+  for i = 1, 4 do
+    h = mix32(h, pool .. "#" .. i .. "#" .. tostring(socket.gettime()))
+    out[i] = string.format("%08x", h)
+  end
+  return table.concat(out)
+end
+
 local function token_of(device)
   local t = device:get_field("token")
   if not t then
-    local r = {}
-    for i = 1, 16 do r[i] = string.format("%02x", math.random(0, 255)) end
-    t = table.concat(r)
+    t = new_token(device)
     device:set_field("token", t, { persist = true })
   end
   return t
@@ -113,7 +133,14 @@ local function run(device)
       c:settimeout(10)
       c:send("hello " .. token_of(device) .. "\n")
       local first = c:receive("*l")
-      if first and first:match("^ok") then
+      local got = first and first:match("^ok (%w+)$")
+      if first and first:match("^ok") and got ~= id then
+        -- 다른 허브(또는 허브인 척하는 기기)가 답함: 주소를 잊고 다시 찾는다
+        log.warn(string.format("허브 id 다름(%s ≠ %s) — 끊고 다시 찾음", tostring(got), id))
+        device:set_field("ip", nil, { persist = true })
+        seen[id] = nil
+        show(device, "허브 못 찾음")
+      elseif got then
         log.info(string.format("허브 연결됨 %s:%d", ip, port))
         conns[device.id].sock = c
         backoff = 5
@@ -124,12 +151,20 @@ local function run(device)
           local l = c:receive("*l")
           if not l then break end
           local cmd, body = l:match("^(%x%x) (%x*)$")
-          if cmd then core.on_message(device, tonumber(cmd, 16), unhex(body)) end
+          if cmd and #body % 2 == 0 then
+            -- 메시지 하나가 깨져도(잘림 등) 연결 코루틴이 죽지 않게
+            local ok, err = pcall(core.on_message, device, tonumber(cmd, 16), unhex(body))
+            if not ok then log.error("허브 메시지 처리 실패: " .. tostring(err)) end
+          end
         end
-        conns[device.id].sock = nil
+        if conns[device.id] then conns[device.id].sock = nil end   -- 그 사이 허브 기기가 지워졌으면 없음
         log.warn("허브 연결 끊김")
         core.hub_lost(device)
         show(device, "연결 끊김")
+      elseif first == "busy" then
+        log.warn("허브에 이미 드라이버 2개가 붙어 있음")
+        show(device, "허브 연결 가득")
+        backoff = 30
       elseif first == "denied" then
         log.warn("허브가 거절함: 허브 버튼을 짧게 눌러 페어링 창을 연 뒤 새로고침")
         show(device, "페어링 필요: 허브 버튼 짧게")
