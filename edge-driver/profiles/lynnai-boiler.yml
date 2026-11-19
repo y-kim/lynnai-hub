@@ -1,4 +1,5 @@
 name: lynnai-boiler
+# optional: true 인 것은 허브 관리 화면에서 숨길 수 있다(드라이버가 try_update_metadata 로 켜고 끈다)
 components:
   - id: main
     label: 전원
@@ -7,6 +8,7 @@ components:
         version: 1
       - id: switch
         version: 1
+        optional: true
       - id: refresh
         version: 1
     categories:
@@ -16,19 +18,25 @@ components:
     capabilities:
       - id: mode
         version: 1
+        optional: true
       - id: connectbook02461.heatType
         version: 1
+        optional: true
       - id: thermostatHeatingSetpoint
         version: 1
+        optional: true
   - id: hotwater
     label: 온수
     capabilities:
       - id: switch
         version: 1
+        optional: true
       - id: connectbook02461.hotWaterSetpoint
         version: 1
+        optional: true
   - id: preheat
     label: 온수 예열
     capabilities:
       - id: switch
         version: 1
+        optional: true

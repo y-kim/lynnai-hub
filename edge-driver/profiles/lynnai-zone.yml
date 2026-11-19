@@ -1,4 +1,5 @@
 name: lynnai-zone
+# optional: true 인 것은 허브 관리 화면에서 숨길 수 있다
 components:
   - id: main
     capabilities:
@@ -6,10 +7,12 @@ components:
         version: 1
       - id: switch
         version: 1
+        optional: true
       - id: temperatureMeasurement
         version: 1
       - id: thermostatHeatingSetpoint
         version: 1
+        optional: true
       - id: refresh
         version: 1
     categories:
