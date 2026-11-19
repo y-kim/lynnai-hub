@@ -35,6 +35,22 @@ PROXY_FIELDS = {
 PROXY_SECRET_KEYS = {"app_key", "app_secret", "account_pass", "mqtt_pass"}
 
 
+def check_ssid(ssid):
+    """AP SSID 검증 — 저장(포털)과 적용(apctl)이 같은 규칙을 쓴다. 1~32 '바이트'(UTF-8, 한글은 3바이트), 제어문자 없음."""
+    if any(ord(c) < 32 or ord(c) == 127 for c in ssid):
+        raise ValueError("SSID에 제어문자")
+    if not 1 <= len(ssid.encode("utf-8")) <= 32:
+        raise ValueError("SSID는 1~32바이트(한글은 글자당 3바이트, 10자까지)")
+
+
+def check_ap_pass(pw):
+    """WPA2 암호 검증(hostapd wpa_passphrase): 출력 가능한 ASCII 8~63자."""
+    if not all(32 <= ord(c) <= 126 for c in pw):
+        raise ValueError("AP 암호는 영문·숫자·기호(ASCII)만")
+    if not 8 <= len(pw) <= 63:
+        raise ValueError("AP 암호는 8~63자(WPA2)")
+
+
 def _pbkdf2(password, salt_hex):
     return hashlib.pbkdf2_hmac(
         "sha256", password.encode(), bytes.fromhex(salt_hex), PBKDF2_ITERS
@@ -137,11 +153,9 @@ class DeviceState:
         if self.is_provisioned():
             raise RuntimeError("이미 프로비저닝됨")
         ssid = (ssid or "").strip()
-        if not (1 <= len(ssid) <= 32):
-            raise ValueError("SSID는 1~32자")
+        check_ssid(ssid)
         if ap_pass:
-            if len(ap_pass) < 8:
-                raise ValueError("AP 암호는 8자 이상(WPA2)")
+            check_ap_pass(ap_pass)
         else:
             ap_pass = identity.gen_ap_pass()
         # admin 먼저 검증(짧으면 여기서 예외 → 아무것도 안 바뀜)
@@ -160,8 +174,7 @@ class DeviceState:
     def set_ap_pass(self, new_pass):
         if not self.is_provisioned():
             raise RuntimeError("프로비저닝 전")
-        if len(new_pass) < 8:
-            raise ValueError("AP 암호는 8자 이상(WPA2)")
+        check_ap_pass(new_pass)
         self.data["ap_pass"] = new_pass
         self.save()
 
@@ -169,8 +182,7 @@ class DeviceState:
         if not self.is_provisioned():
             raise RuntimeError("프로비저닝 전")
         new_ssid = (new_ssid or "").strip()
-        if not (1 <= len(new_ssid) <= 32):
-            raise ValueError("SSID는 1~32자")
+        check_ssid(new_ssid)
         self.data["ap_ssid"] = new_ssid
         self.save()
 

@@ -5,7 +5,7 @@ services:
     container_name: lynnai-hub-watch
     restart: unless-stopped
     environment:
-      - HUB_URL=http://192.168.0.50
+      - HUB_URL=${HUB_URL:?HUB_URL(허브 주소, 예 http://192.168.0.50)을 .env 에}
       - HUB_TOKEN=${HUB_TOKEN:-}
       - POLL_SEC=60
       - EVENT_SEC=30

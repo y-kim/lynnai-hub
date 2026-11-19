@@ -5,11 +5,19 @@ dns_hijack.py  --  최소 UDP DNS 응답기 (순수 로직 + 소켓, Pico 포팅
 나머지 도메인은: forward=True면 업스트림 DNS로 넘기고(standalone 아님),
                  forward=False면 NXDOMAIN 또는 우리 IP(캡티브) 반환.
 
-MicroPython 포팅: socket은 usocket, 나머지는 그대로.
+MicroPython 포팅: socket은 usocket, 나머지는 그대로(threading 이 없으면 포워딩은 그 자리에서).
+포워딩은 질의마다 스레드(동시 FWD_MAX 개까지, 넘으면 버림 — 기기가 다시 묻는다)라 느린 상위 DNS 가 루프를 안 막는다.
 """
 
 import socket
 import struct
+try:
+    import threading
+except ImportError:                 # MicroPython
+    threading = None
+
+BUF = 4096                          # EDNS 응답(512 넘음)을 자르지 않게. TC 비트는 그대로 넘겨 기기가 판단
+FWD_MAX = 16
 
 
 def _parse_qname(data, off):
@@ -51,7 +59,7 @@ class DnsHijack:
         """
         listen_ip   : 바인드할 IP (AP측 IP, 예 192.168.50.1)
         answer_ip   : 하이재킹 대상에 답할 IP (대개 listen_ip와 동일)
-        hijack_names: ['rkiot.net', 'www.rkiot.net', ...]  (부분일치)
+        hijack_names: ['rkiot.net', ...]  (그 이름 자체와 하위 이름만: www.rkiot.net 은 되고 rkiot.net.evil.com 은 안 됨)
         forward     : (ip, port) 업스트림 DNS. None이면 포워딩 안 함(standalone).
         catch_all   : True면 하이재킹 외 도메인도 answer_ip로 답(캡티브 포털식).
         only_src    : 이 출발지 IP 목록에서 온 질의만 하이재킹(=등록된 린나이 기기).
@@ -65,19 +73,41 @@ class DnsHijack:
         self.catch_all = catch_all
         self.only_src = set(only_src or [])
         self.sock = None
+        self._slots = threading.BoundedSemaphore(FWD_MAX) if threading else None
+
+    def _forward_now(self, data, addr, qname):
+        up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            up.settimeout(3)
+            up.connect(self.forward)          # 상위 DNS 가 아닌 곳에서 온 답은 받지 않게
+            up.send(data)
+            resp = up.recv(BUF)
+            if len(resp) >= 2 and resp[:2] == data[:2]:   # 질의 id 가 같은 답만
+                self.sock.sendto(resp, addr)
+        except Exception as e:
+            self._log("[dns] forward fail %s: %s" % (qname, e))
+        finally:
+            up.close()
 
     def _forward(self, data, addr, qname):
         if not self.forward:
             return                       # standalone(외부차단): 묵살
+        if not self._slots:
+            return self._forward_now(data, addr, qname)
+        if not self._slots.acquire(False):
+            self._log("[dns] forward 동시 %d개 꽉 참 — 버림 %s" % (FWD_MAX, qname))
+            return
+
+        def run():
+            try:
+                self._forward_now(data, addr, qname)
+            finally:
+                self._slots.release()
         try:
-            up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            up.settimeout(3)
-            up.sendto(data, self.forward)
-            resp, _ = up.recvfrom(512)
-            up.close()
-            self.sock.sendto(resp, addr)
+            threading.Thread(target=run, daemon=True).start()
         except Exception as e:
-            self._log("[dns] forward fail %s: %s" % (qname, e))
+            self._slots.release()
+            self._log("[dns] forward 스레드 실패: %s" % e)
 
     def open(self, port=53):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -89,11 +119,12 @@ class DnsHijack:
         return s
 
     def _is_hijacked(self, qname):
-        return any(n in qname for n in self.names)
+        qname = qname.rstrip(".")
+        return any(qname == n or qname.endswith("." + n) for n in self.names)
 
     def handle_once(self):
         """select 루프에서 readable일 때 1패킷 처리."""
-        data, addr = self.sock.recvfrom(512)
+        data, addr = self.sock.recvfrom(BUF)
         if len(data) < 12:
             return
         try:
@@ -107,8 +138,14 @@ class DnsHijack:
             return
         if self._is_hijacked(qname):
             self._log("[dns] HIJACK %s -> %s  (from %s)" % (qname, self.answer_ip, src))
-            self.sock.sendto(_build_answer(data, self.answer_ip), addr)
+            try:
+                self.sock.sendto(_build_answer(data, self.answer_ip), addr)
+            except (IndexError, ValueError, OSError):
+                pass                     # 질문부가 깨진 패킷
         elif self.catch_all:
-            self.sock.sendto(_build_answer(data, self.answer_ip), addr)
+            try:
+                self.sock.sendto(_build_answer(data, self.answer_ip), addr)
+            except (IndexError, ValueError, OSError):
+                pass
         else:
             self._forward(data, addr, qname)   # forward 없으면 묵살(standalone 외부차단)

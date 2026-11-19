@@ -421,8 +421,11 @@ def serve(bind_ip, port, state_path, controller=None, broker_ip=None, apply_cmd=
     if apply_cmd:
         import subprocess
         def _apply_hook(ssid, pw):
+            # SSID/암호는 인자로 주지 않는다: 'down'·'--state=…' 같은 값이 옵션으로 읽히고 ps 에 암호가 보인다.
+            # 필요한 스크립트는 환경변수로 받는다(apctl 은 상태 파일을 다시 읽으므로 안 씀).
+            env = dict(os.environ, LYNNAI_AP_SSID=ssid, LYNNAI_AP_PASS=pw or "")
             try:
-                subprocess.Popen([apply_cmd, ssid, pw or ""])
+                subprocess.Popen([apply_cmd, "up"], env=env)
             except Exception as e:
                 print("[portal] apply-cmd 실패:", e, flush=True)
         P.on_apply_ap = _apply_hook
@@ -438,6 +441,7 @@ if __name__ == "__main__":
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--state", required=True)
-    ap.add_argument("--apply-cmd", help="AP 적용 스크립트: <cmd> <ssid> <pass> 로 호출(프로비저닝/AP 변경 시)")
+    ap.add_argument("--apply-cmd", help="AP 적용 스크립트: '<cmd> up' 으로 호출, SSID/암호는 환경변수 "
+                    "LYNNAI_AP_SSID/LYNNAI_AP_PASS(프로비저닝/AP 변경 시)")
     a = ap.parse_args()
     serve(a.bind, a.port, a.state, apply_cmd=a.apply_cmd)

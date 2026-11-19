@@ -4,9 +4,9 @@ hub_doctor.py -- LYNNAI 허브 문제 진단(PC 에서 실행). 읽기만 한다
 
 지금까지 실제로 겪은 장애들을 하나씩 점검하고, 원인 후보와 해결법을 한국어로 알려 준다.
 
-  python3 hub_doctor.py                       # 허브 API 로 점검(기본 192.168.0.50)
-  python3 hub_doctor.py --host 192.168.0.50 --token XXXX
-  python3 hub_doctor.py --st                  # SmartThings CLI 로 ST 기기 상태도 점검
+  python3 hub_doctor.py --host <허브 IP>        # 허브 API 로 점검(예: --host 192.168.0.50)
+  python3 hub_doctor.py --host <허브 IP> --token XXXX
+  python3 hub_doctor.py --st                  # SmartThings CLI 로 ST 기기 상태도 점검(--st-cli 로 경로 지정 가능)
   python3 hub_doctor.py --serial /dev/ttyUSB0 # USB 시리얼: 로그 수집 + 허브에 'diag' 명령 → 상태 전체 점검
                                               # (집 Wi-Fi 가 끊겨 API 로 못 볼 때 쓰는 길)
 
@@ -96,10 +96,13 @@ def check_reachable(host):
         urllib.request.urlopen(f"http://{host}/", timeout=5).read(64)
         add("OK", f"허브 응답함 ({host})")
         return True
+    except urllib.error.HTTPError as e:      # 오류 응답이라도 허브는 LAN 에서 보이는 것
+        add("OK", f"허브 응답함 ({host}, HTTP {e.code})")
+        return True
     except Exception as e:
         add("ERR", f"허브가 집 LAN 에서 안 보임 ({host})", f"{type(e).__name__}: {e}",
             "① 전원/USB 확인 ② --serial 로 로그 확인: '집 Wi-Fi 끊김(사유 201)'이 반복되면 Zigbee 재가입 스캔이 "
-            "라디오를 잡는 문제(펌웨어 재시도 간격 확인) ③ 공유기 DHCP 로 IP 가 바뀌었는지 확인(MAC ac:eb:e6:00:00:01 고정 권장)")
+            "라디오를 잡는 문제(펌웨어 재시도 간격 확인) ③ 공유기 DHCP 로 IP 가 바뀌었는지 확인(허브 MAC 으로 IP 고정 권장)")
         return False
 
 
@@ -126,8 +129,8 @@ def check_stats(host, token):
         detail = f"가동 {up_min:.0f}분 · 가입 실패 {c.get('zb_join_fail', 0)}회 · 성공 {c.get('zb_joined', 0)}회"
         if s.get("zb_factory_new"):
             add("ERR", "Zigbee 가입정보가 없음(초기 상태) — ST 기기가 전부 오프라인", detail,
-                "SmartThings 앱 → 기기 추가 → 주변 기기 검색을 켠 뒤, 허브 버튼 짧게 또는 "
-                f"http://{host}/api/zigbee/join 호출(3분간 빠른 가입)")
+                "SmartThings 앱 → 기기 추가 → 주변 기기 검색을 켠 뒤, 허브 버튼을 짧게 누르거나, 관리 화면 → 연결 방식의 "
+                f"'Zigbee 가입 시도' 버튼(또는 토큰이 있으면 POST http://{host}/api/zigbee/join)으로 3분간 빠른 가입")
         else:
             add("ERR", "Zigbee 미가입(가입정보는 있음 — 재가입 실패 중)", detail,
                 "Station 이 켜져 있는지, 허브와 거리 확인. 계속 실패하면 ST 기기 추가 + 재가입")
@@ -232,8 +235,8 @@ def check_rinnai(host, token):
 
 # ---------------------------------------------------------------- SmartThings
 
-def check_st(hub_joined=None):
-    cli = shutil.which("smartthings") or "/home/ubuntu/smartthings/smartthings"
+def check_st(hub_joined=None, cli=""):
+    cli = cli or shutil.which("smartthings") or "smartthings"
     try:
         out = subprocess.run([cli, "devices", "-j"], capture_output=True, text=True, timeout=60).stdout
         devs = json.loads(out)
@@ -391,21 +394,24 @@ def check_serial(port, seconds):
 
 def main():
     ap = argparse.ArgumentParser(description="LYNNAI 허브 진단(읽기 전용)")
-    ap.add_argument("--host", default="192.168.0.50")
+    ap.add_argument("--host", default="", help="허브 IP(예: 192.168.0.50). 없으면 API 점검을 건너뜀")
     ap.add_argument("--token", default="")
     ap.add_argument("--st", action="store_true", help="SmartThings CLI 로 ST 기기 상태도 점검")
+    ap.add_argument("--st-cli", default="", help="SmartThings CLI 경로(기본: PATH 의 smartthings)")
     ap.add_argument("--serial", default="", help="시리얼 포트(예: /dev/ttyUSB0) — 켜면 로그도 점검")
     ap.add_argument("--seconds", type=int, default=10, help="diag 전 시리얼 로그 수집 시간")
     a = ap.parse_args()
 
     joined = None
-    if check_reachable(a.host):
+    if not a.host:
+        add("INFO", "허브 API 점검 건너뜀", "", "--host <허브 IP> 를 주면 API 로도 점검")
+    elif check_reachable(a.host):
         st = check_stats(a.host, a.token)
         joined = st.get("zb_joined_now") if st else None
         check_events(a.host, a.token)
         check_rinnai(a.host, a.token)
     if a.st:
-        check_st(joined)
+        check_st(joined, a.st_cli)
     if a.serial:
         check_serial(a.serial, a.seconds)
     sys.exit(report())

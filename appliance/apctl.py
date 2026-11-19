@@ -6,8 +6,8 @@
   프로비저닝됨 : 전용 AP    ap_ssid / ap_pass (WPA2)
                  + 린나이 클라우드 이름만 허브로 (standalone: 기기가 허브 브로커에 붙음)
 
-  apctl.py up   [--state P]   상태대로 (재)적용. 포털의 on_apply_ap 훅으로도 쓰인다
-                              (훅은 '<ssid> <pass>' 를 붙여 부르지만 무시하고 상태 파일을 다시 읽는다)
+  apctl.py up   [--state P]   상태대로 (재)적용. 포털의 on_apply_ap 훅으로도 쓰인다('apctl.py up' — SSID/암호는
+                              인자로 받지 않고 상태 파일을 다시 읽는다. 인자로 받으면 'down'·'--state=…' 가 옵션이 됨)
   apctl.py down [--state P]   AP/DNS 내림
 
 root 로 실행. 채널은 wlan0 가 붙은 공유기 채널을 따른다(brcmfmac: AP+STA 단일 채널 제약).
@@ -157,13 +157,13 @@ def up(st):
         ssid, pw, captive = d["ap_ssid"], d["ap_pass"] or "", False
     else:
         ssid, pw, captive = d["setup_ssid"], d.get("setup_pass") or "", True
-    # 설정 파일에 그대로 들어가므로 줄바꿈 등 제어문자는 거부(설정 주입 방지)
-    if any(ord(c) < 32 or ord(c) == 127 for c in ssid + pw):
-        sys.exit("apctl: SSID/암호에 제어문자")
-    if not 1 <= len(ssid.encode()) <= 32:
-        sys.exit("apctl: SSID 는 1~32바이트")
-    if pw and not 8 <= len(pw) <= 63:
-        sys.exit("apctl: WPA2 암호는 8~63자")
+    # 설정 파일에 그대로 들어가므로 줄바꿈 등 제어문자는 거부(설정 주입 방지). 저장할 때와 같은 검증(state.py)
+    try:
+        state_mod.check_ssid(ssid)
+        if pw:
+            state_mod.check_ap_pass(pw)
+    except ValueError as e:
+        sys.exit("apctl: %s" % e)
     ch = channel()
     ensure_if()
     hc, dc, pid = paths(st)
@@ -193,9 +193,9 @@ def load_state(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", nargs="?", default="up", help="up(기본) | down")
+    ap.add_argument("cmd", nargs="?", default="up", choices=("up", "down"), help="up(기본) | down")
     ap.add_argument("--state", default=os.environ.get("LYNNAI_STATE", DEFAULT_STATE))
-    a, _ = ap.parse_known_args()             # 훅 호출 시 붙는 <ssid> <pass> 는 무시
+    a = ap.parse_args()                      # 모르는 인자는 오류(옛 훅의 <ssid> <pass> 가 옵션으로 읽히지 않게)
     st = load_state(a.state)
     down(st) if a.cmd == "down" else up(st)
 

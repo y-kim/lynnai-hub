@@ -15,7 +15,7 @@ lynnai-hub-watch — LYNNAI 허브 장기 기록기 (표준 라이브러리만, 
   python lynnai_hub_watch.py gas [일]         # 날짜별 가스 사용량 (기본 14)
   python lynnai_hub_watch.py temps [시간]     # 방별 온도 시간 평균 (기본 24)
 
-환경변수: HUB_URL(기본 http://192.168.0.50) HUB_TOKEN POLL_SEC(60) EVENT_SEC(30) HUB_DB(data/hub.db)
+환경변수: HUB_URL(필수, 예 http://192.168.0.50) HUB_TOKEN POLL_SEC(60) EVENT_SEC(30) HUB_DB(data/hub.db)
 """
 import json
 import os
@@ -26,7 +26,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
 
-HUB_URL = os.environ.get("HUB_URL", "http://192.168.0.50").rstrip("/")
+HUB_URL = os.environ.get("HUB_URL", "").strip().rstrip("/")
 HUB_TOKEN = os.environ.get("HUB_TOKEN", "").strip()
 POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 EVENT_SEC = int(os.environ.get("EVENT_SEC", "30"))
@@ -112,6 +112,12 @@ def poll_events(c):
     now = datetime.now()
     try:
         st = fetch("/api/stats")
+    except urllib.error.HTTPError as e:  # 허브는 살아 있고 요청을 거절함(토큰 등) — 응답 없음과 구분
+        why = "인증 실패 — HUB_TOKEN 확인" if e.code in (401, 403) else f"오류 응답 {e.code} {e.reason}"
+        c.execute("insert into polls values(?,?,?,?,?,?,?)", (now.isoformat(timespec="seconds"), 0, None, None, None, None, f"HTTP {e.code}: {why}"[:120]))
+        c.commit()
+        print(f"{now:%H:%M:%S} 허브 {why}", flush=True)
+        return False
     except Exception as e:  # 허브 꺼짐/와이파이 끊김도 기록 대상
         c.execute("insert into polls values(?,?,?,?,?,?,?)", (now.isoformat(timespec="seconds"), 0, None, None, None, None, str(e)[:120]))
         c.commit()
@@ -143,6 +149,8 @@ def poll_events(c):
 
 
 def main():
+    if not HUB_URL:
+        sys.exit("HUB_URL(허브 주소, 예 http://192.168.0.50)을 지정하세요")
     c = db()
     print(f"lynnai-hub-watch 시작: {HUB_URL} 상태 {POLL_SEC}초·이벤트 {EVENT_SEC}초 → {DB}"
           f"{' (토큰 사용)' if HUB_TOKEN else ''}", flush=True)
@@ -154,7 +162,7 @@ def main():
                 next_state = time.time() + POLL_SEC
                 poll_state(c)
         except urllib.error.HTTPError as e:
-            print(f"허브 API 오류 {e.code}: {'토큰 확인(HUB_TOKEN)' if e.code == 401 else e.reason}", flush=True)
+            print(f"허브 API 오류 {e.code}: {'토큰 확인(HUB_TOKEN)' if e.code in (401, 403) else e.reason}", flush=True)
         except Exception as e:
             print(f"폴링 오류: {e}", flush=True)
         time.sleep(EVENT_SEC)

@@ -28,7 +28,10 @@ echo "[2/4] 코드 -> $DST"
 if [ "$SRC" != "$DST" ]; then
     rm -rf "$DST.new"
     mkdir -p "$DST.new"
-    (cd "$SRC" && tar cf - --exclude=.git --exclude=__pycache__ --exclude='*.pyc' .) | (cd "$DST.new" && tar xf -)
+    # root 서비스 코드는 root 소유로(원래 소유자를 복원하면 그 사용자가 고쳐 root 로 실행시킬 수 있음)
+    (cd "$SRC" && tar cf - --exclude=.git --exclude=__pycache__ --exclude='*.pyc' .) | (cd "$DST.new" && tar xf - --no-same-owner --no-same-permissions)
+    chown -R root:root "$DST.new"
+    chmod -R go-w "$DST.new"
     rm -rf "$DST"
     mv "$DST.new" "$DST"
 fi
