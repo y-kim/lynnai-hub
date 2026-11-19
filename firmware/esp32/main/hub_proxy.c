@@ -388,9 +388,16 @@ bool hub_proxy_apply(const char *form, char *msg, size_t msglen)
         snprintf(msg, msglen, "저장소 열기 실패");
         return false;
     }
-    hs_set_u8(h, "mode", m);
-    nvs_commit(h);
+    esp_err_t e = hs_set_u8(h, "mode", m);
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
     nvs_close(h);
+    if (e != ESP_OK) {                               /* 저장이 안 되면 바꾸지 않는다(재부팅 후 되돌아가지 않게) */
+        ESP_LOGE(TAG, "동작 모드 저장 실패: %s", esp_err_to_name(e));
+        snprintf(msg, msglen, "저장하지 못했습니다(%s). 모드는 그대로입니다", esp_err_to_name(e));
+        return false;
+    }
     s_mode = m;
     s_mode_gen++;                                    /* 지금 연결 끊기 → 기기가 다시 붙을 때 새 모드 */
     ESP_LOGW(TAG, "동작 모드 → %s (연결 다시 맺음)", m ? "단독" : "프록시");
