@@ -16,7 +16,7 @@
 #include "ezbee/bdb.h"
 #include "ezbee/zcl/cluster/custom.h"
 
-#include "temperature_sensor.h"
+#include "hub_main.h"
 #include "hub_rinnai.h"
 #include "hub_zb_rinnai.h"
 #include "hub_sensors.h"

@@ -26,7 +26,7 @@
 #include "ezbee/core.h"
 #include "ezbee/nwk.h"
 
-#include "temperature_sensor.h"
+#include "hub_main.h"
 #include "hub_wifi.h"
 #include "hub_state.h"
 #include "hub_dns.h"
