@@ -25,6 +25,17 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
    *LYNNAI Hub (Zigbee)* 를 설치 → 앱에서 **기기 추가 → 주변 기기 검색** → 허브 버튼 **짧게**.
 4. **린나이 기기**: 보일러·온도 조절기 Wi-Fi 모듈을 설정 모드로 두고 허브 버튼 **길게(3초)**.
 
+## 시험한 기기
+
+| 구분 | 모델 |
+|---|---|
+| 보일러 제어기 | 린나이 **WF-S6000** |
+| 온도 제어기 | 린나이 **RICH-WCR(N)** (각방) |
+| 허브 보드 | ESP32-C6-DevKitC-1 v1.2 |
+| SmartThings | SmartThings Station, 스마트 홈 허브(V4) |
+
+다른 모델은 확인하지 않았습니다. 자세한 내용은 [docs/esp32-hub.md 1.1](docs/esp32-hub.md#11-시험한-기기).
+
 ## 주요 기능
 
 - **SmartThings 기기**: 보일러(전원·난방 모드/방식/온도·온수·예열·예약 상태), 온도 조절기가 알려 주는 방마다
@@ -90,6 +101,9 @@ keeps working) or works on its own (standalone mode), and talks to SmartThings o
 - `server/lynnai-nas/` — the same hub as a LAN‑only Docker container for a NAS; `server/lynnai-hub-watch/` records
   the hub API into SQLite.
 - `tools/hub_doctor.py` — diagnostics from a PC (API, SmartThings CLI, USB serial).
+
+Tested with: Rinnai **WF-S6000** boiler controller, Rinnai **RICH-WCR(N)** room thermostat, ESP32‑C6‑DevKitC‑1 v1.2,
+SmartThings Station and Smart Home Hub (V4). Other models are untested.
 - `standalone/`, `appliance/`, `plugins/` — the earlier Raspberry Pi version, kept for reference.
 
 The firmware image carries no secrets: each hub generates its own device‑facing TLS key on first boot, and verifies
