@@ -30,26 +30,162 @@
 
 #include "nvs.h"
 #include "hub_store.h"
+#include "esp_random.h"
 #include "hub_proxy.h"
 #include "hub_rinnai.h"
+#include "hub_wifi.h"
 
 static const char *TAG = "HUB_PROXY";
 
 extern const uint8_t srv_pem_start[] asm("_binary_srv_pem_start");
 extern const uint8_t srv_pem_end[]   asm("_binary_srv_pem_end");
 
-#define UPSTREAM_IP    "3.38.86.244"      /* www.rkiot.net (이름으로 찾으면 허브 DNS 가 자기 자신을 답함) */
-#define UPSTREAM_HOST  "www.rkiot.net"
-#define MQTT_PORT      8883
+/* 린나이 클라우드. 이름·포트는 기기 펌웨어가 정한 값이라 고정, IP 만 집 Wi-Fi 쪽 DNS 로 조회(resolve_up) */
+#define DEF_UP_IP      "3.38.86.244"      /* 처음 쓰는 값. 이후엔 집 Wi-Fi 쪽 DNS 로 서버 이름을 조회해 갱신(resolve_up) */
+#define DNS_REFRESH_US (10LL * 60 * 1000000) /* 조회 결과 재사용 시간 */
+#define UP_HOST        "www.rkiot.net"
+#define MQTT_PORT      8883               /* 기기 → 허브, 허브 → 클라우드 모두 같은 포트(기기는 허브를 클라우드로 안다) */
+#define BOOT_PORT      80                 /* /key/server 도 마찬가지 */
 #define MAX_LINKS      3                  /* 보일러 + 각방 모듈 + 재접속 여유 1 */
 #define IDLE_SEC       200                /* 이만큼 아무것도 안 오가면 죽은 연결로 보고 닫음 */
 
 static WOLFSSL_CTX *s_srv_ctx, *s_cli_ctx;
+static struct {
+    char host[64];
+    char ip[16];
+} s_up = { UP_HOST, DEF_UP_IP };
+static SemaphoreHandle_t s_dns_mx;
+static int64_t s_dns_at;                      /* 마지막 조회 성공 시각(0 = 아직) */
+static char s_dns_from[16];                   /* 그때 물어본 DNS 서버 */
 static volatile int s_links;
 static volatile uint8_t s_mode = HUB_MODE_PROXY;
 static volatile uint32_t s_mode_gen;          /* 모드가 바뀔 때마다 +1 → 지금 연결들이 알아채고 닫음 */
 
 uint8_t hub_proxy_mode(void) { return s_mode; }
+
+/* ---------------------------------------------------------------- 클라우드 주소 조회
+ * 허브 자신의 리졸버를 쓰지 않는다: lwIP 의 DNS 서버는 전역이고 허브 AP 가 자기 자신을 DNS 로 내놓아서,
+ * 이름으로 찾으면 허브 DNS(rkiot.net → 허브)가 답할 수 있다. 그래서 집 Wi-Fi(STA) 쪽 DNS 에 직접 UDP 로 묻는다. */
+
+/* server(네트워크 바이트 순서)에 host 의 A 레코드를 묻는다. 성공하면 out 에 "a.b.c.d" */
+static bool dns_query_a(uint32_t server, const char *host, char out[16])
+{
+    uint8_t q[300], r[512];
+    uint16_t id = (uint16_t)esp_random();
+    int n = 0;
+    q[n++] = id >> 8; q[n++] = id & 0xff;
+    q[n++] = 0x01; q[n++] = 0x00;                    /* 재귀 요청 */
+    q[n++] = 0; q[n++] = 1;                          /* 질문 1개 */
+    memset(q + n, 0, 6);
+    n += 6;
+    for (const char *p = host; *p;) {                /* www.rkiot.net → 3www5rkiot3net0 */
+        const char *dot = strchr(p, '.');
+        int l = dot ? (int)(dot - p) : (int)strlen(p);
+        if (l <= 0 || l > 63 || n + l + 6 > (int)sizeof(q)) {
+            return false;
+        }
+        q[n++] = (uint8_t)l;
+        memcpy(q + n, p, l);
+        n += l;
+        p += l + (dot ? 1 : 0);
+    }
+    q[n++] = 0;
+    q[n++] = 0; q[n++] = 1;                          /* A */
+    q[n++] = 0; q[n++] = 1;                          /* IN */
+
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) {
+        return false;
+    }
+    struct timeval tv = { .tv_sec = 2 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(53), .sin_addr.s_addr = server };
+    int got = -1;
+    if (sendto(s, q, n, 0, (struct sockaddr *)&a, sizeof(a)) == n) {
+        got = recv(s, r, sizeof(r), 0);
+    }
+    close(s);
+    if (got < 12 || ((r[0] << 8) | r[1]) != id || (r[3] & 0x0F) != 0) {
+        return false;                                /* 응답 없음 / 다른 응답 / 오류 코드 */
+    }
+    int an = (r[6] << 8) | r[7];
+    int pos = n;                                     /* 질문 부분은 우리가 보낸 것과 같다 */
+    for (int i = 0; i < an && pos < got; i++) {
+        if ((r[pos] & 0xC0) == 0xC0) {               /* 이름: 압축 포인터 */
+            pos += 2;
+        } else {
+            while (pos < got && r[pos]) {
+                pos += r[pos] + 1;
+            }
+            pos++;
+        }
+        if (pos + 10 > got) {
+            break;
+        }
+        int type = (r[pos] << 8) | r[pos + 1], rdlen = (r[pos + 8] << 8) | r[pos + 9];
+        pos += 10;
+        if (type == 1 && rdlen == 4 && pos + 4 <= got) {
+            snprintf(out, 16, "%u.%u.%u.%u", r[pos], r[pos + 1], r[pos + 2], r[pos + 3]);
+            return true;
+        }
+        pos += rdlen;                                /* CNAME 등은 건너뜀 */
+    }
+    return false;
+}
+
+/* 클라우드 서버 이름을 집 Wi-Fi 쪽 DNS(DHCP 로 받은 DNS → 보조 → 공유기)로 조회해 s_up.ip 를 갱신.
+ * 10분 안에 조회했으면 그대로. 실패하면 마지막으로 알던 IP(저장값)를 계속 쓴다. */
+static void resolve_up(bool force)
+{
+    if (!s_dns_mx) {
+        return;
+    }
+    xSemaphoreTake(s_dns_mx, portMAX_DELAY);
+    if (!force && s_dns_at && esp_timer_get_time() - s_dns_at < DNS_REFRESH_US) {
+        xSemaphoreGive(s_dns_mx);
+        return;
+    }
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    uint32_t ap = hub_wifi_ap_ip(), cand[3] = { 0 };
+    int nc = 0;
+    esp_netif_dns_info_t d;
+    for (int k = 0; sta && k < 2; k++) {
+        if (esp_netif_get_dns_info(sta, k == 0 ? ESP_NETIF_DNS_MAIN : ESP_NETIF_DNS_BACKUP, &d) == ESP_OK &&
+            d.ip.type == ESP_IPADDR_TYPE_V4 && d.ip.u_addr.ip4.addr && d.ip.u_addr.ip4.addr != ap) {
+            cand[nc++] = d.ip.u_addr.ip4.addr;       /* 허브 자기 AP 주소면 빼고 */
+        }
+    }
+    esp_netif_ip_info_t ip;
+    if (sta && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.gw.addr) {
+        cand[nc++] = ip.gw.addr;                     /* 공유기(대개 DNS 중계도 함) */
+    }
+    char got[16];
+    bool ok = false;
+    for (int k = 0; k < nc && !ok; k++) {
+        ok = dns_query_a(cand[k], s_up.host, got);
+        if (ok) {
+            struct in_addr ia = { .s_addr = cand[k] };
+            inet_ntoa_r(ia, s_dns_from, sizeof(s_dns_from));
+        }
+    }
+    if (ok) {
+        s_dns_at = esp_timer_get_time();
+        ESP_LOGI(TAG, "클라우드 주소 조회: %s = %s (집 DNS %s)", s_up.host, got, s_dns_from);
+        if (strcmp(got, s_up.ip)) {
+            ESP_LOGW(TAG, "클라우드 %s 주소: %s → %s (DNS %s)", s_up.host, s_up.ip, got, s_dns_from);
+            strlcpy(s_up.ip, got, sizeof(s_up.ip));
+            nvs_handle_t h;
+            if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {   /* 다음 부팅에 DNS 가 안 돼도 쓰게 */
+                hs_set_str(h, "up_ip", got);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "클라우드 %s 조회 실패(DNS 후보 %d개) — 마지막 주소 %s 사용", s_up.host, nc, s_up.ip);
+    }
+    xSemaphoreGive(s_dns_mx);
+}
 
 static void mode_load(void)
 {
@@ -57,6 +193,10 @@ static void mode_load(void)
     uint8_t m = HUB_MODE_PROXY;
     if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
         hs_get_u8(h, "proxy", "mode", &m);
+        size_t n = sizeof(s_up.ip);
+        if (hs_get_str(h, "proxy", "up_ip", s_up.ip, &n) != ESP_OK || !s_up.ip[0]) {
+            strlcpy(s_up.ip, DEF_UP_IP, sizeof(s_up.ip));
+        }
         nvs_close(h);
     }
     s_mode = m == HUB_MODE_STANDALONE ? HUB_MODE_STANDALONE : HUB_MODE_PROXY;
@@ -370,7 +510,10 @@ typedef struct {
 static void up_task(void *arg)
 {
     up_job_t *j = arg;
-    j->fd = tcp_connect(UPSTREAM_IP, MQTT_PORT, 10);
+    if (sta_ready(15)) {
+        resolve_up(false);                           /* 10분 지났으면 집 DNS 로 다시 조회 */
+    }
+    j->fd = tcp_connect(s_up.ip, MQTT_PORT, 10);
     j->ssl = j->fd >= 0 ? wolfSSL_new(s_cli_ctx) : NULL;
     if (!j->ssl) {
         ESP_LOGW(TAG, "클라우드 연결 실패 (집 Wi-Fi/인터넷 확인)");
@@ -378,7 +521,7 @@ static void up_task(void *arg)
     } else {
         wolfSSL_set_fd(j->ssl, j->fd);
 #ifdef HAVE_SNI
-        wolfSSL_UseSNI(j->ssl, WOLFSSL_SNI_HOST_NAME, UPSTREAM_HOST, strlen(UPSTREAM_HOST));
+        wolfSSL_UseSNI(j->ssl, WOLFSSL_SNI_HOST_NAME, s_up.host, strlen(s_up.host));
 #endif
         int64_t t0 = esp_log_timestamp();
         if (wolfSSL_connect(j->ssl) == WOLFSSL_SUCCESS) {
@@ -584,7 +727,7 @@ static void listen_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "기기 대기 :%d (%s 모드, 클라우드 %s)", MQTT_PORT, s_mode ? "단독" : "프록시", UPSTREAM_IP);
+    ESP_LOGI(TAG, "기기 대기 :%d (%s 모드, 클라우드 %s = %s)", MQTT_PORT, s_mode ? "단독" : "프록시", s_up.host, s_up.ip);
     for (;;) {
         struct sockaddr_in from;
         socklen_t fl = sizeof(from);
@@ -612,6 +755,7 @@ static void listen_task(void *arg)
 
 void hub_proxy_start(void)
 {
+    s_dns_mx = xSemaphoreCreateMutex();
     mode_load();
     ESP_LOGI(TAG, "동작 모드: %s", s_mode == HUB_MODE_STANDALONE ? "단독" : "프록시");
     xTaskCreate(listen_task, "hub_proxy", 6144, NULL, 5, NULL);
@@ -648,12 +792,15 @@ static bool boot_cache_get(char *out, size_t cap)
 /* 클라우드에 /key/server 를 다시 물어 본문을 buf 에 받는다. 본문 시작 포인터(없으면 NULL) */
 static char *boot_fetch(const char *svc, const char *mac, char *buf, int cap)
 {
-    int s = tcp_connect(UPSTREAM_IP, 80, 8);
+    if (sta_ready(15)) {
+        resolve_up(false);
+    }
+    int s = tcp_connect(s_up.ip, BOOT_PORT, 8);
     if (s < 0) {
         return NULL;
     }
-    int n = snprintf(buf, cap, "GET /key/server HTTP/1.0\r\nHost: " UPSTREAM_HOST "\r\nCk-Service: %s\r\nCk-Mac: %s\r\n\r\n",
-                     svc, mac);
+    int n = snprintf(buf, cap, "GET /key/server HTTP/1.0\r\nHost: %s\r\nCk-Service: %s\r\nCk-Mac: %s\r\n\r\n",
+                     s_up.host, svc, mac);
     send(s, buf, n, 0);
     int got = 0, r;
     while (got < cap - 1 && (r = recv(s, buf + got, cap - 1 - got, 0)) > 0) {
