@@ -5,6 +5,7 @@
  *  - 설정 완료 응답 후 2초 뒤 Wi-Fi 를 다시 적용(설정 AP 닫고 집 Wi-Fi + 전용 AP), DNS 는 클라우드 이름만.
  *  - 설정 완료 때 세션을 주지 않는다: 설정용 망에선 초기 설정 한 번이 끝. 관리 화면은 다음 단계.
  *  - 완료 화면에 암호를 보여주지 않는다(직접 입력한 값이므로).
+ *  - 설정 후: /admin = 관리 화면(관리자 암호로 로그인, 세션 쿠키 30분). 지금은 플러그인 추가·삭제·핀 설정.
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -23,6 +24,17 @@
 #include "hub_sensors.h"
 #include "hub_proxy.h"
 #include "hub_zigbee.h"
+#include "hub_plugins.h"
+#include "hub_expose.h"
+#include "hub_uplink.h"
+#include "hub_rinnai.h"
+#include "hub_store.h"
+#include "nvs.h"
+#include "hub_api.h"
+#include "hub_pairs.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "esp_system.h"
 
 static const char *TAG = "HUB_PORTAL";
 static hub_state_t *s_st;
@@ -45,6 +57,16 @@ static const char HEAD2[] =
     ".pwwrap{position:relative;display:block}.pwwrap input{padding-right:48px}"
     "button.eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:40px;height:40px;"
     "margin:0;padding:8px;background:transparent;border:0;color:#aaa;line-height:0}"
+    "h2{font-size:16px;margin-top:24px}h3{font-size:15px;margin:0 0 6px}a{color:#8af}"
+    "button.ghost{background:#2a2a2a;border:1px solid #555}.ok{color:#8d8}"
+    "button.ic{width:auto;display:inline-block;margin:0;padding:6px 9px;background:#2a2a2a;border:1px solid #555;font-weight:400;vertical-align:middle}"
+    "button.sv{background:#2a2a2a;border:1px solid #555;color:#999}button.sv.on{background:#c33;border:1px solid #c33;color:#fff}"
+    ".chg{outline:1px solid #666;outline-offset:3px;border-radius:6px}"
+    "dialog{background:#1c1c1c;color:#eee;border:1px solid #555;border-radius:12px;padding:16px;width:min(320px,90vw)}"
+    "dialog::backdrop{background:#000a}.dbtn{display:flex;gap:8px}"
+    ".row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #2a2a2a}"
+    "label.chk{display:inline-block;margin:0 0 0 10px;color:#ddd}label.chk input{width:auto;margin-right:4px}"
+    "h3.grp{margin:14px 0 2px;color:#ccc}"
     "</style></head><body>";
 static const char TAIL[] =
     "<script>(function(){"
@@ -194,7 +216,7 @@ static esp_err_t root_get(httpd_req_t *req)
     }
     char b[512] = "<h1>LYNNAI 허브</h1><div class=card><p>기기 ";
     cat_esc(b, sizeof(b), s_st->device_id);
-    strlcat(b, " · 설정 완료</p><p class=muted>관리 화면은 다음 단계에서 추가됩니다.</p></div>", sizeof(b));
+    strlcat(b, " · 설정 완료</p><p><a href=/admin>관리 화면</a> (플러그인·센서 핀)</p></div>", sizeof(b));
     return send_page(req, "LYNNAI 허브", b, NULL);
 }
 
@@ -294,6 +316,288 @@ static esp_err_t provision_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---------- 관리 화면: 로그인 세션 ---------- */
+#define SESS_SEC 1800
+static char s_sess[33];
+static int64_t s_sess_until;
+
+static bool authed(httpd_req_t *req)
+{
+    char ck[160];
+    if (!s_sess[0] || esp_timer_get_time() > s_sess_until ||
+        httpd_req_get_hdr_value_str(req, "Cookie", ck, sizeof(ck)) != ESP_OK) {
+        return false;
+    }
+    char *p = strstr(ck, "lynnai_s=");
+    if (!p || strlen(p + 9) < 32) {
+        return false;
+    }
+    uint8_t d = 0;
+    for (int i = 0; i < 32; i++) {                   /* 같은 시간에 비교 */
+        d |= (uint8_t)(p[9 + i] ^ s_sess[i]);
+    }
+    if (d) {
+        return false;
+    }
+    s_sess_until = esp_timer_get_time() + (int64_t)SESS_SEC * 1000000;
+    return true;
+}
+
+static int read_body(httpd_req_t *req, char *body, int cap)
+{
+    if (req->content_len <= 0 || req->content_len >= cap) {
+        return -1;
+    }
+    int got = 0;
+    while (got < req->content_len) {
+        int r = httpd_req_recv(req, body + got, req->content_len - got);
+        if (r <= 0) {
+            return -1;
+        }
+        got += r;
+    }
+    body[got] = 0;
+    return got;
+}
+
+static esp_err_t redirect(httpd_req_t *req, const char *to)
+{
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", to);
+    return httpd_resp_send(req, NULL, 0);
+}
+
+static esp_err_t login_page(httpd_req_t *req, const char *msg)
+{
+    char b[640] = "<h1>관리 화면</h1>";
+    if (msg) {
+        strlcat(b, "<p class=warn>", sizeof(b)); cat_esc(b, sizeof(b), msg); strlcat(b, "</p>", sizeof(b));
+    }
+    strlcat(b, "<div class=card><form method=post action=/login><label>관리자 암호</label>"
+               "<input name=pw type=password autofocus><button>로그인</button></form>"
+               "<p class=muted>처음 설정할 때 정한 관리자 암호입니다.</p></div>", sizeof(b));
+    return send_page(req, "관리 화면", b, NULL);
+}
+
+/* 관리 화면 공통: 별명 팝업 + 변경 추적(바뀐 줄 옅은 테두리, 저장 버튼은 바뀐 게 있을 때만 강조).
+ * 저장 버튼은 class=sv 를 단다. 별명 칩은 editAlias('<mac>') 를 부르고, 폼 안의 숨은 a_<mac> 입력에 값을 넣는다. */
+static const char ADMIN_EXTRA[] =
+    "<dialog id=adlg><h3 style='margin-top:0'>별명</h3>"
+    "<input id=adin maxlength=20 placeholder='예: 거실 보일러'>"
+    "<div class=dbtn><button type=button id=adok>저장</button><button type=button id=adno class=ghost>취소</button></div>"
+    "</dialog><script>(function(){"
+    "document.querySelectorAll('form').forEach(function(f){var b=f.querySelector('button.sv');if(!b)return;"
+    "var fs=[].slice.call(f.querySelectorAll('input:not([type=hidden]),select'));"
+    "fs.forEach(function(e){e._o=e.type=='checkbox'?e.checked:e.value});"
+    "function up(){var n=0;f.querySelectorAll('.chg').forEach(function(r){r.classList.remove('chg')});"
+    "fs.forEach(function(e){var v=e.type=='checkbox'?e.checked:e.value;"
+    "if(v!==e._o){n++;(e.closest('.row')||e).classList.add('chg')}});b.classList.toggle('on',n>0)}"
+    "f.addEventListener('input',up);f.addEventListener('change',up)});"
+    "var D=document.getElementById('adlg'),T=document.getElementById('adin');"
+    "window.editAlias=function(m){var i=document.querySelector('[name=a_'+m+']');if(!i)return;"
+    "T.value=i.value;D._m=m;D.showModal();T.focus();T.select()};"
+    "function ok(){var m=D._m,i=document.querySelector('[name=a_'+m+']');i.value=T.value.trim();"
+    "document.getElementById('al_'+m).textContent=i.value||'별명 없음';"
+    "i.dispatchEvent(new Event('input',{bubbles:true}));D.close()}"
+    "document.getElementById('adok').onclick=ok;document.getElementById('adno').onclick=function(){D.close()};"
+    "T.addEventListener('keydown',function(e){if(e.key=='Enter'){e.preventDefault();ok()}})"
+    "})();</script>";
+
+static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
+{
+    const size_t cap = 20480;
+    char *b = calloc(1, cap);
+    if (!b) {
+        return httpd_resp_send_500(req);
+    }
+    strlcat(b, "<h1>LYNNAI 허브 관리</h1><p class=muted>기기 ", cap);
+    cat_esc(b, cap, s_st->device_id);
+    strlcat(b, " · <a href=/logout>로그아웃</a></p>", cap);
+    if (msg) {
+        strlcat(b, ok ? "<p class=ok>" : "<p class=warn>", cap); cat_esc(b, cap, msg); strlcat(b, "</p>", cap);
+    }
+    {
+        char w[400];                    /* 저장 데이터 오류가 있으면 맨 위에 경고(빨간 LED 깜빡임과 같이) */
+        hub_store_errors_html(w, sizeof(w));
+        strlcat(b, w, cap);
+    }
+    hub_uplink_render(b, cap);          /* 연결 방식(통로) 먼저 — 아래 노출은 고른 통로만 나옴 */
+    hub_pairs_render(b, cap);           /* 연결된 기기(별명·보일러 연결) — 노출 설정 바로 위 */
+    hub_expose_render_rinnai(b, cap);
+    hub_plugins_render(b, cap);
+    strlcat(b, "<h2>서버 연동 (장기 기록·그래프)</h2><div class=card><p class=muted>"
+               "<code>/api/v1/state</code> (JSON), <code>/metrics</code> (Prometheus), <code>/api/events</code>. ", cap);
+    strlcat(b, hub_api_has_token() ? "API 토큰 <b>켜짐</b>: 요청에 <code>Authorization: Bearer &lt;토큰&gt;</code> 필요.</p>"
+                                   : "API 토큰 <b>없음</b>: 집 LAN 에서 누구나 읽을 수 있습니다.</p>", cap);
+    strlcat(b, "<form method=post action=/admin/api><button name=op value=new>토큰 새로 만들기</button>"
+               "<button name=op value=off class=ghost>토큰 끄기</button></form>"
+               "<p class=muted>새로 만들면 이전 토큰은 바로 무효. 토큰은 만들 때 한 번만 보여 줍니다.</p></div>", cap);
+    esp_err_t r = send_page(req, "허브 관리", b, ADMIN_EXTRA);
+    free(b);
+    return r;
+}
+
+static esp_err_t admin_get(httpd_req_t *req)
+{
+    log_req(req);
+    if (!s_st->provisioned) {
+        return redirect(req, "/");
+    }
+    return authed(req) ? admin_page(req, NULL, false) : login_page(req, NULL);
+}
+
+static esp_err_t login_post(httpd_req_t *req)
+{
+    log_req(req);
+    char body[256], pw[HUB_PASS_MAX * 3 + 1];
+    if (!s_st->provisioned || read_body(req, body, sizeof(body)) < 0) {
+        return redirect(req, "/");
+    }
+    form_get(body, "pw", pw, sizeof(pw));
+    memset(body, 0, sizeof(body));
+    bool ok = pw[0] && hub_state_verify_admin(pw);
+    memset(pw, 0, sizeof(pw));
+    if (!ok) {
+        vTaskDelay(pdMS_TO_TICKS(1000));             /* 암호 맞히기 늦추기 */
+        return login_page(req, "암호가 맞지 않습니다");
+    }
+    uint8_t rnd[16];
+    esp_fill_random(rnd, sizeof(rnd));
+    for (int i = 0; i < 16; i++) {
+        snprintf(s_sess + 2 * i, 3, "%02x", rnd[i]);
+    }
+    s_sess_until = esp_timer_get_time() + (int64_t)SESS_SEC * 1000000;
+    char ck[96];
+    snprintf(ck, sizeof(ck), "lynnai_s=%s; Path=/; HttpOnly; SameSite=Strict", s_sess);
+    httpd_resp_set_hdr(req, "Set-Cookie", ck);
+    return redirect(req, "/admin");
+}
+
+static esp_err_t logout_get(httpd_req_t *req)
+{
+    s_sess[0] = 0;
+    httpd_resp_set_hdr(req, "Set-Cookie", "lynnai_s=; Path=/; Max-Age=0");
+    return redirect(req, "/admin");
+}
+
+/* 저장 후 센서만 다시 적용(재부팅 없음). 응답을 먼저 보낸 뒤 reload(최대 ~2초 걸림). */
+static void reload_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(500));
+    hub_sensors_reload();
+    vTaskDelete(NULL);
+}
+
+static esp_err_t plugin_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[256], err[96] = "";
+    if (read_body(req, body, sizeof(body)) < 0) {
+        return admin_page(req, "잘못된 요청", false);
+    }
+    if (!hub_plugins_apply(body, err, sizeof(err))) {
+        return admin_page(req, err, false);
+    }
+    xTaskCreate(reload_task, "sens_reload", 3072, NULL, 5, NULL);
+    return admin_page(req, "저장했습니다 (센서만 다시 적용, 재부팅 없음)", true);
+}
+
+static esp_err_t pairs_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char *body = calloc(1, 1024), msg[96] = "";
+    if (!body) {
+        return httpd_resp_send_500(req);
+    }
+    bool ok = read_body(req, body, 1024) >= 0 && hub_pairs_apply(body, msg, sizeof(msg));
+    free(body);
+    return admin_page(req, ok ? msg : (msg[0] ? msg : "잘못된 요청"), ok);
+}
+
+static esp_err_t devicedel_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char *body = calloc(1, 1024), msg[96] = "";
+    if (!body) {
+        return httpd_resp_send_500(req);
+    }
+    bool ok = read_body(req, body, 1024) >= 0 && hub_pairs_delete(body, msg, sizeof(msg));
+    free(body);
+    return admin_page(req, ok ? msg : (msg[0] ? msg : "잘못된 요청"), ok);
+}
+
+static esp_err_t expose_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char *body = calloc(1, 1024), err[96] = "";
+    if (!body) {
+        return httpd_resp_send_500(req);
+    }
+    bool ok = read_body(req, body, 1024) >= 0 && hub_expose_apply(body, err, sizeof(err));
+    free(body);
+    return admin_page(req, ok ? "노출 설정을 저장했습니다 (바로 적용)" : (err[0] ? err : "잘못된 요청"), ok);
+}
+
+static esp_err_t transport_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[128], msg[128] = "";
+    bool ok = read_body(req, body, sizeof(body)) >= 0 && hub_uplink_apply(body, msg, sizeof(msg));
+    return admin_page(req, ok ? msg : "잘못된 요청", ok);
+}
+
+static esp_err_t apitoken_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[64], op[8] = "";
+    if (read_body(req, body, sizeof(body)) >= 0) {
+        form_get(body, "op", op, sizeof(op));
+    }
+    if (!strcmp(op, "new")) {
+        char tok[33], msg[160];
+        hub_api_token_new(tok);
+        snprintf(msg, sizeof(msg), "새 API 토큰: %s  (지금만 보입니다 — 서버 설정에 넣으세요)", tok);
+        return admin_page(req, msg, true);
+    }
+    if (!strcmp(op, "off")) {
+        hub_api_token_clear();
+        return admin_page(req, "API 토큰을 껐습니다 (LAN 에 열림)", true);
+    }
+    return admin_page(req, "잘못된 요청", false);
+}
+
+static esp_err_t plugin_action_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[128], msg[96] = "";
+    if (read_body(req, body, sizeof(body)) < 0) {
+        return admin_page(req, "잘못된 요청", false);
+    }
+    bool ok = hub_plugins_action(body, msg, sizeof(msg));   /* 플러그인 즉시 동작 — 재부팅 없음 */
+    return admin_page(req, msg[0] ? msg : (ok ? "적용했습니다" : "실패"), ok);
+}
+
 /* ---------- 캡티브: 모르는 주소는 전부 설정 페이지로 ---------- */
 static esp_err_t captive_get(httpd_req_t *req)
 {
@@ -316,7 +620,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 16;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
+    cfg.max_uri_handlers = 24;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
     cfg.stack_size = 6144;
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
@@ -332,7 +636,27 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &prov);
     const httpd_uri_t boot = { .uri = "/key/server", .method = HTTP_GET, .handler = hub_proxy_bootstrap_handler };
     httpd_register_uri_handler(srv, &boot);        /* 보일러 부트스트랩 중계(와일드카드보다 먼저) */
-    hub_sensors_register(srv);                     /* /api/gas, /api/gas/set */
+    const httpd_uri_t adm = { .uri = "/admin", .method = HTTP_GET, .handler = admin_get };
+    const httpd_uri_t lin = { .uri = "/login", .method = HTTP_POST, .handler = login_post };
+    const httpd_uri_t lout = { .uri = "/logout", .method = HTTP_GET, .handler = logout_get };
+    const httpd_uri_t plug = { .uri = "/admin/plugin", .method = HTTP_POST, .handler = plugin_post };
+    const httpd_uri_t gas = { .uri = "/admin/plugin-action", .method = HTTP_POST, .handler = plugin_action_post };
+    const httpd_uri_t expo = { .uri = "/admin/expose", .method = HTTP_POST, .handler = expose_post };
+    const httpd_uri_t prs = { .uri = "/admin/devices", .method = HTTP_POST, .handler = pairs_post };
+    const httpd_uri_t ddel = { .uri = "/admin/device-del", .method = HTTP_POST, .handler = devicedel_post };
+    httpd_register_uri_handler(srv, &expo);
+    httpd_register_uri_handler(srv, &prs);
+    httpd_register_uri_handler(srv, &ddel);
+    httpd_register_uri_handler(srv, &adm);
+    httpd_register_uri_handler(srv, &lin);
+    httpd_register_uri_handler(srv, &lout);
+    httpd_register_uri_handler(srv, &plug);
+    httpd_register_uri_handler(srv, &gas);
+    const httpd_uri_t apit = { .uri = "/admin/api", .method = HTTP_POST, .handler = apitoken_post };
+    httpd_register_uri_handler(srv, &apit);
+    const httpd_uri_t trns = { .uri = "/admin/transport", .method = HTTP_POST, .handler = transport_post };
+    httpd_register_uri_handler(srv, &trns);
+    hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */
     ESP_LOGI(TAG, "설정 포털 시작 (:80)");
