@@ -34,6 +34,7 @@
 #include "hub_events.h"
 #include "hub_uplink.h"
 #include "hub_zb_rinnai.h"
+#include "hub_proxy.h"
 
 static const char *TAG = "diag";
 static const hub_state_t *s_st;
@@ -166,7 +167,7 @@ static void dump(void)
     } else {
         printf("zb ready=0\n");
     }
-    printf("uplink=0x%02x\n", hub_uplink_mask());
+    printf("uplink=0x%02x mode=%s\n", hub_uplink_mask(), hub_proxy_mode() == HUB_MODE_STANDALONE ? "standalone" : "proxy");
 
     hub_dev_t *dev = s_dev;
     int n = hub_rinnai_snapshot(dev, MAX_DEV);

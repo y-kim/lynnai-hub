@@ -392,9 +392,10 @@ static const char ADMIN_EXTRA[] =
     "</dialog><script>(function(){"
     "document.querySelectorAll('form').forEach(function(f){var b=f.querySelector('button.sv');if(!b)return;"
     "var fs=[].slice.call(f.querySelectorAll('input:not([type=hidden]),select'));"
-    "fs.forEach(function(e){e._o=e.type=='checkbox'?e.checked:e.value});"
+    "function cv(e){return e.type=='checkbox'||e.type=='radio'?e.checked:e.value}"
+    "fs.forEach(function(e){e._o=cv(e)});"
     "function up(){var n=0;f.querySelectorAll('.chg').forEach(function(r){r.classList.remove('chg')});"
-    "fs.forEach(function(e){var v=e.type=='checkbox'?e.checked:e.value;"
+    "fs.forEach(function(e){var v=cv(e);"
     "if(v!==e._o){n++;(e.closest('.row')||e).classList.add('chg')}});b.classList.toggle('on',n>0)}"
     "f.addEventListener('input',up);f.addEventListener('change',up)});"
     "var D=document.getElementById('adlg'),T=document.getElementById('adin');"
@@ -427,6 +428,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
         hub_store_errors_html(w, sizeof(w));
         strlcat(b, w, cap);
     }
+    hub_proxy_render(b, cap);           /* 동작 모드(프록시/단독) 맨 위 */
     hub_uplink_render(b, cap);          /* 연결 방식(통로) — 아래 노출 체크는 고른 통로만 나옴 */
     hub_pairs_render(b, cap);           /* 연결된 기기(이름·보일러 연결·기기/방별 노출) */
     hub_expose_render_types(b, cap);    /* 노출 설정: 종류별 컨트롤 */
@@ -556,6 +558,17 @@ static esp_err_t expose_post(httpd_req_t *req)
     return admin_page(req, ok ? "노출 설정을 저장했습니다 (바로 적용)" : (err[0] ? err : "잘못된 요청"), ok);
 }
 
+static esp_err_t mode_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[64], msg[160] = "";
+    bool ok = read_body(req, body, sizeof(body)) >= 0 && hub_proxy_apply(body, msg, sizeof(msg));
+    return admin_page(req, msg[0] ? msg : "잘못된 요청", ok);
+}
+
 static esp_err_t transport_post(httpd_req_t *req)
 {
     log_req(req);
@@ -662,6 +675,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &apit);
     const httpd_uri_t trns = { .uri = "/admin/transport", .method = HTTP_POST, .handler = transport_post };
     httpd_register_uri_handler(srv, &trns);
+    const httpd_uri_t mode = { .uri = "/admin/mode", .method = HTTP_POST, .handler = mode_post };
+    httpd_register_uri_handler(srv, &mode);
     hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */
