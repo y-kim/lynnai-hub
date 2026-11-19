@@ -46,7 +46,8 @@ static const char *TAG = "HUB_PROXY";
 
 /* 린나이 클라우드의 사설 CA "ckstack"(Ckstack Inc, 2024-01-24 ~ 2123-12-31, SHA-256 C7:0B:E6:E2:…:1E:57).
  * 서버 인증서(CN=dev2.ckpush.com)가 이 CA 로 서명돼 있어, 이걸로 허브 → 클라우드 구간의 가짜 서버를 막는다.
- * 이름(CN)이 www.rkiot.net 과 달라 호스트 이름은 검사하지 않는다(체인 고정). */
+ * 이름(CN)이 접속 이름 www.rkiot.net 과 달라, 체인과 함께 그 실제 이름(CLOUD_CN)을 검사한다. */
+#define CLOUD_CN "dev2.ckpush.com"           /* 클라우드 인증서의 실제 이름(SAN 없음, CN 만). 접속 이름 www.rkiot.net 과 다르다 */
 extern const uint8_t cloud_ca_start[] asm("_binary_cloud_ca_crt_start");
 extern const uint8_t cloud_ca_end[]   asm("_binary_cloud_ca_crt_end");
 
@@ -686,6 +687,7 @@ static void up_task(void *arg)
         hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, -2);
     } else {
         wolfSSL_set_fd(j->ssl, j->fd);
+        wolfSSL_check_domain_name(j->ssl, CLOUD_CN);   /* 체인(사설 CA)에 더해 서버 이름까지 고정 */
 #ifdef HAVE_SNI
         wolfSSL_UseSNI(j->ssl, WOLFSSL_SNI_HOST_NAME, s_up.host, strlen(s_up.host));
 #endif
@@ -914,8 +916,9 @@ static void listen_task(void *arg)
         ESP_LOGI(TAG, "클라우드 CA 고정(ckstack) — 클라우드 인증서를 검증함");
         wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_PEER, cloud_verify_cb);   /* 사설 CA 로 고정 */
     } else {
-        ESP_LOGE(TAG, "클라우드 CA 읽기 실패(%d) — 클라우드 인증서를 검증하지 못함", car);
-        wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_NONE, NULL);
+        /* 검증을 끄고 붙지 않는다: 검증 대상(CA)이 없으면 모든 클라우드 연결이 실패하게 둔다(프록시 중단, 단독은 영향 없음) */
+        ESP_LOGE(TAG, "클라우드 CA 읽기 실패(%d) — 클라우드에 붙지 않음(펌웨어 확인 필요)", car);
+        wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_PEER, NULL);
     }
 
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;

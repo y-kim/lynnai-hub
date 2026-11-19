@@ -72,6 +72,7 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | `MODE` | `proxy`(클라우드 중계) / `standalone`(클라우드 없이) | `proxy` |
 | `UPSTREAM_IP` | 진짜 클라우드 주소. 비우면 `www.rkiot.net` 을 DNS 로 조회(10분 재사용) | 비움 |
 | `GATE_TEST` | 값이 있으면 TLS 핸드셰이크 성사/거부만 확인 | 꺼짐 |
-| `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"). 비우면 검증 안 함 | `cloud_ca.crt`(이 폴더) |
+| `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"). 없거나 비우면 클라우드에 붙지 않음 | `cloud_ca.crt`(이 폴더) |
+| `UPSTREAM_CN` | 클라우드 인증서에 있어야 하는 이름(CN) | `dev2.ckpush.com` |
 
 > MAC 기반 제한은 도커에서 ARP 조회가 필요해 지금은 IP 기반이다. 기기 IP 를 공유기에서 고정하면 같은 효과.

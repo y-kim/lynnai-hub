@@ -19,8 +19,9 @@ UP_PORT = int(os.environ.get("UPSTREAM_PORT", "8883"))
 STANDALONE = os.environ.get("MODE", "proxy") == "standalone"
 IDLE_SEC = 200
 UP_SNI = os.environ.get("UPSTREAM_SNI", "www.rkiot.net")
-# 린나이 클라우드의 사설 CA "ckstack"(2123년까지). 서버 인증서 CN 이 dev2.ckpush.com 이라 호스트 이름은 안 보고 체인만 고정.
+# 린나이 클라우드의 사설 CA "ckstack"(2123년까지). 서버 인증서 CN 이 dev2.ckpush.com(접속 이름과 다름)이라 체인 + 그 CN 을 고정.
 UP_CA = os.environ.get("UPSTREAM_CA", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_ca.crt"))
+UP_CN = os.environ.get("UPSTREAM_CN", "dev2.ckpush.com")   # 클라우드 인증서의 실제 이름(SAN 없이 CN 만) — 체인에 더해 이름도 고정
 DEBUG_MQTT = os.environ.get("DEBUG_MQTT", "") not in ("", "0")   # payload 에 비밀값이 있어 기본 끔
 TYPES = {1:"CONNECT",2:"CONNACK",3:"PUBLISH",4:"PUBACK",8:"SUBSCRIBE",9:"SUBACK",
          10:"UNSUBSCRIBE",12:"PINGREQ",13:"PINGRESP",14:"DISCONNECT"}
@@ -137,18 +138,20 @@ def handle(raw, addr):
     except Exception as e: log(f"{addr[0]} down TLS fail: {e}"); return
     if STANDALONE:
         return broker(down, addr)
+    if not UP_CA or not os.path.exists(UP_CA):
+        log(f"{addr[0]} 클라우드 CA 없음 — 검증 없이는 붙지 않음"); down.close(); return
     cctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    cctx.check_hostname = False
-    if UP_CA:
-        cctx.verify_mode = ssl.CERT_REQUIRED; cctx.load_verify_locations(UP_CA)   # 가짜 클라우드 차단
-    else:
-        cctx.verify_mode = ssl.CERT_NONE
+    cctx.check_hostname = False                    # 접속 이름(www.rkiot.net)과 인증서 이름이 달라 아래에서 직접 비교
+    cctx.verify_mode = ssl.CERT_REQUIRED; cctx.load_verify_locations(UP_CA)   # 가짜 클라우드 차단
     try: cctx.minimum_version = ssl.TLSVersion.TLSv1; cctx.set_ciphers("DEFAULT@SECLEVEL=0")
     except Exception: pass
     try:
         up = cctx.wrap_socket(socket.create_connection((upstream.ip(log), UP_PORT), timeout=10), server_hostname=UP_SNI)
     except Exception as e:
         log(f"{addr[0]} up TLS fail: {e}"); down.close(); return
+    cn = dict(x[0] for x in (up.getpeercert() or {}).get("subject", ())).get("commonName")
+    if cn != UP_CN:
+        log(f"{addr[0]} 클라우드 인증서 이름 다름({cn!r} ≠ {UP_CN!r}) — 연결 안 함"); up.close(); down.close(); return
     down.settimeout(None); up.settimeout(None)
     log(f"{addr[0]} bridged  module({down.version()}) <-> cloud({up.version()})")
 
@@ -280,6 +283,10 @@ def run(core=None):
     CORE = core
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(LISTEN); s.listen(16)
+    if not STANDALONE and not UP_CA:
+        log("오류: UPSTREAM_CA 가 비어 있음 — 검증 없이는 클라우드에 붙지 않음")
+    elif not STANDALONE and not os.path.exists(UP_CA):
+        log(f"오류: UPSTREAM_CA 파일 없음({UP_CA}) — 클라우드에 붙지 않음")
     log(f"기기 대기 :{LISTEN[1]}  {'단독 모드(클라우드 없음)' if STANDALONE else '프록시 -> ' + upstream.ip(log) + ':' + str(UP_PORT)}"
         f"  대상={DEVICE_IP or '모든 기기'}")
     while True:
