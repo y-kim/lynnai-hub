@@ -457,6 +457,12 @@ static esp_err_t admin_get(httpd_req_t *req)
     return authed(req) ? admin_page(req, NULL, false) : login_page(req, NULL);
 }
 
+/* 암호 맞히기 막기: 연달아 5번 틀리면 5분 동안 로그인 받지 않음(틀릴 때마다 1초 지연은 그대로) */
+#define LOGIN_MAX_FAIL 5
+#define LOGIN_LOCK_US  (5LL * 60 * 1000000)
+static int s_login_fail;
+static int64_t s_login_lock_until;
+
 static esp_err_t login_post(httpd_req_t *req)
 {
     log_req(req);
@@ -464,14 +470,25 @@ static esp_err_t login_post(httpd_req_t *req)
     if (!s_st->provisioned || read_body(req, body, sizeof(body)) < 0) {
         return redirect(req, "/");
     }
+    if (esp_timer_get_time() < s_login_lock_until) {
+        memset(body, 0, sizeof(body));
+        return login_page(req, "암호를 여러 번 틀려 5분 동안 잠겼습니다. 잠시 뒤 다시 하세요");
+    }
     form_get(body, "pw", pw, sizeof(pw));
     memset(body, 0, sizeof(body));
     bool ok = pw[0] && hub_state_verify_admin(pw);
     memset(pw, 0, sizeof(pw));
     if (!ok) {
         vTaskDelay(pdMS_TO_TICKS(1000));             /* 암호 맞히기 늦추기 */
+        if (++s_login_fail >= LOGIN_MAX_FAIL) {
+            s_login_fail = 0;
+            s_login_lock_until = esp_timer_get_time() + LOGIN_LOCK_US;
+            ESP_LOGW(TAG, "관리자 암호 %d번 틀림 — 5분 잠금", LOGIN_MAX_FAIL);
+            return login_page(req, "암호를 여러 번 틀려 5분 동안 잠겼습니다");
+        }
         return login_page(req, "암호가 맞지 않습니다");
     }
+    s_login_fail = 0;
     uint8_t rnd[16];
     esp_fill_random(rnd, sizeof(rnd));
     for (int i = 0; i < 16; i++) {
