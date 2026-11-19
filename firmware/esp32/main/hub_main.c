@@ -124,6 +124,7 @@ static void esp_zigbee_alarm_bdb_commissioning(alarm_timer_arg_t arg)
 /* Zigbee 망 찾기(steering)는 Wi-Fi 설정이 끝난 뒤에만 한다.
  * 찾는 동안 라디오가 Zigbee 채널 16개를 훑어 설정용 AP 가 흔들리고, 폰이 IP 를 못 받는다(실측).
  * 실제 사용 순서도 'Wi-Fi 설정 → SmartThings 에서 기기 추가'다. */
+bool g_zb_nvs_was_reset = false;            /* 이번 부팅에 zb_nvs 를 지웠나(/api/stats 로 보임) */
 static volatile bool s_steer_allowed;
 static volatile bool s_ap_busy;             /* 허브 AP 에 기기 등록(온보딩) 중 → Zigbee 가입 보류 */
 static volatile bool s_join_session;        /* Wi-Fi 를 멈추고 Zigbee 가입(steering) 진행 중 */
@@ -411,6 +412,19 @@ void app_main(void)
     hub_led_init();          /* 부팅 직후 바로 LED 끄기(초기 밝은 플래시 최소화) */
     hub_event(EV_BOOT, NULL, esp_reset_reason(), 0);
     ESP_ERROR_CHECK(nvs_flash_init());
+    /* Zigbee 전용 NVS 파티션(zb_nvs)도 초기화한다 — zboss 가 여기에 가입 정보를 저장한다.
+     * 안 하면 ezb_plat_datasets_init 에서 abort. 앱 nvs 와 분리해 가입 정보 손상을 막는다. */
+    {
+        esp_err_t e = nvs_flash_init_partition("zb_nvs");
+        if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            /* 여기서 지우면 Zigbee 가입 정보가 사라져 재페어링이 필요하다 — 흔적을 남긴다(/api/stats zb_nvs_reset) */
+            ESP_LOGW(TAG, "zb_nvs 초기화 실패(%s) → 지우고 새로 만듦: Zigbee 가입 정보 사라짐", esp_err_to_name(e));
+            g_zb_nvs_was_reset = true;
+            ESP_ERROR_CHECK(nvs_flash_erase_partition("zb_nvs"));
+            e = nvs_flash_init_partition("zb_nvs");
+        }
+        ESP_ERROR_CHECK(e);
+    }
 
     /* 허브: 설정 상태 → Wi-Fi(미설정이면 설정 AP, 설정 후엔 집 Wi-Fi + 전용 AP) → DNS → 설정 포털 */
     static hub_state_t s_hub;

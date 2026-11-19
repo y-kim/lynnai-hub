@@ -20,6 +20,8 @@
 
 #include "hub_events.h"
 #include "hub_zigbee.h"
+#include "esp_zigbee.h"
+#include "ezbee/bdb.h"
 #include "hub_api.h"
 
 #define RING 256
@@ -136,10 +138,17 @@ static esp_err_t stats_get(httpd_req_t *req)
     if (!hub_api_authorized(req)) {
         return ESP_OK;
     }
-    char buf[96];
+    char buf[160];
+    extern bool g_zb_nvs_was_reset;          /* hub_main: 이번 부팅에 zb_nvs 를 지우고 새로 만들었나(가입 정보 날아감) */
     httpd_resp_set_type(req, "application/json");
-    snprintf(buf, sizeof(buf), "{\"boot\":%lu,\"up\":%lu,\"heap\":%lu,\"heap_min\":%lu,\"count\":{",
-             (unsigned long)s_boot_id, (unsigned long)(esp_timer_get_time() / 1000),
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    bool zb = ezb_bdb_dev_joined();         /* 실제 가입 여부(zb_joined 카운트는 '이번 부팅 steering 성공 수'일 뿐) */
+    bool fresh = ezb_bdb_is_factory_new();
+    esp_zigbee_lock_release();
+    snprintf(buf, sizeof(buf), "{\"boot\":%lu,\"up\":%lu,\"zb_joined_now\":%s,\"zb_factory_new\":%s,\"zb_nvs_reset\":%s,"
+             "\"heap\":%lu,\"heap_min\":%lu,\"count\":{",
+             (unsigned long)s_boot_id, (unsigned long)(esp_timer_get_time() / 1000), zb ? "true" : "false",
+             fresh ? "true" : "false", g_zb_nvs_was_reset ? "true" : "false",
              (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size());
     httpd_resp_sendstr_chunk(req, buf);
     for (int i = 0; i < EV__COUNT; i++) {

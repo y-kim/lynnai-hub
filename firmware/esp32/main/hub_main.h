@@ -20,7 +20,7 @@
 
 #define ESP_ZIGBEE_HA_TEMPERATURE_SENSOR_EP_ID (10)
 
-#define ESP_ZIGBEE_STORAGE_PARTITION_NAME "nvs"
+#define ESP_ZIGBEE_STORAGE_PARTITION_NAME "zb_nvs"   /* 앱 nvs 와 분리: 가입 정보가 앱 NVS 쓰기로 손상되지 않게 */
 
 #define ESP_MANUFACTURER_NAME "\x06""Lynnai"
 #define ESP_MODEL_IDENTIFIER "\x0a""LYNNAI-HUB"
