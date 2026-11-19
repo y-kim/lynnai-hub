@@ -16,6 +16,9 @@ Home Assistant / SmartThings 로 중계한다.
 | `appliance/` | 배포 이미지 **제품**: 첫 부팅 자가 개별화(공유 비밀 0 원칙), 프로비저닝/관리 웹 포털(설정 Wi-Fi 접속 시 설정 페이지 자동 표시 = **캡티브 포털**), 기기 레지스트리(보일러·각방·기타 린나이 기기), standalone/proxy 모드 전환 |
 | `plugins/gasmeter/` | *(선택 플러그인)* 가스 계량기 리드스위치 펄스 카운터 + 도시가스 요금 계산. HA Energy 대시보드로 사용량·요금 송신 |
 | `plugins/roomsensor/` | *(선택 플러그인)* SHT31-D 온습도계(I2C 0x44) → 로컬 MQTT + HA 자동 등록(온도 °C · 습도 %) |
+| `firmware/esp32/` | **ESP32-C6 허브**: 보일러·각방을 허브 AP 로 받아 린나이 클라우드로 중계(또는 단독)하고 Zigbee 로 SmartThings 에 노출. 설치·연결·초기화·고장 분석은 [docs/esp32-hub.md](docs/esp32-hub.md) |
+| `edge-driver/`, `edge-driver-lan/` | SmartThings Edge 드라이버(Zigbee / LAN), 공통 로직 `edge-driver/src/core.lua` |
+| `tools/hub_doctor.py` | PC 에서 허브 고장 진단(API · SmartThings · USB 시리얼) |
 
 ## 동작 모드
 
