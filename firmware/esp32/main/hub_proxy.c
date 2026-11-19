@@ -44,8 +44,6 @@
 
 static const char *TAG = "HUB_PROXY";
 
-extern const uint8_t srv_pem_start[] asm("_binary_srv_pem_start");
-extern const uint8_t srv_pem_end[]   asm("_binary_srv_pem_end");
 /* 린나이 클라우드의 사설 CA "ckstack"(Ckstack Inc, 2024-01-24 ~ 2123-12-31, SHA-256 C7:0B:E6:E2:…:1E:57).
  * 서버 인증서(CN=dev2.ckpush.com)가 이 CA 로 서명돼 있어, 이걸로 허브 → 클라우드 구간의 가짜 서버를 막는다.
  * 이름(CN)이 www.rkiot.net 과 달라 호스트 이름은 검사하지 않는다(체인 고정). */
@@ -235,7 +233,7 @@ static WOLFSSL_CTX *make_srv_ctx(const uint8_t *pem, long len)
     return c;
 }
 
-/* 허브가 만들어 저장해 둔 PEM 이 있으면 그것, 없으면 펌웨어 내장 srv.pem(그동안 certgen_task 가 만든다) */
+/* 허브가 만들어 저장해 둔 인증서. 없거나 못 읽으면 NULL(→ listen_task 가 먼저 만든다) */
 static WOLFSSL_CTX *load_srv_ctx(void)
 {
     nvs_handle_t h;
@@ -249,26 +247,22 @@ static WOLFSSL_CTX *load_srv_ctx(void)
                 s_pem_len = n;
                 ESP_LOGI(TAG, "기기용 인증서: 허브 자체 인증서 (%u바이트)", (unsigned)n);
             } else {
-                ESP_LOGW(TAG, "저장된 인증서를 읽지 못함 — 내장 인증서로 받고 새로 만듦");
+                ESP_LOGW(TAG, "저장된 인증서를 읽지 못함 — 새로 만듦");
             }
         }
         nvs_close(h);
     }
     free(pem);
-    if (!c) {
-        s_pem_len = 0;
-        c = make_srv_ctx(srv_pem_start, srv_pem_end - srv_pem_start);
-    }
     return c;
 }
 
 /* ---------------------------------------------------------------- 허브 자체 인증서
  * 기기는 서버 인증서를 검증하지 않는다(핀닝 없음, MITM 실험으로 확인) → 아무 자체 서명 인증서면 된다.
- * 펌웨어마다 같은 개인키(내장 srv.pem)를 쓰지 않도록, 허브가 처음 한 번 RSA-2048 키와 인증서를 만들어 저장한다.
- * 보일러 모듈이 TLS 1.1 이라 RSA 로(ECDSA 지원 불확실). 만드는 동안(수 초~수십 초)은 내장 인증서로 받는다. */
+ * 펌웨어에 인증서·개인키를 넣지 않고, 허브가 처음(또는 초기화 뒤) 한 번 RSA-2048 키와 인증서를 만들어 저장한다.
+ * 보일러 모듈이 TLS 1.1 이라 RSA 로(ECDSA 지원 불확실). 실측 3초 — listen_task 가 기기를 받기 전에 끝날 때까지 기다린다.
+ * arg = 끝나면 알릴 세마포어. 큰 스택(8KB)이 잠깐만 필요해서 따로 태스크로 돌리고 끝나면 지운다. */
 static void certgen_task(void *arg)
 {
-    vTaskDelay(pdMS_TO_TICKS(60000));                /* 부팅 직후 기기 TLS 몰림(힙 최저)이 지난 뒤 */
     int64_t t0 = esp_timer_get_time();
     mbedtls_pk_context key;
     mbedtls_x509write_cert crt;
@@ -334,16 +328,17 @@ static void certgen_task(void *arg)
         if (old) {
             wolfSSL_CTX_free(old);
         }
-        ESP_LOGW(TAG, "허브 자체 인증서 만듦 (RSA-2048, %u바이트, %lld초) — 이제부터 이걸로 기기를 받음", (unsigned)pl,
+        ESP_LOGW(TAG, "허브 자체 인증서 만듦 (RSA-2048, %u바이트, %lld초)", (unsigned)pl,
                  (long long)((esp_timer_get_time() - t0) / 1000000));
     } else {
-        ESP_LOGE(TAG, "자체 인증서 만들기 실패(mbedtls -0x%04x) — 내장 인증서 계속 사용", (unsigned)-r);
+        ESP_LOGE(TAG, "자체 인증서 만들기 실패(mbedtls -0x%04x)", (unsigned)-r);
     }
     mbedtls_x509write_crt_free(&crt);
     mbedtls_pk_free(&key);
     mbedtls_ctr_drbg_free(&rng);
     mbedtls_entropy_free(&ent);
     free(pem);
+    xSemaphoreGive((SemaphoreHandle_t)arg);
     vTaskDelete(NULL);
 }
 
@@ -881,8 +876,18 @@ static void listen_task(void *arg)
 {
     wolfSSL_Init();
     s_srv_ctx = load_srv_ctx();
-    if (!s_pem_len) {                                /* 저장된 자체 인증서 없음 → 한 번 만든다 */
-        xTaskCreate(certgen_task, "certgen", 8192, NULL, 1, NULL);
+    while (!s_srv_ctx) {                             /* 첫 부팅·초기화 뒤: 기기를 받기 전에 인증서부터 */
+        ESP_LOGW(TAG, "기기용 인증서 없음 — 지금 만든다(몇 초, 그동안 기기 접속은 실패 후 재시도)");
+        SemaphoreHandle_t done = xSemaphoreCreateBinary();
+        if (done && xTaskCreate(certgen_task, "certgen", 8192, done, 4, NULL) == pdPASS) {
+            xSemaphoreTake(done, portMAX_DELAY);
+        }
+        if (done) {
+            vSemaphoreDelete(done);
+        }
+        if (!s_srv_ctx) {
+            vTaskDelay(pdMS_TO_TICKS(30000));        /* 실패(메모리 부족 등): 잠시 뒤 다시 */
+        }
     }
     s_cli_ctx = wolfSSL_CTX_new(wolfSSLv23_client_method());
     if (!s_srv_ctx || !s_cli_ctx) {
