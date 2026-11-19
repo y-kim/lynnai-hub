@@ -35,6 +35,8 @@ static const char *TAG = "HUB_CRYPT";
 
 static bool s_on;
 static int s_key = -1;
+static int s_arm_key;                /* 관리 화면에서 고른 블록 — 허브 버튼을 눌러야 진행 */
+static int64_t s_arm_until;
 
 bool hub_crypt_on(void) { return s_on; }
 int hub_crypt_key_block(void) { return s_key; }
@@ -375,25 +377,46 @@ static const esp_partition_t *data_part(const char *label)
     return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, label);
 }
 
-static int marker_key(void)
+/* 마커는 두 벌(마지막 섹터, 그 앞 섹터) — 한 벌이 깨져도 평문으로 잘못 열지 않게(그러면 암호화된 항목이 다 지워진다) */
+#define M_OFF(o, n) ((o)->size - J_SEC * (size_t)((n) + 1))
+
+static int marker_read(int n)
 {
     const esp_partition_t *o = ota1();
     marker_t m;
-    if (!o || esp_partition_read(o, o->size - J_SEC, &m, sizeof(m)) != ESP_OK || memcmp(m.magic, M_MAGIC, 8) ||
+    if (!o || esp_partition_read(o, M_OFF(o, n), &m, sizeof(m)) != ESP_OK || memcmp(m.magic, M_MAGIC, 8) ||
         m.key > 5 || m.crc != crc32b(0, &m, offsetof(marker_t, crc))) {
         return -1;
     }
     return (int)m.key;
 }
 
-static esp_err_t marker_write(int key)
+static esp_err_t marker_put(int n, int key)
 {
     const esp_partition_t *o = ota1();
     marker_t m = { .key = (uint32_t)key };
     memcpy(m.magic, M_MAGIC, 8);
     m.crc = crc32b(0, &m, offsetof(marker_t, crc));
-    esp_err_t e = esp_partition_erase_range(o, o->size - J_SEC, J_SEC);
-    return e == ESP_OK ? esp_partition_write(o, o->size - J_SEC, &m, sizeof(m)) : e;
+    esp_err_t e = esp_partition_erase_range(o, M_OFF(o, n), J_SEC);
+    return e == ESP_OK ? esp_partition_write(o, M_OFF(o, n), &m, sizeof(m)) : e;
+}
+
+static esp_err_t marker_write(int key)
+{
+    esp_err_t e = marker_put(0, key);
+    return e == ESP_OK ? marker_put(1, key) : e;
+}
+
+/* 어느 한 벌이라도 맞으면 그 키. 한 벌만 맞으면 다른 벌을 고쳐 둔다 */
+static int marker_key(void)
+{
+    int a = marker_read(0), b = marker_read(1);
+    int k = a >= 0 ? a : b;
+    if (k >= 0 && (a != k || b != k)) {
+        ESP_LOGW(TAG, "암호화 표시 한 벌이 깨져 있어 고침");
+        marker_put(a != k ? 0 : 1, k);
+    }
+    return k;
 }
 
 static bool journal_read(jhdr_t *h)
@@ -408,12 +431,40 @@ static esp_err_t journal_set(size_t field_off, uint32_t v)
     return esp_partition_write(ota1(), field_off, &v, sizeof(v));   /* 비트를 1→0 으로만(지우지 않고 덧씀) */
 }
 
+static size_t journal_len(void)
+{
+    const esp_partition_t *a = data_part(PART_MAIN), *b = data_part(PART_ZB);
+    size_t len = J_SEC + (a ? a->size : 0) + (b ? b->size : 0);
+    return (len + J_SEC - 1) / J_SEC * J_SEC;
+}
+
+/* 평문 백업(데이터)부터 지우고 헤더는 마지막에 — 중간에 끊기면 헤더가 남아 다음 부팅이 다시 지운다 */
 static esp_err_t journal_erase(void)
 {
     const esp_partition_t *o = ota1();
-    const esp_partition_t *a = data_part(PART_MAIN), *b = data_part(PART_ZB);
-    size_t len = J_SEC + (a ? a->size : 0) + (b ? b->size : 0);
-    return esp_partition_erase_range(o, 0, (len + J_SEC - 1) / J_SEC * J_SEC);
+    esp_err_t e = esp_partition_erase_range(o, J_SEC, journal_len() - J_SEC);
+    return e == ESP_OK ? esp_partition_erase_range(o, 0, J_SEC) : e;
+}
+
+/* 헤더 없이 남은 백업 조각(백업 도중 끊김 등)이 있나 — 있으면 Wi-Fi 암호 등 평문이 남아 있는 것 */
+static bool journal_dirty(void)
+{
+    const esp_partition_t *o = ota1();
+    uint32_t *buf = o ? malloc(J_SEC) : NULL;
+    bool dirty = false;
+    for (size_t off = 0; buf && !dirty && off < journal_len(); off += J_SEC) {
+        if (esp_partition_read(o, off, buf, J_SEC) != ESP_OK) {
+            break;
+        }
+        for (int i = 0; i < J_SEC / 4; i++) {
+            if (buf[i] != 0xFFFFFFFFu) {
+                dirty = true;
+                break;
+            }
+        }
+    }
+    free(buf);
+    return dirty;
 }
 
 /* 파티션 src 를 4KB 씩 ota_1 의 off 로 복사(dir=0) 하거나 되돌린다(dir=1). crc 를 계산해 돌려준다 */
@@ -664,6 +715,9 @@ esp_err_t hub_crypt_boot(bool *zb_reset)
                 esp_restart();                     /* 성공이든 실패든 깨끗하게 다시(실패면 다음 부팅에 또 되돌림) */
             }
         }
+    } else if (journal_dirty()) {                    /* 헤더 없는 백업 조각: 평문 비밀값이 남지 않게 지운다 */
+        ESP_LOGW(TAG, "남은 백업 조각 지움");
+        journal_erase();
     }
 
     /* 2) 우리가 암호화해 둔 표시(마커)가 있으면 그 키로 연다 — 다른 용도의 HMAC 키만으로는 판정하지 않는다 */
@@ -742,6 +796,14 @@ void hub_crypt_render(char *o, size_t cap)
     snprintf(t, sizeof(t), "<p class=muted>플래시 암호화 %s · 보안 부팅 %s</p>", esp_flash_encryption_enabled() ? "켜짐" : "꺼짐",
              esp_secure_boot_enabled() ? "켜짐" : "꺼짐");
     strlcat(o, t, cap);
+    strlcat(o, "<p class=muted>막는 범위: 허브를 가져가 USB 로 플래시를 통째로 읽어 가는 것(덤프). 보안 부팅이 없으므로 "
+               "USB 로 다른 펌웨어를 올리면 같은 칩 키로 풀 수 있습니다. 암호화한 허브에 이 기능이 없는 옛 펌웨어를 올리면 "
+               "저장 데이터가 지워집니다.</p>", cap);
+    if (!s_on && esp_timer_get_time() < s_arm_until) {
+        snprintf(t, sizeof(t), "<p class=warn><b>KEY%d 로 켜기를 기다리는 중 — 60초 안에 허브 버튼을 짧게 누르세요.</b></p>",
+                 s_arm_key);
+        strlcat(o, t, cap);
+    }
     if (!s_on) {
         strlcat(o, "<form method=post action=/admin/crypt onsubmit=\"return confirm('고른 eFuse 블록에 키를 굽고 저장 데이터를 "
                    "암호화합니다. eFuse 는 되돌릴 수 없고 암호화는 끌 수 없습니다. 계속할까요?')\">"
@@ -768,8 +830,9 @@ void hub_crypt_render(char *o, size_t cap)
     if (!s_on) {
         strlcat(o, "<label class=chk><input type=checkbox name=ok> eFuse 는 한 번 쓰면 되돌릴 수 없고, 암호화를 켜면 끌 수 "
                    "없다는 것을 이해했습니다</label>"
-                   "<p class=muted>저장 후 허브가 재시작하며 옮깁니다(수 초). 그동안 전원을 끄지 마세요 — 끊기면 설정과 "
-                   "Zigbee 가입을 다시 해야 합니다.</p><button class=sv>암호화 켜기 (재시작)</button></form>", cap);
+                   "<p class=muted>누른 뒤 60초 안에 <b>허브의 버튼을 짧게</b> 눌러야 진행합니다(허브 앞에 있는 사람만 켤 수 있게). "
+                   "그러면 허브가 재시작하며 옮깁니다(수 초). 중간에 전원이 끊기면 다음 부팅에 원래대로 되돌린 뒤 다시 "
+                   "시도합니다.</p><button class=sv>암호화 켜기</button></form>", cap);
     }
     strlcat(o, "</div>", cap);
 }
@@ -800,22 +863,37 @@ bool hub_crypt_apply(const char *form, char *msg, size_t msglen)
         snprintf(msg, msglen, "KEY%d 는 다른 용도로 쓰는 중이라 고를 수 없습니다", k);
         return false;
     }
+    s_arm_key = k;
+    s_arm_until = esp_timer_get_time() + 60LL * 1000000;
+    ESP_LOGW(TAG, "암호화 켜기 요청(KEY%d) — 허브 버튼 확인 기다림(60초)", k);
+    snprintf(msg, msglen, "60초 안에 허브의 버튼을 짧게 누르면 KEY%d 로 암호화를 시작합니다(허브가 재시작). "
+             "누르지 않으면 취소됩니다", k);
+    return true;
+}
+
+bool hub_crypt_button(void)
+{
+    if (s_on || esp_timer_get_time() >= s_arm_until) {
+        return false;
+    }
+    s_arm_until = 0;
     nvs_handle_t h;
     esp_err_t e = nvs_open_from_partition(PART_MAIN, NS_CRYPT, NVS_READWRITE, &h);
     if (e == ESP_OK) {
-        e = nvs_set_i32(h, "pending", k);
+        e = nvs_set_i32(h, "pending", s_arm_key);
         if (e == ESP_OK) {
             e = nvs_commit(h);
         }
         nvs_close(h);
     }
     if (e != ESP_OK) {
-        snprintf(msg, msglen, "요청을 저장하지 못했습니다(%s)", esp_err_to_name(e));
-        return false;
+        ESP_LOGE(TAG, "암호화 요청을 저장하지 못함(%s)", esp_err_to_name(e));
+        hub_led_set(HUB_LED_RED);
+        return true;
     }
-    ESP_LOGW(TAG, "암호화 켜기 요청(KEY%d) — 재시작", k);
+    ESP_LOGW(TAG, "버튼 확인 — KEY%d 로 암호화하러 재시작", s_arm_key);
+    hub_led_set(HUB_LED_YELLOW);
     xTaskCreate(restart_task, "crypt_rst", 2048, NULL, 5, NULL);
-    snprintf(msg, msglen, "허브가 재시작하며 KEY%d 로 암호화합니다(수 초). 잠시 뒤 다시 접속하세요", k);
     return true;
 }
 

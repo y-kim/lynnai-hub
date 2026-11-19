@@ -13,7 +13,7 @@
  * ESP32-C6 의 HMAC 주변장치 방식: eFuse 키 블록(KEY0~KEY5) 하나에 HMAC_UP 용도의 무작위 키를 굽고, 그 키로
  * NVS 의 XTS-AES 키를 칩 안에서 만들어 쓴다. eFuse 키는 굽는 순간 읽기·쓰기 금지가 걸려 USB 로도 꺼낼 수 없다.
  *
- *   - 켜기는 관리 화면에서 키 블록을 골라 요청 → 다음 부팅 때(Wi-Fi·Zigbee 시작 전) 처리:
+ *   - 켜기는 관리 화면에서 키 블록을 골라 요청 → 60초 안에 허브 버튼(짧게)으로 확인 → 재시작해(Wi-Fi·Zigbee 전) 처리:
  *       ① 두 파티션을 원본 그대로 ota_1(OTA 미사용 영역)에 백업·CRC 확인  ② 항목을 RAM 으로 다 읽음
  *       ③ (블록이 비었으면) 퓨즈 굽기  ④ 암호화로 되쓰기 → 다시 읽어 하나하나 비교
  *       ⑤ 완료 기록 → 영구 마커(ota_1 마지막 4KB) → 평문 백업 지움 → 재시작
@@ -31,5 +31,6 @@ bool hub_crypt_on(void);                 /* 이번 부팅에 암호화된 저장
 int hub_crypt_key_block(void);           /* 쓰는 키 블록 0~5, 없으면 -1 */
 
 void hub_crypt_render(char *out, size_t cap);                     /* 관리 화면 '저장 데이터 암호화' */
-bool hub_crypt_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/crypt: 켜기 예약 → 재시작 */
+bool hub_crypt_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/crypt: 켜기 준비(60초 안에 버튼) */
+bool hub_crypt_button(void);   /* 버튼 짧게: 켜기를 기다리는 중이면 확정·재시작하고 true(그러면 다른 버튼 동작은 안 함) */
 void hub_crypt_print(void);                                         /* USB diag: 상태·키 블록 */
