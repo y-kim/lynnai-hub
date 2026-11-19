@@ -44,6 +44,7 @@
 #include "hub_lan.h"
 #include "hub_plugins.h"
 #include "hub_expose.h"
+#include "hub_pairs.h"
 #include "hub_api.h"
 #include "hub_zb_rinnai.h"
 
@@ -339,6 +340,7 @@ void app_main(void)
     hub_api_start(s_hub.device_id);         /* 서버 API 토큰 + 시간 맞추기 */
     hub_plugins_load();                     /* 플러그인 켜짐·핀(관리 화면) */
     hub_expose_load();                      /* 항목별 노출 통로(Zigbee/LAN/Matter) */
+    hub_pairs_load();                       /* 보일러↔써머스탯 수동 짝 */
     hub_sensors_start();                    /* 온습도계 + 가스 계량기 */
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
