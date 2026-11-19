@@ -508,6 +508,17 @@ static int broker_reply(WOLFSSL *down, uint8_t b0, const uint8_t *p, int len)
         break;
     case 3: {                                       /* PUBLISH: QoS1 이면 PUBACK, QoS2 면 PUBREC */
         int qos = (b0 >> 1) & 3;
+        if (len >= 2) {                                 /* 기기가 올린 것(토픽 끝: inf/res/stg) — 프록시 로그와 같은 모양 */
+            int tl0 = (p[0] << 8) | p[1];
+            const uint8_t *tp = p + 2, *sl = NULL;
+            for (int i = 0; i < tl0 && 2 + i < len; i++) {
+                if (tp[i] == '/') {
+                    sl = tp + i;
+                }
+            }
+            int sn = sl ? (int)(tp + tl0 - sl) : 0;
+            ESP_LOGI(TAG, "단독: 기기→허브 PUBLISH %.*s %d바이트", sn > 0 && sn < 8 ? sn : 0, sl ? (const char *)sl : "", len);
+        }
         if (qos && len >= 2) {
             int tl = (p[0] << 8) | p[1];
             if (2 + tl + 2 <= len) {
@@ -579,7 +590,7 @@ static int broker_loop(WOLFSSL *down, int fd, char *buf, hub_link_tap_t *tap, ui
                 closer = 1;
                 goto out;
             }
-            ESP_LOGI(TAG, "SmartThings 명령 → 기기 %d바이트 (단독)", cn);
+            ESP_LOGI(TAG, "기기로 보냄 %d바이트 (단독: 상태 요청·시간·SmartThings 명령)", cn);
         }
         if (!wolfSSL_pending(down)) {
             fd_set rd;
@@ -782,7 +793,7 @@ static void link_task(void *arg)
                 closer = 1;
                 goto out;
             }
-            ESP_LOGI(TAG, "SmartThings 명령 → 기기 %d바이트", cn);
+            ESP_LOGI(TAG, "기기로 보냄 %d바이트 (상태 요청·SmartThings 명령)", cn);
         }
         if (!wolfSSL_pending(down) && !wolfSSL_pending(up)) {
             fd_set rd;

@@ -196,7 +196,7 @@ static void dump(void)
 
 static void help(void)
 {
-    printf("\n#LYNNAI 시리얼 명령: diag(상태 전체) / led(LED 코드 뜻) / help\n");
+    printf("\n#LYNNAI 시리얼 명령: diag(상태 전체) / led(LED 코드 뜻) / mode [proxy|standalone](동작 모드) / help\n");
     printf("#LED 빨강 N번 깜빡 → 2초 쉼: ");
     for (int c = 1; c <= HUB_LED_CODE_MAX; c++) {
         printf("%d=%s%s", c, hub_led_code_text(c), c < HUB_LED_CODE_MAX ? ", " : "\n");
@@ -218,6 +218,20 @@ static void on_line(char *l)
     }
     if (!strcmp(l, "diag")) {
         dump();
+    } else if (!strncmp(l, "mode", 4)) {
+        /* USB(물리 접근) = 관리자와 같은 권한: 관리 화면에 못 들어갈 때 동작 모드를 바꾸거나 되돌린다 */
+        const char *arg = l + 4;
+        while (*arg == ' ') {
+            arg++;
+        }
+        if (!*arg) {
+            printf("#mode=%s\n", hub_proxy_mode() == HUB_MODE_STANDALONE ? "standalone" : "proxy");
+        } else {
+            char form[32], msg[160] = "";
+            snprintf(form, sizeof(form), "mode=%s", arg);
+            bool ok = hub_proxy_apply(form, msg, sizeof(msg));
+            printf("#mode %s: %s\n", ok ? "ok" : "fail", msg);
+        }
     } else if (!strcmp(l, "led") || !strcmp(l, "help")) {
         help();
     } else {

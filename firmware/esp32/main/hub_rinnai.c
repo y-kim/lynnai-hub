@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <ctype.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -15,6 +16,7 @@
 #include "freertos/queue.h"
 
 #include "hub_rinnai.h"
+#include "hub_proxy.h"
 #include "hub_uplink.h"
 #include "hub_pairs.h"
 #include "hub_expose.h"
@@ -51,6 +53,7 @@ struct hub_link_tap {
     char base[72];                  /* rinnai/RK/01/RK/f06/23/<MAC> */
     QueueHandle_t cmds;
     bool used;
+    bool poll_now;                  /* 단독 모드: 기기가 /get 을 구독하면 곧바로 상태 요청(fa) */
 };
 
 #define MAX_TAPS 3
@@ -190,8 +193,68 @@ static void framer_feed(hub_link_tap_t *t, framer_t *f, const uint8_t *d, int n,
 static bool framer_at_boundary(const framer_t *f) { return !f->in_body && f->hlen == 0; }
 
 /* 기기가 보낸 PUBLISH 에서 토픽·상태 블롭을 뽑는다 */
+static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j);
+
+/* 이 링크의 기기 토픽(base = 마지막 '/' 앞)과 종류를 배운다 */
+static void learn_base(hub_link_tap_t *t, const char *topic, const char *slash)
+{
+    uint8_t kind = strstr(topic, "/f06/") ? HUB_KIND_F06 : strstr(topic, "/f09/") ? HUB_KIND_F09 : 0;
+    if (!kind || slash - topic >= (int)sizeof(t->base) || t->kind == kind) {
+        return;
+    }
+    lock();
+    t->kind = kind;
+    memcpy(t->base, topic, slash - topic);
+    t->base[slash - topic] = 0;
+    parse_mac3(t->base, t->mac3);
+    s_links_dirty = true;
+    unlock();
+    ESP_LOGI(TAG, "링크 = f0%d (%s) mac %02x%02x%02x", kind, t->base, t->mac3[0], t->mac3[1], t->mac3[2]);
+    kick();
+}
+
+/* 단독 모드: 기기의 시간 요청(stg, 약 1시간마다)에 클라우드처럼 set 72 = 현재 한국 시각으로 답한다
+ * (캡처: 클라우드가 40ms 안에 {"rpc":[{"id":"72","data":"YYYYMMDDTHHMMSS"}]} 를 <base>/set 으로 보냄). */
+static void answer_time(hub_link_tap_t *t)
+{
+    time_t now = time(NULL);
+    if (now < 1704067200) {                          /* 시계가 아직 안 맞음(SNTP 전): 틀린 시각은 안 준다 */
+        ESP_LOGW(TAG, "단독: 기기 시간 요청 — 허브 시계가 아직 안 맞아 건너뜀");
+        return;
+    }
+    now += 9 * 3600;                                 /* 한국 시각(UTC+9) */
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    char ts[20], topic[80], json[160];
+    strftime(ts, sizeof(ts), "%Y%m%dT%H%M%S", &tm);
+    int tl = snprintf(topic, sizeof(topic), "%s/set", t->base);
+    int j = snprintf(json, sizeof(json),
+        "{\"ptn\":\"J07\",\"code\":\"null\",\"id\":\"f0%d\",\"no\":\"1\",\"sum\":1,"
+        "\"rpc\":[{\"id\":\"72\",\"data\":\"%s\"}],\"lt\":\"null\"}", t->kind, ts);
+    if (tl > 0 && tl < (int)sizeof(topic) && j > 0 && j < (int)sizeof(json) && enqueue_pub(t, topic, tl, json, j)) {
+        ESP_LOGI(TAG, "단독: f0%d 시간 알려 줌 %s", t->kind, ts);
+    }
+}
+
 static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
 {
+    if ((p[0] >> 4) == 8 && n >= h + 4) {            /* SUBSCRIBE: [pid 2][토픽 길이 2][토픽][qos] */
+        int tl = (p[h + 2] << 8) | p[h + 3];
+        if (tl > 0 && tl < 96 && h + 4 + tl <= n) {
+            char topic[96];
+            memcpy(topic, p + h + 4, tl);
+            topic[tl] = 0;
+            const char *slash = strrchr(topic, '/');
+            if (slash && (!strcmp(slash, "/set") || !strcmp(slash, "/get"))) {
+                learn_base(t, topic, slash);
+                if (!strcmp(slash, "/get") && hub_proxy_mode() == HUB_MODE_STANDALONE) {
+                    t->poll_now = true;              /* 클라우드는 접속 ~6초 뒤 fa 를 보냄 — 단독은 허브가 바로 */
+                    kick();
+                }
+            }
+        }
+        return;
+    }
     if ((p[0] >> 4) != 3 || n < h + 2) {
         return;
     }
@@ -205,23 +268,20 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
     memcpy(topic, p + h + 2, tl);
     topic[tl] = 0;
     const char *slash = strrchr(topic, '/');
+    if (slash && !strcmp(slash, "/stg")) {
+        learn_base(t, topic, slash);
+        if (t->kind && hub_proxy_mode() == HUB_MODE_STANDALONE) {
+            answer_time(t);
+        }
+        return;
+    }
     if (!slash || (strcmp(slash, "/inf") && strcmp(slash, "/res"))) {
         return;
     }
-    uint8_t kind = strstr(topic, "/f06/") ? HUB_KIND_F06 : strstr(topic, "/f09/") ? HUB_KIND_F09 : 0;
-    if (!kind || slash - topic >= (int)sizeof(t->base)) {
+    learn_base(t, topic, slash);
+    uint8_t kind = t->kind;
+    if (!kind) {
         return;
-    }
-    if (t->kind != kind) {
-        lock();
-        t->kind = kind;
-        memcpy(t->base, topic, slash - topic);
-        t->base[slash - topic] = 0;
-        parse_mac3(t->base, t->mac3);
-        s_links_dirty = true;
-        unlock();
-        ESP_LOGI(TAG, "링크 = f0%d (%s) mac %02x%02x%02x", kind, t->base, t->mac3[0], t->mac3[1], t->mac3[2]);
-        kick();
     }
 
     /* "id":"70","data":"<hex>" */
@@ -408,13 +468,14 @@ static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char
 
 /* 모든 연결에 상태 요청(fa)을 주입한다. 보일러가 상태(70)를 자주 안 올려서, 외출 등 변경이
  * 빨리 반영되도록 주기적으로 당긴다(Pi 기록기가 1분마다 하던 것). topic 은 <base>/get. */
-static void poll_status(void)
+static void poll_status(bool all)
 {
     lock();
     for (int i = 0; i < MAX_TAPS; i++) {
-        if (!s_taps[i].used || !s_taps[i].kind) {
+        if (!s_taps[i].used || !s_taps[i].kind || (!all && !s_taps[i].poll_now)) {
             continue;
         }
+        s_taps[i].poll_now = false;
         char topic[80];
         int tl = snprintf(topic, sizeof(topic), "%s/get", s_taps[i].base);
         char json[128];
@@ -553,7 +614,9 @@ static void zb_task(void *arg)
         }
         if (xTaskGetTickCount() - last_poll >= pdMS_TO_TICKS(POLL_S * 1000)) {
             last_poll = xTaskGetTickCount();
-            poll_status();              /* 주기적 상태 요청(fa) — 외출 등 변경 빨리 반영 */
+            poll_status(true);          /* 주기적 상태 요청(fa) — 외출 등 변경 빨리 반영 */
+        } else {
+            poll_status(false);         /* 단독 모드에서 막 구독한 기기 */
         }
         /* 연결 목록 */
         uint8_t links[MAX_TAPS * 4];
