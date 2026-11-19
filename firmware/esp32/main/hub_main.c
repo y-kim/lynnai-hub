@@ -35,6 +35,7 @@
 #include "hub_onboard.h"
 #include "hub_led.h"
 #include "hub_diag.h"
+#include "hub_crypt.h"
 #include "hub_events.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
@@ -447,20 +448,17 @@ void app_main(void)
 {
     hub_led_init();          /* 부팅 직후 바로 LED 끄기(초기 밝은 플래시 최소화) */
     hub_event(EV_BOOT, NULL, esp_reset_reason(), 0);
-    ESP_ERROR_CHECK(nvs_flash_init());
-    /* Zigbee 전용 NVS 파티션(zb_nvs)도 초기화한다 — zboss 가 여기에 가입 정보를 저장한다.
-     * 안 하면 ezb_plat_datasets_init 에서 abort. 앱 nvs 와 분리해 가입 정보 손상을 막는다. */
+    /* 저장소 두 개를 연다: 앱 nvs + Zigbee 전용 zb_nvs(zboss 가 가입 정보를 저장, 안 열면 ezb_plat_datasets_init 에서
+     * abort). eFuse 에 HMAC 키가 있으면 암호화된 채로 열고, 관리 화면에서 암호화를 켰다면 여기서 옮긴 뒤 재시작한다. */
     {
-        esp_err_t e = nvs_flash_init_partition("zb_nvs");
-        if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-            /* 여기서 지우면 Zigbee 가입 정보가 사라져 재페어링이 필요하다 — 흔적을 남긴다(/api/stats zb_nvs_reset) */
-            ESP_LOGW(TAG, "zb_nvs 초기화 실패(%s) → 지우고 새로 만듦: Zigbee 가입 정보 사라짐", esp_err_to_name(e));
+        bool zb_reset = false;
+        ESP_ERROR_CHECK(hub_crypt_boot(&zb_reset));
+        if (zb_reset) {
+            /* zb_nvs 를 지웠으면 Zigbee 가입 정보가 사라져 재페어링이 필요하다 — 흔적을 남긴다(/api/stats zb_nvs_reset) */
+            ESP_LOGW(TAG, "zb_nvs 를 지우고 새로 만듦: Zigbee 가입 정보 사라짐");
             g_zb_nvs_was_reset = true;
-            hub_store_report("zb_nvs", "partition", e == ESP_ERR_NVS_NO_FREE_PAGES ? "가득 참 → 지움" : "버전 바뀜 → 지움");
-            ESP_ERROR_CHECK(nvs_flash_erase_partition("zb_nvs"));
-            e = nvs_flash_init_partition("zb_nvs");
+            hub_store_report("zb_nvs", "partition", "초기화 실패 → 지움");
         }
-        ESP_ERROR_CHECK(e);
     }
 
     /* 허브: 설정 상태 → Wi-Fi(미설정이면 설정 AP, 설정 후엔 집 Wi-Fi + 전용 AP) → DNS → 설정 포털 */

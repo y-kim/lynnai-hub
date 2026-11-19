@@ -77,8 +77,10 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 - **첫 설정 AP** 는 개방망 → 설정 페이지에서 허브 AP 암호(WPA2)와 관리자 암호를 반드시 정한다.
   관리자 암호는 PBKDF2-HMAC-SHA256 해시로만 저장하고, 로그아웃은 세션을 확인한 POST 로만 된다.
 - **저장 데이터 검사**: 설정마다 CRC32 를 같이 저장해 손상을 찾아 알린다(LED 4번).
-- **한계**: eFuse 를 쓰지 않아 플래시·NVS 암호화가 없다. USB 로 플래시를 읽으면 집 Wi-Fi 암호·허브 AP 암호·API 토큰이
-  보인다. USB 진단 `diag` 는 비밀값을 출력하지 않는다. 기기(보일러 모듈)는 허브 인증서를 검증하지 않는다.
+- **저장 데이터 암호화(선택)**: 관리 화면에서 eFuse 키 블록 하나를 골라 켜면 허브가 그 블록에 HMAC 키를 굽고
+  저장 데이터(Wi-Fi 암호·API 토큰·Zigbee 가입 정보 등)를 XTS-AES 로 암호화한다. 되돌릴 수 없어 기본은 꺼짐 —
+  꺼져 있으면 USB 로 플래시를 읽을 때 평문이 보인다. USB 진단 `diag` 는 비밀값을 출력하지 않는다.
+  기기(보일러 모듈)는 허브 인증서를 검증하지 않는다.
 
 상태: WIP(진행 중). 자세한 내용은 [docs/esp32-hub.md](docs/esp32-hub.md) 와 각 디렉터리의 README / 주석 참고.
 
@@ -107,6 +109,7 @@ SmartThings Station and Smart Home Hub (V4). Other models are untested.
 - `standalone/`, `appliance/`, `plugins/` — the earlier Raspberry Pi version, kept for reference.
 
 The firmware image carries no secrets: each hub generates its own device‑facing TLS key on first boot, and verifies
-the Rinnai cloud against its private CA. There is no flash/NVS encryption (eFuses are not used).
+the Rinnai cloud against its private CA. Stored data can optionally be encrypted (NVS, HMAC key burned into an eFuse block
+chosen on the admin page — irreversible, off by default).
 
 License: MIT (see `LICENSE`).

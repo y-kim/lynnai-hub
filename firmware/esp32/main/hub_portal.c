@@ -23,6 +23,7 @@
 #include "hub_events.h"
 #include "hub_sensors.h"
 #include "hub_proxy.h"
+#include "hub_crypt.h"
 #include "hub_zigbee.h"
 #include "hub_plugins.h"
 #include "hub_expose.h"
@@ -434,6 +435,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_pairs_render(b, cap);           /* 연결된 기기(이름·보일러 연결·기기/방별 노출) */
     hub_expose_render_types(b, cap);    /* 노출 설정: 종류별 컨트롤 */
     hub_plugins_render(b, cap);
+    hub_crypt_render(b, cap);           /* 저장 데이터 암호화(eFuse) */
     strlcat(b, "<h2>서버 연동 (장기 기록·그래프)</h2><div class=card><p class=muted>"
                "<code>/api/v1/state</code> (JSON), <code>/metrics</code> (Prometheus), <code>/api/events</code>. ", cap);
     strlcat(b, hub_api_has_token() ? "API 토큰 <b>켜짐</b>: 요청에 <code>Authorization: Bearer &lt;토큰&gt;</code> 필요.</p>"
@@ -568,6 +570,17 @@ static esp_err_t expose_post(httpd_req_t *req)
     return admin_page(req, ok ? "노출 설정을 저장했습니다 (바로 적용)" : (err[0] ? err : "잘못된 요청"), ok);
 }
 
+static esp_err_t crypt_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[64], msg[200] = "";
+    bool ok = read_body(req, body, sizeof(body)) >= 0 && hub_crypt_apply(body, msg, sizeof(msg));
+    return admin_page(req, msg[0] ? msg : "잘못된 요청", ok);
+}
+
 static esp_err_t mode_post(httpd_req_t *req)
 {
     log_req(req);
@@ -689,6 +702,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &trns);
     const httpd_uri_t mode = { .uri = "/admin/mode", .method = HTTP_POST, .handler = mode_post };
     httpd_register_uri_handler(srv, &mode);
+    const httpd_uri_t crypt = { .uri = "/admin/crypt", .method = HTTP_POST, .handler = crypt_post };
+    httpd_register_uri_handler(srv, &crypt);
     hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */
