@@ -27,6 +27,8 @@
 
 #include "wolfssl/wolfcrypt/settings.h"
 #include "wolfssl/ssl.h"
+#include "wolfssl/wolfcrypt/error-crypt.h"
+#include <time.h>
 
 #include "nvs.h"
 #include "hub_store.h"
@@ -44,6 +46,11 @@ static const char *TAG = "HUB_PROXY";
 
 extern const uint8_t srv_pem_start[] asm("_binary_srv_pem_start");
 extern const uint8_t srv_pem_end[]   asm("_binary_srv_pem_end");
+/* 린나이 클라우드의 사설 CA "ckstack"(Ckstack Inc, 2024-01-24 ~ 2123-12-31, SHA-256 C7:0B:E6:E2:…:1E:57).
+ * 서버 인증서(CN=dev2.ckpush.com)가 이 CA 로 서명돼 있어, 이걸로 허브 → 클라우드 구간의 가짜 서버를 막는다.
+ * 이름(CN)이 www.rkiot.net 과 달라 호스트 이름은 검사하지 않는다(체인 고정). */
+extern const uint8_t cloud_ca_start[] asm("_binary_cloud_ca_crt_start");
+extern const uint8_t cloud_ca_end[]   asm("_binary_cloud_ca_crt_end");
 
 /* 린나이 클라우드. 이름·포트는 기기 펌웨어가 정한 값이라 고정, IP 만 집 Wi-Fi 쪽 DNS 로 조회(resolve_up) */
 #define DEF_UP_IP      "3.38.86.244"      /* 처음 쓰는 값. 이후엔 집 Wi-Fi 쪽 DNS 로 서버 이름을 조회해 갱신(resolve_up) */
@@ -847,6 +854,21 @@ done:
     vTaskDelete(NULL);
 }
 
+/* 클라우드 인증서 검증 콜백: 서명·체인 실패는 그대로 거절. 날짜 오류는 허브 시계가 아직 안 맞았을 때(SNTP 전,
+ * 2024년 이전으로 보일 때)만 넘긴다 — 부팅 직후 첫 연결이 시계 때문에 실패하지 않게. */
+static int cloud_verify_cb(int ok, WOLFSSL_X509_STORE_CTX *st)
+{
+    if (ok) {
+        return 1;
+    }
+    int err = st ? st->error : 0;
+    if ((err == ASN_BEFORE_DATE_E || err == ASN_AFTER_DATE_E) && time(NULL) < 1704067200) {   /* 2024-01-01 */
+        return 1;
+    }
+    ESP_LOGW(TAG, "클라우드 인증서 검증 실패(%d) — 연결 안 함", err);
+    return 0;
+}
+
 static void listen_task(void *arg)
 {
     wolfSSL_Init();
@@ -860,7 +882,17 @@ static void listen_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_NONE, NULL);   /* Pi 판과 동일(클라우드가 사설 CA) */
+    /* 부팅 직후엔 시계가 1970년이라 CA 를 '아직 유효 전'으로 거절한다(-150) → 읽을 때는 날짜 오류 허용.
+     * 접속할 때의 날짜는 cloud_verify_cb 가 시계 상태를 보고 판단. 길이 -1 = EMBED_TXTFILES 가 붙인 끝 NUL 제외 */
+    int car = wolfSSL_CTX_load_verify_buffer_ex(s_cli_ctx, cloud_ca_start, cloud_ca_end - cloud_ca_start - 1,
+                                                WOLFSSL_FILETYPE_PEM, 0, WOLFSSL_LOAD_FLAG_DATE_ERR_OKAY);
+    if (car == WOLFSSL_SUCCESS) {
+        ESP_LOGI(TAG, "클라우드 CA 고정(ckstack) — 클라우드 인증서를 검증함");
+        wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_PEER, cloud_verify_cb);   /* 사설 CA 로 고정 */
+    } else {
+        ESP_LOGE(TAG, "클라우드 CA 읽기 실패(%d) — 클라우드 인증서를 검증하지 못함", car);
+        wolfSSL_CTX_set_verify(s_cli_ctx, WOLFSSL_VERIFY_NONE, NULL);
+    }
 
     int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
     setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));

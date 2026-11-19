@@ -60,5 +60,6 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | `HIJACK_NAMES` | 가로챌 도메인(쉼표, 부분일치) | `rkiot.net` |
 | `FORWARD` | 목록 밖 질의를 넘길 상위 DNS. `none`=안 넘김 | 기본 게이트웨이 |
 | `GATE_TEST` | 값이 있으면 TLS 핸드셰이크 성사/거부만 확인 | 꺼짐 |
+| `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"). 비우면 검증 안 함 | `cloud_ca.crt`(이 폴더) |
 
 > MAC 기반 제한은 도커에서 ARP 조회가 필요해 지금은 IP 기반이다. 기기 IP 를 공유기에서 고정하면 같은 효과.

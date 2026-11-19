@@ -4,6 +4,7 @@
 (원본: Pi 의 rkprobe/bridge.py — 하드코딩 경로·기기 IP 를 환경변수로 바꾸고, 평문 payload 로깅은 기본 끔.)
 
 환경변수: NAS_CERT, UPSTREAM_IP/UPSTREAM_PORT, UPSTREAM_SNI, RINNAI_IPS(중계할 기기, 쉼표),
+          UPSTREAM_CA(클라우드 사설 CA, 기본 이 폴더의 cloud_ca.crt — 비우면 검증 안 함),
           MQTT_PORT, DEBUG_MQTT(1이면 복호화 payload 까지 로그 — 비밀값 포함, 평소엔 끔)."""
 import os, socket, ssl, threading
 
@@ -12,6 +13,8 @@ KEY = os.environ.get("NAS_KEY", "/data/certs/server.key")
 LISTEN = ("0.0.0.0", int(os.environ.get("MQTT_PORT", "8883")))
 UPSTREAM = (os.environ.get("UPSTREAM_IP", "3.38.86.244"), int(os.environ.get("UPSTREAM_PORT", "8883")))
 UP_SNI = os.environ.get("UPSTREAM_SNI", "www.rkiot.net")
+# 린나이 클라우드의 사설 CA "ckstack"(2123년까지). 서버 인증서 CN 이 dev2.ckpush.com 이라 호스트 이름은 안 보고 체인만 고정.
+UP_CA = os.environ.get("UPSTREAM_CA", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_ca.crt"))
 DEBUG_MQTT = os.environ.get("DEBUG_MQTT", "") not in ("", "0")   # payload 에 비밀값이 있어 기본 끔
 TYPES = {1:"CONNECT",2:"CONNACK",3:"PUBLISH",4:"PUBACK",8:"SUBSCRIBE",9:"SUBACK",
          10:"UNSUBSCRIBE",12:"PINGREQ",13:"PINGRESP",14:"DISCONNECT"}
@@ -127,7 +130,11 @@ def handle(raw, addr):
     try: down = sctx.wrap_socket(raw, server_side=True)
     except Exception as e: log(f"{addr[0]} down TLS fail: {e}"); return
     cctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    cctx.check_hostname = False; cctx.verify_mode = ssl.CERT_NONE
+    cctx.check_hostname = False
+    if UP_CA:
+        cctx.verify_mode = ssl.CERT_REQUIRED; cctx.load_verify_locations(UP_CA)   # 가짜 클라우드 차단
+    else:
+        cctx.verify_mode = ssl.CERT_NONE
     try: cctx.minimum_version = ssl.TLSVersion.TLSv1; cctx.set_ciphers("DEFAULT@SECLEVEL=0")
     except Exception: pass
     try:
