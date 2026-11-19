@@ -2,6 +2,7 @@
 # lynnai-nas 진입점: 인증서 없으면 만들고, 환경변수로 config.json 을 만들어 standalone 서버를 띄운다.
 # 로직은 전부 레포의 standalone/ 코드 (server_pi3.py / broker.py / mqtt_proto.py / dns_hijack.py). 여기는 포장만.
 set -e
+umask 077                       # 여기서 만드는 키·설정·캐시 파일은 소유자만 읽게
 
 DATA="${DATA_DIR:-/data}"
 APP=/app/standalone

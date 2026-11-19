@@ -197,8 +197,9 @@ def serve(core, hub_id, port, token, log=print):
                 log(f"[api] /key/server 클라우드 응답 없음: {e}")
             if status == 200 and _boot_valid(body):
                 try:
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path + ".tmp", "wb") as f:
+                    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+                    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # 기기 계정·암호가 들어 있음
+                    with os.fdopen(fd, "wb") as f:
                         f.write(body)
                     os.replace(path + ".tmp", path)
                 except OSError as e:

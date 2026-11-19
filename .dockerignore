@@ -1,0 +1,15 @@
+# NAS 이미지(server/lynnai-nas/Dockerfile, 빌드 컨텍스트 = 레포 루트)에 운영 데이터·비밀값이 들어가지 않게
+**/data/
+**/.env
+**/*.pem
+**/*.key
+**/*.p12
+**/__pycache__/
+.git/
+firmware/
+edge-driver*/
+appliance/
+plugins/
+docs/
+tools/
+review-no-commit.md

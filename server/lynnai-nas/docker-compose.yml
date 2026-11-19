@@ -16,6 +16,7 @@ services:
       - NAS_IP=${NAS_IP:?NAS_IP 를 .env 에}        # 이 NAS 의 LAN 주소
       - ONLY_SRC=${RINNAI_IPS:-}                   # 보일러/각방 IP(쉼표). 공유기에서 고정 권장 — DNS 하이재킹 대상
       - RINNAI_IPS=${RINNAI_IPS:-}                 # 같은 목록 — MQTT(:8883) 종단·/key/server 를 이 기기들에게만
+      - API_TOKEN=${API_TOKEN:-}                   # /api·/metrics Bearer 토큰(.env). 비우면 LAN 에 열림
       - HIJACK_NAMES=rkiot.net
       - FORWARD=${FORWARD:-}                       # 비우면 기본 게이트웨이(공유기), none 이면 완전독립
       - UPSTREAM_IP=${UPSTREAM_IP:-}               # 진짜 린나이 클라우드 IP. 비우면 www.rkiot.net 을 DNS 로 조회(proxy 모드)
