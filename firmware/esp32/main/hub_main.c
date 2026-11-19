@@ -84,6 +84,9 @@ static int16_t zb_temperature_to_s16(float temp) { return (int16_t)(temp * 100);
 
 static void esp_app_temp_sensor_handler(float temperature)
 {
+    if (!hub_expose_bit_on(EXPOSE_CH_ZIGBEE, EXPOSE_HUB_TEMP)) {
+        return;                          /* 관리 화면에서 허브 칩 온도를 끔 → 값을 안 바꿔 보고도 멈춤 */
+    }
     int16_t measured_value = zb_temperature_to_s16(temperature);
     /* Update temperature sensor measured value */
     esp_zigbee_lock_acquire(portMAX_DELAY);

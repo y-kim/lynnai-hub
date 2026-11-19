@@ -65,11 +65,11 @@ local function hub_state(parent)
 end
 
 -- 노출(펌웨어 hub_expose.h). 0x06 = [u32 마스크] + ([종류][MAC끝3][숨김 비트])*n
---   마스크: 종류별 컨트롤(보일러 조절기 1~7, 방 8~10) + 플러그인 기기(29 온습도, 30 가스). 그 종류 모든 기기에 적용.
+--   마스크: 종류별 컨트롤(보일러 조절기 1~7, 방 8~10) + 허브 칩 온도(11, Zigbee 허브 기기) + 플러그인 기기(29 온습도, 30 가스).
 --   숨김 비트(기기별): bit0 = 기기 자신(보일러 조절기), bit1~7 = 온도 조절기의 방 z1~z7(ZONES[id].n)
 local ALL_VISIBLE = 0x7FFFFFFF   -- 펌웨어 ALL_BITS 와 같게
 local BIT = { power = 1, heat_mode = 2, heat_type = 3, heat_temp = 4, hw = 5, hw_temp = 6, preheat = 7,
-  room_on = 8, room_set = 9, room_out = 10, room = 29, gas = 30 }
+  room_on = 8, room_set = 9, room_out = 10, hub_temp = 11, room = 29, gas = 30 }
 local function parse_expose(s, raw)
   s.vis = string.unpack("<I4", raw)
   s.hidden = {}
@@ -533,6 +533,17 @@ local function on_plugins(parent, b)
   end
 end
 
+-- Zigbee 허브 기기 자체의 온도(ESP32 칩 온도 — 방 온도와 다름)를 보일지. LAN 허브 기기엔 온도가 없다.
+local function apply_hub_caps(parent)
+  if parent.network_type ~= "DEVICE_ZIGBEE" then return end
+  local want = visible(parent, BIT.hub_temp) and { "temperatureMeasurement" } or {}
+  local sig = table.concat(want, ",")
+  if applied[parent.id] == sig then return end
+  applied[parent.id] = sig
+  log.info("허브 온도 " .. (#want > 0 and "보임" or "숨김"))
+  parent:try_update_metadata({ profile = "lynnai-hub", optional_component_capabilities = { { "main", want } } })
+end
+
 -- 이 통로에 무엇을 보일지(관리 화면 '노출'). 종류별 컨트롤 마스크 + 기기·방별 숨김.
 local function on_expose(parent, b)
   if #b < 4 then return end
@@ -567,6 +578,7 @@ local function on_expose(parent, b)
     local vc = parent:get_child_by_parent_assigned_key(vbkey(mac))   -- 가상 보일러도 보일러 컨트롤 노출을 따름
     if vc then apply_caps(parent, vc) end
   end
+  apply_hub_caps(parent)
   sync(ROOM_KEY, visible(parent, BIT.room), s.room ~= nil, function() create_child(parent, ROOM_KEY, "다용도실 온습도", "lynnai-room", "sht31") end)
   sync(GAS_KEY, visible(parent, BIT.gas), s.gas ~= nil, function() create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter") end)
   if changed then

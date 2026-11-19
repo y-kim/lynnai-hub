@@ -66,8 +66,12 @@ static const ctl_t BOILER_CTL[] = {
     { 5, "온수 켜기/끄기" }, { 6, "온수 온도" }, { 7, "온수 예열" },
 };
 static const ctl_t ROOM_CTL[] = { { 8, "켜기/끄기" }, { 9, "설정 온도" }, { 10, "외출" } };
+static const ctl_t HUB_CTL[] = { { EXPOSE_HUB_TEMP, "허브 내부 온도 (칩 온도 — 방 온도와 다름)" } };
 #define NB (int)(sizeof(BOILER_CTL) / sizeof(BOILER_CTL[0]))
 #define NR (int)(sizeof(ROOM_CTL) / sizeof(ROOM_CTL[0]))
+#define NH (int)(sizeof(HUB_CTL) / sizeof(HUB_CTL[0]))
+
+bool hub_expose_bit_on(int ch, int bit) { return ch >= 0 && ch < EXPOSE_NCH && ((s_mask[ch] >> bit) & 1); }
 
 /* ---------------------------------------------------------------- 저장 */
 
@@ -319,6 +323,9 @@ void hub_expose_render_types(char *o, size_t cap)
     strlcat(o, "</div><div class=grpbox><h3 class=grp>🌡️ 온도 조절기 (각 방)</h3>"
                "<p class='muted sub'>방마다 생기는 기기의 컨트롤 — 모든 방에 같이 적용</p>", cap);
     ctl_rows(o, cap, ROOM_CTL, NR);
+    strlcat(o, "</div><div class=grpbox><h3 class=grp>📡 LYNNAI 허브</h3>"
+               "<p class='muted sub'>SmartThings 의 'LYNNAI Hub' 기기 자체</p>", cap);
+    ctl_rows(o, cap, HUB_CTL, NH);
     strlcat(o, "</div><button class=sv>저장</button></form></div>", cap);
 }
 
@@ -380,6 +387,9 @@ bool hub_expose_apply(const char *form, char *err, size_t errlen)
     }
     for (int i = 0; i < NR; i++) {
         scope |= 1u << ROOM_CTL[i].bit;
+    }
+    for (int i = 0; i < NH; i++) {
+        scope |= 1u << HUB_CTL[i].bit;
     }
     apply_bits(form, scope);
     save();

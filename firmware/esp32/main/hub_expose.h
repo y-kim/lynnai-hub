@@ -17,6 +17,7 @@
  * 마스크 비트(드라이버 core.lua 의 BIT 표와 같아야 한다):
  *   1 전원  2 난방 모드  3 난방 방식  4 난방 온도  5 온수  6 온수 온도  7 온수 예열      (보일러 조절기)
  *   8 방 켜기/끄기  9 방 설정 온도  10 방 외출                                        (온도 조절기의 방)
+ *   11 허브 칩 온도(Zigbee 허브 기기)
  *   29 온습도계 기기  30 가스 계량기 기기
  */
 
@@ -25,6 +26,7 @@
 #define EXPOSE_CH_MATTER 2
 #define EXPOSE_NCH       3
 
+#define EXPOSE_HUB_TEMP  11      /* Zigbee 허브 기기 자체의 온도(ESP32 칩 온도 — 방 온도와 다름) */
 #define EXPOSE_ROOM_DEV  29
 #define EXPOSE_GAS_DEV   30
 
@@ -39,6 +41,7 @@ extern const hub_room_t HUB_ROOMS[HUB_NROOMS];
 bool hub_room_present(const hub_dev_t *d, int i);   /* 온도 조절기가 이 방을 리포트하나(stat·현재온도 둘 다 0 이면 없음) */
 
 void hub_expose_load(void);
+bool hub_expose_bit_on(int ch, int bit);         /* 그 통로 마스크의 비트(예: 허브 칩 온도를 보고할지) */
 void hub_expose_send_all(void);                 /* 각 통로에 자기 마스크 + 숨김 목록 */
 void hub_expose_prepare(void);                  /* 화면 그리기 전: 옛 설정을 새로 보인 기기에 옮김 */
 void hub_expose_forget(uint8_t kind, const uint8_t mac3[3]);   /* 기기 삭제 시 그 기기 항목 정리 */

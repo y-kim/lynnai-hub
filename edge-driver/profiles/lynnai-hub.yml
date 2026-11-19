@@ -4,6 +4,7 @@ components:
     capabilities:
       - id: temperatureMeasurement
         version: 1
+        optional: true          # 허브 칩 온도 — 관리 화면 노출 설정(비트 11)에서 끌 수 있음
       - id: refresh
         version: 1
     categories:

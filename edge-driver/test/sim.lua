@@ -160,6 +160,7 @@ local function reset()
   hub_n = hub_n + 1
   hub = mk_device(nil, "LYNNAI Hub", "lynnai-hub", nil)   -- 새 허브(새 id) → core 내부 상태도 새로
   hub.id = "hub" .. hub_n
+  hub.network_type = "DEVICE_ZIGBEE"
 end
 
 ----------------------------------------------------------------- 시나리오
@@ -337,6 +338,15 @@ expose(0x7FFFFFFF & ~(1 << 1) & ~(1 << 7), {})       -- 전원(1)·예열(7) 숨
 local vcaps = vb._caps or {}
 check(vcaps.main == nil and vcaps.preheat == nil and vcaps.heat and vcaps.heat["mode"],
   "가상 보일러: 전원·예열 숨김, 난방 모드는 보임")
+
+print("[13] 노출: 허브 칩 온도(비트 11) 끄고 켜기")
+reset()
+expose(0x7FFFFFFF & ~(1 << 11), {})
+local hc = hub._caps or {}
+check(hc.main ~= nil and not hc.main["temperatureMeasurement"], "비트 11 끔 → 허브 온도 숨김")
+expose(0x7FFFFFFF, {})
+hc = hub._caps or {}
+check(hc.main and hc.main["temperatureMeasurement"], "비트 11 켬 → 허브 온도 보임")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)
