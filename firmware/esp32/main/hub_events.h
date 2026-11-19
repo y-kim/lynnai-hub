@@ -20,6 +20,7 @@ typedef enum {
     EV_ZB_JOINED,       /* a=PAN, b=채널 */
     EV_ZB_LEAVE,        /* a=leave 타입 */
     EV_ONBOARD,         /* a=1 성공 0 실패 */
+    EV_GAS_PULSE,       /* a=누적 펄스, b=1펄스 L */
     EV__COUNT
 } hub_ev_t;
 

@@ -20,6 +20,7 @@
 
 #include "hub_events.h"
 #include "hub_zigbee.h"
+#include "hub_api.h"
 
 #define RING 256
 
@@ -40,6 +41,7 @@ static SemaphoreHandle_t s_lock;
 static const char *const NAMES[EV__COUNT] = {
     "boot", "ap_join", "ap_leave", "sta_up", "sta_down", "link_open", "link_dev_tls", "link_cloud_tls",
     "link_up", "link_close", "link_reject", "bootstrap", "zb_join_fail", "zb_joined", "zb_leave", "onboard",
+    "gas_pulse",
 };
 
 static void ensure_init(void)
@@ -75,6 +77,9 @@ void hub_event(hub_ev_t type, const uint8_t *mac, int32_t a, int32_t b)
 static esp_err_t events_get(httpd_req_t *req)
 {
     ensure_init();
+    if (!hub_api_authorized(req)) {
+        return ESP_OK;
+    }
     char q[48], v[16];
     uint32_t since = 0;
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
@@ -128,6 +133,9 @@ static esp_err_t events_get(httpd_req_t *req)
 static esp_err_t stats_get(httpd_req_t *req)
 {
     ensure_init();
+    if (!hub_api_authorized(req)) {
+        return ESP_OK;
+    }
     char buf[96];
     httpd_resp_set_type(req, "application/json");
     snprintf(buf, sizeof(buf), "{\"boot\":%lu,\"up\":%lu,\"heap\":%lu,\"heap_min\":%lu,\"count\":{",
@@ -144,6 +152,9 @@ static esp_err_t stats_get(httpd_req_t *req)
 
 static esp_err_t zb_join_get(httpd_req_t *req)
 {
+    if (!hub_api_authorized(req)) {
+        return ESP_OK;
+    }
     hub_zigbee_join_now();
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true,\"note\":\"3분간 10초마다 가입 시도\"}");

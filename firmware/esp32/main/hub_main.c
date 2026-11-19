@@ -43,6 +43,7 @@
 #include "hub_uplink.h"
 #include "hub_lan.h"
 #include "hub_plugins.h"
+#include "hub_api.h"
 #include "hub_zb_rinnai.h"
 
 static const char *TAG = "TEMPERATURE_SENSOR";
@@ -334,6 +335,7 @@ void app_main(void)
     if (hub_uplink_mask() & HUB_UPLINK_LAN) {
         hub_lan_start(s_hub.device_id);     /* SSDP + TCP 8484 */
     }
+    hub_api_start(s_hub.device_id);         /* 서버 API 토큰 + 시간 맞추기 */
     hub_plugins_load();                     /* 플러그인 켜짐·핀(관리 화면) */
     hub_sensors_start();                    /* 온습도계 + 가스 계량기 */
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */

@@ -1,0 +1,13 @@
+# lynnai-hub-watch 단독 실행 예 (NAS 등). HUB_TOKEN 은 허브 관리 화면 → 서버 연동에서 만든 토큰.
+services:
+  lynnai-hub-watch:
+    build: .
+    container_name: lynnai-hub-watch
+    restart: unless-stopped
+    environment:
+      - HUB_URL=http://192.168.0.50
+      - HUB_TOKEN=${HUB_TOKEN:-}
+      - POLL_SEC=60
+      - EVENT_SEC=30
+    volumes:
+      - ./data:/data
