@@ -23,3 +23,9 @@ components:
       - id: switch
         version: 1
         optional: true
+  - id: reserve
+    label: 예약
+    capabilities:
+      - id: switch
+        version: 1
+        optional: true

@@ -92,6 +92,7 @@ python -m esptool --chip esp32c6 -p COM3 write_flash 0x20000 lynnai-hub-esp32c6-
 2. SmartThings 앱 → **기기 추가 → 주변 기기 검색**을 켭니다.
 3. 허브 버튼을 **짧게** 누릅니다. 네트워크에서 `http://<허브IP>/api/zigbee/join` 을 열어도 됩니다.
 4. 앱에 **LYNNAI Hub** 가 나타납니다. 보일러·방·센서 기기는 해당 기기가 처음 상태를 보내면 자동으로 생깁니다.
+   방 기기에는 켜기·설정 온도와 함께 **외출**, **예약**(반복예약, 꺼진 방이면 켜면서 예약) 스위치가 있습니다.
    이름은 SmartThings 앱에서 바꿉니다.
 
 가입하는 동안 허브는 잠깐 Wi-Fi 를 멈춥니다(2.4GHz 라디오를 Zigbee 와 나눠 쓰므로). 끝나면 다시 붙습니다.

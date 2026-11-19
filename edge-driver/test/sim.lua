@@ -348,5 +348,42 @@ expose(0x7FFFFFFF, {})
 hc = hub._caps or {}
 check(hc.main and hc.main["temperatureMeasurement"], "비트 11 켬 → 허브 온도 보임")
 
+print("[14] 각방 '예약' 스위치(f09 96/97)·상태(stat 0x08)")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+-- 방2(z2) stat 위치 7 = 0x0b(켜짐|예약), 다음 바이트 8 = 03(저장된 예약 값)
+local F09R = F09:sub(1, 14) .. "0b03" .. F09:sub(19)
+state(6, "a1b2c3", F06); state(9, "d4e5f6", F09R)
+local function last_emit(key, comp, attr)
+  for i = #emitted, 1, -1 do local e = emitted[i]
+    if e.key == key and e.comp == comp and e.attr == attr then return e.value end end
+end
+check(last_emit("td4e5f6_z2", "reserve", "switch") == "on", "stat 0x08 → 방2 예약 스위치 켜짐")
+local rs = last_emit("td4e5f6_z2", "main", "roomStatus")
+check(rs and rs:find("예약", 1, true), "방2 상태 글에 '예약' (" .. tostring(rs) .. ")")
+check(last_emit("td4e5f6_z1", "reserve", "switch") ~= "on", "방1 은 예약 아님")
+sent_cmds = {}
+core.capability_handlers["switch"]["off"](nil, driver._children["td4e5f6_z2"], { component = "reserve" })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=0"), "방2 예약 끔 → f09 a0=2,96=0")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z2"], { component = "reserve" })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=03"), "방2 예약 켬 → 저장된 값 그대로 97=03")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z3"], { component = "reserve" })
+check(last_cmd_has("f09@d4e5f6 a0=7,96=1,97=01"), "거실(값 없음) 예약 켬 → a0=7,96=1,97=01")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z2"], { component = "reserve" })
+check(not table.concat(sent_cmds, " "):find("a0=2,b1=1", 1, true), "켜진 방2 는 켜기 명령 없이 예약만")
+state(9, "d4e5f6", F09:sub(1, 14) .. "0303" .. F09:sub(19))     -- 예약 끈 뒤: 0x03, 값 03 은 남음
+check(last_emit("td4e5f6_z2", "reserve", "switch") == "off", "0x08 꺼지면(값은 남아도) 예약 꺼짐")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z1"], { component = "reserve" })
+local joined = table.concat(sent_cmds, " | ")
+check(joined:find("a0=1,b1=1", 1, true) and joined:find("a0=1,b1=1", 1, true) < joined:find("a0=1,96=1", 1, true),
+  "꺼진 방1 예약 켬 → 먼저 켜고(b1=1) 예약 (" .. joined .. ")")
+expose(0x7FFFFFFF & ~(1 << 12), {})
+local zc = driver._children["td4e5f6_z1"]._caps or {}
+check(zc.reserve == nil and zc.outing ~= nil, "노출 비트 12 끔 → 예약만 숨김(외출은 보임)")
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

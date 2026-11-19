@@ -65,11 +65,11 @@ local function hub_state(parent)
 end
 
 -- 노출(펌웨어 hub_expose.h). 0x06 = [u32 마스크] + ([종류][MAC끝3][숨김 비트])*n
---   마스크: 종류별 컨트롤(보일러 조절기 1~7, 방 8~10) + 허브 칩 온도(11, Zigbee 허브 기기) + 플러그인 기기(29 온습도, 30 가스).
+--   마스크: 종류별 컨트롤(보일러 조절기 1~7, 방 8~10·12 예약) + 허브 칩 온도(11, Zigbee 허브 기기) + 플러그인 기기(29 온습도, 30 가스).
 --   숨김 비트(기기별): bit0 = 기기 자신(보일러 조절기), bit1~7 = 온도 조절기의 방 z1~z7(ZONES[id].n)
 local ALL_VISIBLE = 0x7FFFFFFF   -- 펌웨어 ALL_BITS 와 같게
 local BIT = { power = 1, heat_mode = 2, heat_type = 3, heat_temp = 4, hw = 5, hw_temp = 6, preheat = 7,
-  room_on = 8, room_set = 9, room_out = 10, hub_temp = 11, room = 29, gas = 30 }
+  room_on = 8, room_set = 9, room_out = 10, hub_temp = 11, room_resv = 12, room = 29, gas = 30 }
 local function parse_expose(s, raw)
   s.vis = string.unpack("<I4", raw)
   s.hidden = {}
@@ -145,7 +145,11 @@ local function decode_rooms(blob)
   for id, z in pairs(ZONES) do
     local st, cur, set = blob:byte(z.stat + 1), blob:byte(z.cur + 1), blob:byte(z.set + 1)
     if st and cur and set and (st ~= 0 or cur ~= 0) then    -- stat·현재온도 다 0 = 그 슬롯에 방 없음(안 리포트)
-      out[id] = { on = (st & 0x02) ~= 0, heating = (st & 0x40) ~= 0, outing = (st & 0x10) ~= 0, current = cur, target = set }
+      -- stat 비트: 0x02 켜짐, 0x40 난방 중, 0x10 외출, 0x08 반복예약. stat 다음 바이트 = 저장된 예약 값(97)
+      -- (실기기: 예약 켬 → 0x8b·다음 01 유지, 96=0 → 0x83·다음 01 그대로, 방 끔 → 0x81·다음 00)
+      local resv = blob:byte(z.stat + 2) or 0
+      out[id] = { on = (st & 0x02) ~= 0, heating = (st & 0x40) ~= 0, outing = (st & 0x10) ~= 0,
+                  reserve = (st & 0x08) ~= 0, resv = resv, current = cur, target = set }
     end
   end
   return out
@@ -230,6 +234,7 @@ end
 local function zone_text(m, z)
   local what
   if z.outing then what = "외출"                                    -- 존별 외출(f09)
+  elseif z.reserve then what = "예약"                               -- 존별 반복예약(f09 96)
   elseif (m and (not m.power or not m.heat)) or not z.on then what = "꺼짐"
   else what = "난방 " .. deg(z.target) end
   return deg(z.current) .. " · " .. what
@@ -323,6 +328,7 @@ local function refresh_zone(parent, mac, id)
   emit(child, "main", setpoint(z.target))
   emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = z.current, unit = "C" }))
   emit(child, "outing", z.outing and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 외출(f09 stat bit 0x10)
+  emit(child, "reserve", z.reserve and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 예약(stat 0x08)
   emit_text(child, zone_text(m, z), true)
 end
 
@@ -404,6 +410,8 @@ local function wanted_caps(parent, key)
     local out = { { "main", pick({ { BIT.room_on, "switch" }, { BIT.room_set, "thermostatHeatingSetpoint" } }) } }
     local outing = pick({ { BIT.room_out, "switch" } })
     if #outing > 0 then out[#out + 1] = { "outing", outing } end
+    local reserve = pick({ { BIT.room_resv, "switch" } })
+    if #reserve > 0 then out[#out + 1] = { "reserve", reserve } end
     return "lynnai-zone", out
   end
 end
@@ -614,6 +622,21 @@ local function on_switch(on)
       return
     end
     if kind ~= "zone" then return end
+    if cmd.component == "reserve" then
+      -- 반복예약은 f09 에 a0(존)+96(켜기/끄기). 켤 때는 앱처럼 97(예약 값)도 같이 — 지금 저장된 값, 없으면 01.
+      -- 예약은 켜진 방에서만 걸리므로(방을 끄면 풀림, 실기기 확인) 꺼진 방이면 먼저 켠다.
+      local z = ZONES[id]
+      local zs = (hub_state(parent).thermos[mac] or {})[id] or {}
+      local v = (zs.resv and zs.resv > 0) and zs.resv or 1
+      local list = {}
+      if on then
+        if zs.on == false then list[#list + 1] = string.format("f09@%s a0=%d,b1=1", mac, z.a0) end
+        list[#list + 1] = string.format("f09@%s a0=%d,96=1,97=%02x", mac, z.a0, v)
+      else
+        list[#list + 1] = string.format("f09@%s a0=%d,96=0", mac, z.a0)
+      end
+      return boiler_cmds(parent, list)
+    end
     if cmd.component == "outing" then
       -- 외출은 f09(각방 조절기)에 a0(존 선택)+b3 로 보낸다(실제 앱 캡처: f09 a0=7,b3=1).
       -- f06 b3 는 이 보일러에서 안 먹힌다(실측). a0 는 이 존의 선택자.
