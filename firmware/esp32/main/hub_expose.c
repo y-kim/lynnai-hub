@@ -240,13 +240,13 @@ static void migrate_devices(void)
         changed = true;
     }
     if (changed) {
+        save();                                      /* 숨김 정보를 먼저 저장하고 */
         nvs_handle_t h;
-        if (nvs_open("expose", NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_open("expose", NVS_READWRITE, &h) == ESP_OK) {   /* 그다음 '옮김' 표시(사이에 꺼지면 다음에 다시 옮김) */
             nvs_set_blob(h, "lgdone", s_lgdone, s_nlgdone * 4);
             nvs_commit(h);
             nvs_close(h);
         }
-        save();
         ESP_LOGW(TAG, "옛 노출 설정을 기기별로 옮김(기기 %d대)", s_nlgdone);
     }
 }

@@ -615,12 +615,16 @@ static esp_err_t apitoken_post(httpd_req_t *req)
     }
     if (!strcmp(op, "new")) {
         char tok[33], msg[160];
-        hub_api_token_new(tok);
+        if (!hub_api_token_new(tok)) {
+            return admin_page(req, "토큰을 저장하지 못했습니다 — 이전 토큰이 그대로입니다", false);
+        }
         snprintf(msg, sizeof(msg), "새 API 토큰: %s  (지금만 보입니다 — 서버 설정에 넣으세요)", tok);
         return admin_page(req, msg, true);
     }
     if (!strcmp(op, "off")) {
-        hub_api_token_clear();
+        if (!hub_api_token_clear()) {
+            return admin_page(req, "저장하지 못했습니다 — 토큰이 그대로 켜져 있습니다", false);
+        }
         return admin_page(req, "API 토큰을 껐습니다 (LAN 에 열림)", true);
     }
     return admin_page(req, "잘못된 요청", false);

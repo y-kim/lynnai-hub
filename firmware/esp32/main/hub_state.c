@@ -119,14 +119,16 @@ esp_err_t hub_state_provision(hub_state_t *st,
 
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) FAIL("저장소 열기 실패");
-    hs_set_str(h, "sta_ssid", sta_ssid);
-    hs_set_str(h, "sta_pass", sta_pass);
-    hs_set_str(h, "ap_ssid", ap_ssid);
-    hs_set_str(h, "ap_pass", ap_pass);
-    hs_set_blob(h, "adm_salt", salt, sizeof(salt));
-    hs_set_blob(h, "adm_hash", hash, sizeof(hash));
-    hs_set_u8(h, "prov", 1);                     /* 마지막에 표시 → 중간에 꺼져도 미설정으로 남음 */
-    esp_err_t e = nvs_commit(h);
+    /* 필수 항목을 다 쓰고 커밋된 뒤에만 '설정 완료'를 표시한다(일부만 저장된 채 완료로 보이지 않게) */
+    esp_err_t e = hs_set_str(h, "sta_ssid", sta_ssid);
+    if (e == ESP_OK) e = hs_set_str(h, "sta_pass", sta_pass);
+    if (e == ESP_OK) e = hs_set_str(h, "ap_ssid", ap_ssid);
+    if (e == ESP_OK) e = hs_set_str(h, "ap_pass", ap_pass);
+    if (e == ESP_OK) e = hs_set_blob(h, "adm_salt", salt, sizeof(salt));
+    if (e == ESP_OK) e = hs_set_blob(h, "adm_hash", hash, sizeof(hash));
+    if (e == ESP_OK) e = nvs_commit(h);
+    if (e == ESP_OK) e = hs_set_u8(h, "prov", 1);      /* 마지막에 표시 → 중간에 꺼져도 미설정으로 남음 */
+    if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
     if (e != ESP_OK) FAIL("저장 실패");
 

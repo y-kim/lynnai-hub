@@ -58,52 +58,83 @@ static bool zone_present(const uint8_t *b, int n, int z) { return ZONES[z].set <
 
 /* ---------------------------------------------------------------- 토큰 */
 
+static bool s_token_bad;   /* 토큰을 읽지 못함(없음과 다름) → 인증이 풀리지 않게 API 를 막는다 */
+
 static void token_load(void)
 {
     nvs_handle_t h;
     size_t n = sizeof(s_token);
     s_token[0] = 0;
-    if (nvs_open("api", NVS_READWRITE, &h) == ESP_OK) {
-        if (hs_get_str(h, "api", "token", s_token, &n) != ESP_OK) {
-            s_token[0] = 0;
-        }
+    s_token_bad = false;
+    esp_err_t e = nvs_open("api", NVS_READWRITE, &h);
+    if (e == ESP_OK) {
+        e = hs_get_str(h, "api", "token", s_token, &n);
         nvs_close(h);
+    }
+    if (e == ESP_ERR_NVS_NOT_FOUND) {
+        s_token[0] = 0;                              /* 토큰을 안 만든 상태: API 는 LAN 에 열림(관리 화면에서 고름) */
+    } else if (e != ESP_OK) {
+        s_token[0] = 0;
+        s_token_bad = true;
+        ESP_LOGE(TAG, "API 토큰을 읽지 못함(%s) — API 를 막음(관리 화면에서 새로 만들면 풀림)", esp_err_to_name(e));
     }
 }
 
-static void token_store(void)
+/* tok 를 저장하고(빈 문자열 = 끔) 성공해야 바꾼다 */
+static esp_err_t token_store(const char *tok)
 {
     nvs_handle_t h;
-    if (nvs_open("api", NVS_READWRITE, &h) == ESP_OK) {
-        hs_set_str(h, "token", s_token);
-        nvs_commit(h);
+    esp_err_t e = nvs_open("api", NVS_READWRITE, &h);
+    if (e == ESP_OK) {
+        e = hs_set_str(h, "token", tok);
+        if (e == ESP_OK) {
+            e = nvs_commit(h);
+        }
         nvs_close(h);
     }
+    if (e == ESP_OK) {
+        strlcpy(s_token, tok, sizeof(s_token));
+        s_token_bad = false;
+    } else {
+        ESP_LOGE(TAG, "API 토큰 저장 실패(%s) — 이전 상태 유지", esp_err_to_name(e));
+    }
+    return e;
 }
 
 bool hub_api_has_token(void) { return s_token[0] != 0; }
 
-void hub_api_token_new(char out[33])
+bool hub_api_token_new(char out[33])
 {
     uint8_t r[16];
+    char t[33];
     esp_fill_random(r, sizeof(r));
     for (int i = 0; i < 16; i++) {
-        snprintf(s_token + 2 * i, 3, "%02x", r[i]);
+        snprintf(t + 2 * i, 3, "%02x", r[i]);
     }
-    token_store();
+    if (token_store(t) != ESP_OK) {
+        return false;
+    }
     memcpy(out, s_token, 33);
     ESP_LOGI(TAG, "API 토큰 새로 만듦");
+    return true;
 }
 
-void hub_api_token_clear(void)
+bool hub_api_token_clear(void)
 {
-    s_token[0] = 0;
-    token_store();
+    if (token_store("") != ESP_OK) {
+        return false;
+    }
     ESP_LOGI(TAG, "API 토큰 끔(LAN 에 열림)");
+    return true;
 }
 
 bool hub_api_authorized(httpd_req_t *req)
 {
+    if (s_token_bad) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_sendstr(req, "API 토큰을 읽지 못해 막아 둠 (관리 화면 → 서버 연동에서 새로 만들기)");
+        return false;
+    }
     if (!s_token[0]) {
         return true;
     }

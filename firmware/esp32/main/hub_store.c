@@ -129,6 +129,7 @@ static esp_err_t check(nvs_handle_t h, const char *ns, const char *key, esp_err_
     }
     if (vr == ESP_ERR_NVS_NOT_FOUND && cr == ESP_OK) {
         hub_store_report(ns, key, "값 사라짐");           /* 검사값만 남음 = 값이 깨져 지워짐 */
+        return ESP_ERR_INVALID_CRC;                       /* '저장한 적 없음'(NOT_FOUND)과 구분 — 예: API 토큰이 사라지면 API 를 막는다 */
     }
     return vr;
 }

@@ -11,5 +11,5 @@ bool hub_api_authorized(httpd_req_t *req);
 
 /* 관리 화면 */
 bool hub_api_has_token(void);
-void hub_api_token_new(char out[33]);
-void hub_api_token_clear(void);
+bool hub_api_token_new(char out[33]);   /* 저장 실패면 false(토큰 그대로) */
+bool hub_api_token_clear(void);
