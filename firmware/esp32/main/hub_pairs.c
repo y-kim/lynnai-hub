@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdlib.h>
 #include "esp_log.h"
 #include "nvs.h"
 #include "hub_store.h"
@@ -24,7 +25,7 @@ static int s_n;
 
 /* 별명(아래에 정의, hub_pairs_load 가 먼저 쓰므로 선언을 위로) */
 #define MAX_ALIAS 8
-#define ALIAS_LEN 24
+#define ALIAS_LEN 64             /* UTF-8 바이트(한글 3바이트 → 약 20자, 팝업 maxlength=20) */
 typedef struct { char mac[7]; char name[ALIAS_LEN]; } alias_t;
 static alias_t s_alias[MAX_ALIAS];
 static int s_na;
@@ -115,12 +116,32 @@ static const char *alias_of(const char *mac)
     return NULL;
 }
 
+/* UTF-8 글자 중간에서 잘리지 않게 복사(끝의 미완성 바이트 열은 버림) */
+static void utf8_copy(char *dst, const char *src, size_t cap)
+{
+    strlcpy(dst, src, cap);
+    size_t n = strlen(dst);
+    if (n < strlen(src)) {                       /* 잘렸으면 마지막 글자가 온전한지 본다 */
+        size_t i = n;
+        while (i > 0 && ((unsigned char)dst[i - 1] & 0xC0) == 0x80) {
+            i--;                                 /* 이어지는 바이트(10xxxxxx) 건너뜀 */
+        }
+        if (i > 0 && ((unsigned char)dst[i - 1] & 0x80)) {
+            unsigned char lead = (unsigned char)dst[i - 1];
+            size_t want = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+            if (n - (i - 1) < want) {
+                dst[i - 1] = 0;                  /* 시작 바이트부터 잘라냄 */
+            }
+        }
+    }
+}
+
 static void alias_set(const char *mac, const char *name)
 {
     for (int i = 0; i < s_na; i++) {
         if (!strcmp(s_alias[i].mac, mac)) {
             if (name && *name) {
-                strlcpy(s_alias[i].name, name, ALIAS_LEN);
+                utf8_copy(s_alias[i].name, name, ALIAS_LEN);
             } else {
                 s_alias[i] = s_alias[--s_na];
             }
@@ -129,7 +150,7 @@ static void alias_set(const char *mac, const char *name)
     }
     if (name && *name && s_na < MAX_ALIAS) {
         strlcpy(s_alias[s_na].mac, mac, 7);
-        strlcpy(s_alias[s_na].name, name, ALIAS_LEN);
+        utf8_copy(s_alias[s_na].name, name, ALIAS_LEN);
         s_na++;
     }
 }
@@ -221,6 +242,23 @@ int hub_pairs_blob(uint8_t *out, int cap)
 
 static void cat(char *o, size_t cap, const char *s) { strlcat(o, s, cap); }
 
+/* 별명은 사용자가 넣은 글자라 HTML 속성·본문에 넣기 전에 이스케이프(따옴표·< 로 화면이 깨지지 않게) */
+static const char *esc(const char *s, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (; s && *s && n + 7 < cap; s++) {
+        const char *r = *s == '&' ? "&amp;" : *s == '<' ? "&lt;" : *s == '>' ? "&gt;"
+                      : *s == '"' ? "&quot;" : *s == '\'' ? "&#39;" : NULL;
+        if (r) {
+            n += strlcpy(out + n, r, cap - n);
+        } else {
+            out[n++] = *s;
+        }
+    }
+    out[n] = 0;
+    return out;
+}
+
 /* 보일러 조절기 드롭다운에 보일 이름: 별명 있으면 별명, 없으면 "보일러 조절기 <mac>" */
 static void boiler_label(const char *mac, char *out, size_t cap)
 {
@@ -252,11 +290,12 @@ void hub_pairs_render(char *o, size_t cap)
         return;
     }
     cat(o, cap, "<form method=post action=/admin/devices>");
-    char t[512];
+    char t[512], ea[ALIAS_LEN * 6];
     for (int i = 0; i < nd; i++) {
         char mac[7];
         mac_hex(dev[i].mac3, mac);
         const char *al = alias_of(mac);
+        esc(al ? al : "", ea, sizeof(ea));
         const char *typ = dev[i].kind == HUB_KIND_F06 ? "보일러 조절기"
                         : dev[i].kind == HUB_KIND_F09 ? "온도 조절기" : "기기";
         char meta[24] = "";
@@ -269,20 +308,25 @@ void hub_pairs_render(char *o, size_t cap)
             }
             snprintf(meta, sizeof(meta), " · 방 %d개", rooms);
         }
-        /* 별명: '✏️ 별명' 칩을 누르면 팝업(입력·저장·취소, ADMIN_EXTRA). 값은 숨은 a_<mac> 입력에 들어가
-         * 폼의 저장 버튼으로 확정된다. 삭제(🗑️)는 저장된 별명이 있을 때만 — 이름 붙인 기기만 지우게. */
+        /* 별명: '✏️ 별명' 칩을 누르면 팝업(입력·저장·취소, ADMIN_EXTRA) → 숨은 a_<mac> 에 넣고 폼을 바로 제출.
+         * 삭제(🗑️)는 저장된 별명이 있을 때만 — 이름 붙인 기기만 지우게. 별명(ea)은 이스케이프된 값을 따로 붙인다. */
         snprintf(t, sizeof(t), "<div class=row><span><b>%s</b> · %s%s · %s</span><span>"
                  "<button type=button class=ic title=\"별명 수정\" onclick=\"editAlias('%s')\">"
-                 "✏️ <span id=al_%s>%s</span></button>"
-                 "<input name=a_%s value=\"%s\" hidden>",
-                 typ, mac, meta, dev[i].linked ? "연결됨" : "끊김", mac, mac, al ? al : "별명 없음",
-                 mac, al ? al : "");
+                 "✏️ <span id=al_%s>",
+                 typ, mac, meta, dev[i].linked ? "연결됨" : "끊김", mac, mac);
         cat(o, cap, t);
+        cat(o, cap, al ? ea : "별명 없음");
+        snprintf(t, sizeof(t), "</span></button><input name=a_%s value=\"", mac);
+        cat(o, cap, t);
+        cat(o, cap, ea);
+        cat(o, cap, "\" hidden>");
         if (al) {
-            snprintf(t, sizeof(t), " <button name=del value=%s formaction=/admin/device-del class=ic "
-                     "title=\"기기 삭제\" onclick=\"return confirm('%s 기기를 삭제할까요?')\">\U0001f5d1️</button>",
-                     mac, al);
+            /* 이름은 data-n 으로 넘겨 JS 문자열에 직접 넣지 않는다(따옴표 든 별명 대비) */
+            snprintf(t, sizeof(t), " <button name=del value=%s formaction=/admin/device-del class=ic data-n=\"", mac);
             cat(o, cap, t);
+            cat(o, cap, ea);
+            cat(o, cap, "\" title=\"기기 삭제\" onclick=\"return confirm(this.dataset.n+' 기기를 삭제할까요?')\">"
+                        "\U0001f5d1️</button>");
         }
         cat(o, cap, "</span></div>");
         if (dev[i].kind == HUB_KIND_F09) {           /* 하위 항목: 보일러 조절기 연결(짝) */
@@ -293,10 +337,10 @@ void hub_pairs_render(char *o, size_t cap)
                      mac, cur ? "" : " selected", solo ? " selected" : "");
             cat(o, cap, t);
             for (int k = 0; k < n6; k++) {
-                char bl[ALIAS_LEN + 12];
+                char bl[ALIAS_LEN + 24], eb[sizeof(bl) * 6];
                 boiler_label(f06s[k], bl, sizeof(bl));
                 snprintf(t, sizeof(t), "<option value=%s%s>%s</option>", f06s[k],
-                         (cur && !solo && !strcmp(cur, f06s[k])) ? " selected" : "", bl);
+                         (cur && !solo && !strcmp(cur, f06s[k])) ? " selected" : "", esc(bl, eb, sizeof(eb)));
                 cat(o, cap, t);
             }
             cat(o, cap, "</select></span></div>");
@@ -314,7 +358,7 @@ bool hub_pairs_apply(const char *form, char *msg, size_t msglen)
     hub_dev_t dev[8];
     int nd = hub_rinnai_snapshot(dev, 8);
     for (int i = 0; i < nd; i++) {
-        char mac[7], key[12], val[ALIAS_LEN];
+        char mac[7], key[12], val[ALIAS_LEN * 3 + 1];   /* URL 인코딩(%XX)은 3배 — 작으면 한글 별명이 잘림 오류로 무시됨 */
         mac_hex(dev[i].mac3, mac);
         /* 별명 */
         snprintf(key, sizeof(key), "a_%s", mac);

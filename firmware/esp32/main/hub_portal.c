@@ -380,7 +380,8 @@ static esp_err_t login_page(httpd_req_t *req, const char *msg)
 }
 
 /* 관리 화면 공통: 별명 팝업 + 변경 추적(바뀐 줄 옅은 테두리, 저장 버튼은 바뀐 게 있을 때만 강조).
- * 저장 버튼은 class=sv 를 단다. 별명 칩은 editAlias('<mac>') 를 부르고, 폼 안의 숨은 a_<mac> 입력에 값을 넣는다. */
+ * 저장 버튼은 class=sv 를 단다. 별명 칩은 editAlias('<mac>') 를 부르고, 팝업 [저장]은 숨은 a_<mac> 에 값을 넣고
+ * 그 폼을 바로 제출한다(별도 저장 버튼을 또 누를 필요 없음). */
 static const char ADMIN_EXTRA[] =
     "<dialog id=adlg><h3 style='margin-top:0'>별명</h3>"
     "<input id=adin maxlength=20 placeholder='예: 거실 보일러'>"
@@ -398,7 +399,7 @@ static const char ADMIN_EXTRA[] =
     "T.value=i.value;D._m=m;D.showModal();T.focus();T.select()};"
     "function ok(){var m=D._m,i=document.querySelector('[name=a_'+m+']');i.value=T.value.trim();"
     "document.getElementById('al_'+m).textContent=i.value||'별명 없음';"
-    "i.dispatchEvent(new Event('input',{bubbles:true}));D.close()}"
+    "D.close();i.form.submit()}"
     "document.getElementById('adok').onclick=ok;document.getElementById('adno').onclick=function(){D.close()};"
     "T.addEventListener('keydown',function(e){if(e.key=='Enter'){e.preventDefault();ok()}})"
     "})();</script>";
@@ -511,11 +512,11 @@ static esp_err_t pairs_post(httpd_req_t *req)
     if (!authed(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
-    char *body = calloc(1, 1024), msg[96] = "";
+    char *body = calloc(1, 2048), msg[96] = "";
     if (!body) {
         return httpd_resp_send_500(req);
     }
-    bool ok = read_body(req, body, 1024) >= 0 && hub_pairs_apply(body, msg, sizeof(msg));
+    bool ok = read_body(req, body, 2048) >= 0 && hub_pairs_apply(body, msg, sizeof(msg));
     free(body);
     return admin_page(req, ok ? msg : (msg[0] ? msg : "잘못된 요청"), ok);
 }
