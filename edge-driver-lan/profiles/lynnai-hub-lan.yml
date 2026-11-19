@@ -1,0 +1,10 @@
+name: lynnai-hub-lan
+components:
+  - id: main
+    capabilities:
+      - id: connectbook02461.boilerStatus
+        version: 1
+      - id: refresh
+        version: 1
+    categories:
+      - name: Networking

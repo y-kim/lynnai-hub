@@ -17,3 +17,8 @@ components:
         version: 1
     categories:
       - name: Thermostat
+  - id: outing
+    label: 외출
+    capabilities:
+      - id: switch
+        version: 1
