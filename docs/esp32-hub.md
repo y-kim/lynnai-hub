@@ -85,7 +85,10 @@ python -m esptool --chip esp32c6 -p COM3 write_flash 0x20000 lynnai-hub-esp32c6-
 
 ### 4.2 SmartThings (Zigbee)
 
-1. LYNNAI Edge 드라이버를 SmartThings 허브에 설치합니다(초대 링크 또는 [8장](#8-edge-드라이버-배포-개발자)).
+1. LYNNAI Edge 드라이버를 SmartThings 허브에 설치합니다. 초대 링크
+   <https://bestow-regional.api.smartthings.com/invite/Qrjp9gnaJbMq> 를 열어 SmartThings 계정으로 로그인 →
+   **등록(Enroll)** → **사용 가능한 드라이버**에서 *LYNNAI Hub (Zigbee)* 를 허브에 **설치**합니다
+   (LAN 통로를 쓸 때만 *LYNNAI Hub (LAN)* 도). 개발자는 [8장](#8-edge-드라이버-배포-개발자)처럼 CLI 로 설치해도 됩니다.
 2. SmartThings 앱 → **기기 추가 → 주변 기기 검색**을 켭니다.
 3. 허브 버튼을 **짧게** 누릅니다. 네트워크에서 `http://<허브IP>/api/zigbee/join` 을 열어도 됩니다.
 4. 앱에 **LYNNAI Hub** 가 나타납니다. 보일러·방·센서 기기는 해당 기기가 처음 상태를 보내면 자동으로 생깁니다.
@@ -220,7 +223,7 @@ python3 tools/hub_doctor.py --st               # SmartThings CLI 로 ST 기기 �
 ## 8. Edge 드라이버 배포 (개발자)
 
 ```sh
-smartthings edge:drivers:package edge-driver --channel <채널ID>
+smartthings edge:drivers:package edge-driver --channel <채널ID>       # 공개 채널 "LYNNAI Hub" = 9231d747-aeb6-45da-8436-22ac6161f531
 smartthings edge:drivers:install <드라이버ID> --hub <허브 전체 UUID> --channel <채널ID>
 smartthings edge:drivers:logcat <드라이버ID> --hub-address <허브IP>     # 드라이버 로그
 cd edge-driver/test && python3 run_sim.py                                # 하드웨어 없이 드라이버 시험(lupa 필요)
