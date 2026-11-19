@@ -39,12 +39,22 @@ static const char *s_id = "";
 static const struct {
     const char *id, *name;
     int stat, cur, set;
-} ZONES[] = {
-    { "z1", "안방", 0, 3, 4 },
+} ZONES[] = {                       /* 화면 순서. id 는 드라이버 존 번호(z3 = 거실은 옛 배치 유지) */
+    { "z1", "방1", 0, 3, 4 },
     { "z2", "방2", 7, 10, 11 },
+    { "z4", "방3", 14, 17, 18 },
+    { "z5", "방4", 21, 24, 25 },
+    { "z6", "방5", 28, 31, 32 },
+    { "z7", "방6", 35, 38, 39 },
     { "z3", "거실", 42, 45, 46 },
 };
-#define NZONES 3
+#define NZONES 7
+/* 온도 조절기가 리포트하는 방만(상태·현재 온도 둘 다 0 = 그 슬롯에 방 없음, 드라이버와 같은 기준) */
+static bool zone_present(const uint8_t *b, int n, int z) { return ZONES[z].set < n && (b[ZONES[z].stat] || b[ZONES[z].cur]); }
+#define ZONE_JSON "{\"id\":\"%s\",\"name\":\"%s\",\"on\":%s,\"heating\":%s,\"outing\":%s,\"reserve\":%s,\"interval\":%d,\"current\":%d,\"target\":%d}"
+#define ZONE_ARGS(b, z) ZONES[z].id, ZONES[z].name, (b)[ZONES[z].stat] & 0x02 ? "true" : "false", \
+    (b)[ZONES[z].stat] & 0x40 ? "true" : "false", (b)[ZONES[z].stat] & 0x10 ? "true" : "false", \
+    (b)[ZONES[z].stat] & 0x08 ? "true" : "false", (b)[ZONES[z].stat + 1], (b)[ZONES[z].cur], (b)[ZONES[z].set]
 
 /* ---------------------------------------------------------------- 토큰 */
 
@@ -235,11 +245,10 @@ static esp_err_t state_get(httpd_req_t *req)
     if (n09 >= 50) {
         hex(raw, f09, n09);
         CHUNK("\"rooms\":{\"raw\":\"%s\",\"zones\":[", raw);
-        for (int i = 0; i < NZONES; i++) {
-            uint8_t st = f09[ZONES[i].stat];
-            CHUNK("%s{\"id\":\"%s\",\"name\":\"%s\",\"on\":%s,\"heating\":%s,\"current\":%d,\"target\":%d}", i ? "," : "",
-                  ZONES[i].id, ZONES[i].name, st & 0x02 ? "true" : "false", st & 0x40 ? "true" : "false",
-                  f09[ZONES[i].cur], f09[ZONES[i].set]);
+        for (int i = 0, k = 0; i < NZONES; i++) {
+            if (zone_present(f09, n09, i)) {
+                CHUNK("%s" ZONE_JSON, k++ ? "," : "", ZONE_ARGS(f09, i));
+            }
         }
         CHUNK("]},");
     } else {
@@ -276,11 +285,10 @@ static esp_err_t state_get(httpd_req_t *req)
         hex(raw, dev[i].blob, dev[i].n);
         CHUNK("%s{\"mac\":\"%02x%02x%02x\",\"linked\":%s,\"raw\":\"%s\",\"zones\":[", nt++ ? "," : "",
               dev[i].mac3[0], dev[i].mac3[1], dev[i].mac3[2], dev[i].linked ? "true" : "false", raw);
-        for (int z = 0; z < NZONES; z++) {
-            uint8_t st = dev[i].blob[ZONES[z].stat];
-            CHUNK("%s{\"id\":\"%s\",\"name\":\"%s\",\"on\":%s,\"heating\":%s,\"current\":%d,\"target\":%d}", z ? "," : "",
-                  ZONES[z].id, ZONES[z].name, st & 0x02 ? "true" : "false", st & 0x40 ? "true" : "false",
-                  dev[i].blob[ZONES[z].cur], dev[i].blob[ZONES[z].set]);
+        for (int z = 0, k = 0; z < NZONES; z++) {
+            if (zone_present(dev[i].blob, dev[i].n, z)) {
+                CHUNK("%s" ZONE_JSON, k++ ? "," : "", ZONE_ARGS(dev[i].blob, z));
+            }
         }
         CHUNK("]}");
     }
@@ -363,6 +371,9 @@ static esp_err_t metrics_get(httpd_req_t *req)
             if (dev[i].kind != HUB_KIND_F09 || dev[i].n < 50) continue;
             const char *m = MACSTR3(dev[i]);
             for (int z = 0; z < NZONES; z++) {
+                if (!zone_present(dev[i].blob, dev[i].n, z)) {
+                    continue;
+                }
                 uint8_t st = dev[i].blob[ZONES[z].stat];
                 int v = mi == 0 ? dev[i].blob[ZONES[z].cur] : mi == 1 ? dev[i].blob[ZONES[z].set]
                         : mi == 2 ? ((st & 0x02) != 0) : ((st & 0x40) != 0);

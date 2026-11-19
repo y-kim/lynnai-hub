@@ -40,7 +40,14 @@ def _boot_key(svc, mac):
 
 def _boot_valid(body):
     return all(t in body for t in (b"<result>", b"</result>", b"<error>S000001</error>", b"<uid>", b"<pass>", b"<ip>"))
-ZONES = [("z1", "안방", 0, 3, 4), ("z2", "방2", 7, 10, 11), ("z3", "거실", 42, 45, 46)]
+# 각방 슬롯(드라이버 core.lua ZONES·ESP32 hub_api.c 와 같다): (id, 이름, 상태, 현재, 설정) — z3 = 거실은 옛 배치 유지
+ZONES = [("z1", "방1", 0, 3, 4), ("z2", "방2", 7, 10, 11), ("z4", "방3", 14, 17, 18), ("z5", "방4", 21, 24, 25),
+         ("z6", "방5", 28, 31, 32), ("z7", "방6", 35, 38, 39), ("z3", "거실", 42, 45, 46)]
+
+
+def _present(r, z):
+    """온도 조절기가 리포트하는 방인가(상태·현재 온도 둘 다 0 = 그 슬롯에 방 없음)."""
+    return z[4] < len(r) and (r[z[2]] or r[z[3]])
 T0 = time.time()
 BOOT_ID = random.getrandbits(31)
 
@@ -77,7 +84,8 @@ def _rooms_json(r):
         return None
     return {"raw": r.hex(), "zones": [
         {"id": z[0], "name": z[1], "on": bool(r[z[2]] & 0x02), "heating": bool(r[z[2]] & 0x40),
-         "current": r[z[3]], "target": r[z[4]]} for z in ZONES]}
+         "outing": bool(r[z[2]] & 0x10), "reserve": bool(r[z[2]] & 0x08), "interval": r[z[2] + 1],
+         "current": r[z[3]], "target": r[z[4]]} for z in ZONES if _present(r, z)]}
 
 
 def build_state(core, hub_id):
@@ -134,6 +142,8 @@ def build_metrics(core, hub_id):
         L.append(f"# TYPE lynnai_zone_{metric} gauge")
         for mac, r, _l in thermos:
             for z in ZONES:
+                if not _present(r, z):
+                    continue
                 v = (int(bool(r[z[idx]] & mask)) if mask else r[z[idx]])
                 L.append(f'lynnai_zone_{metric}{{mac="{mac}",zone="{z[0]}",name="{z[1]}"}} {v}')
     return "\n".join(L) + "\n"
