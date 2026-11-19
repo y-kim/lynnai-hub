@@ -27,6 +27,7 @@ uint32_t hub_wifi_ap_ip(void);
 /* 2.4GHz 라디오 공유: Zigbee 가입(steering) 동안 Wi-Fi 를 멈췄다가 다시 켠다. */
 void hub_wifi_radio_pause(void);
 void hub_wifi_radio_resume(void);
+bool hub_wifi_radio_paused(void);     /* 지금 멈춰 둔 상태인가(진단: 이때의 STA 끊김은 오류 아님) */
 
 /* 10초마다 남은 힙/최저치/가장 큰 블록을 로그로(메모리 예산 확인용) */
 void hub_heap_monitor_start(void);

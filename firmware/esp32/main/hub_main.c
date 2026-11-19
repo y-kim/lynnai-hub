@@ -34,6 +34,7 @@
 #include "hub_proxy.h"
 #include "hub_onboard.h"
 #include "hub_led.h"
+#include "hub_diag.h"
 #include "hub_events.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
@@ -479,6 +480,7 @@ void app_main(void)
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
     hub_heap_monitor_start();
+    hub_diag_start(&s_hub);                 /* LED 오류 코드 + USB 시리얼 diag */
     ESP_LOGI(TAG, "Start ESP Zigbee Stack");
     xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
 }

@@ -29,3 +29,4 @@ void hub_event(hub_ev_t type, const uint8_t *mac, int32_t a, int32_t b);
 
 /* /api/events, /api/stats 를 포털 서버에 등록 */
 void hub_events_register(httpd_handle_t srv);
+void hub_events_print(int last);     /* USB 시리얼 진단용: 최근 이벤트를 printf 로 */

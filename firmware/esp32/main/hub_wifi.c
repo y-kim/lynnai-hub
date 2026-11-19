@@ -211,6 +211,8 @@ void hub_wifi_radio_resume(void)
     esp_wifi_start();           /* 저장된 mode/config 로 복귀, STA 는 STA_START 에서 재접속 */
 }
 
+bool hub_wifi_radio_paused(void) { return s_radio_paused; }
+
 uint32_t hub_wifi_ap_ip(void)
 {
     esp_netif_ip_info_t ip;

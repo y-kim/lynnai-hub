@@ -78,6 +78,30 @@ void hub_event(hub_ev_t type, const uint8_t *mac, int32_t a, int32_t b)
     xSemaphoreGive(s_lock);
 }
 
+/* USB 시리얼 진단(hub_diag): 최근 이벤트 last 개를 한 줄씩 출력 */
+void hub_events_print(int last)
+{
+    ensure_init();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint32_t next = s_next;
+    uint32_t oldest = next > RING ? next - RING : 0;
+    uint32_t from = next - oldest > (uint32_t)last ? next - last : oldest;
+    xSemaphoreGive(s_lock);
+    printf("boot_id=%lu events_total=%lu\n", (unsigned long)s_boot_id, (unsigned long)next);
+    for (uint32_t s = from; s < next; s++) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);   /* 한 개씩 복사(출력 중엔 잠그지 않음, 스택·힙 안 씀) */
+        ev_t e = s_ring[s % RING];
+        bool gone = s_next >= s + RING;          /* 출력하는 사이 덮였으면 그만 */
+        xSemaphoreGive(s_lock);
+        if (gone) {
+            break;
+        }
+        printf("ev %lu t=%lu.%03lus %s %02x:%02x:%02x:%02x:%02x:%02x a=%ld b=%ld\n", (unsigned long)e.seq,
+               (unsigned long)(e.up_ms / 1000), (unsigned long)(e.up_ms % 1000), NAMES[e.type], e.mac[0], e.mac[1],
+               e.mac[2], e.mac[3], e.mac[4], e.mac[5], (long)e.a, (long)e.b);
+    }
+}
+
 static esp_err_t events_get(httpd_req_t *req)
 {
     ensure_init();
@@ -156,8 +180,8 @@ static esp_err_t stats_get(httpd_req_t *req)
     {
         char errs[4 * 60 + 8];                  /* 저장 데이터 오류(hub_store): 건수 + 최근 4개 */
         hub_store_errors_json(errs, sizeof(errs));
-        snprintf(buf, sizeof(buf), "\"store_bad\":%d,\"led_alarm\":%s,\"store_errors\":", hub_store_error_count(),
-                 hub_led_alarm_on() ? "true" : "false");
+        snprintf(buf, sizeof(buf), "\"store_bad\":%d,\"led_alarm\":%s,\"led_codes\":%lu,\"store_errors\":",
+                 hub_store_error_count(), hub_led_alarm_on() ? "true" : "false", (unsigned long)hub_led_codes_get());
         httpd_resp_sendstr_chunk(req, buf);
         httpd_resp_sendstr_chunk(req, errs);
         httpd_resp_sendstr_chunk(req, ",\"count\":{");
