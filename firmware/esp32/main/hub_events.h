@@ -21,6 +21,7 @@ typedef enum {
     EV_ZB_LEAVE,        /* a=leave 타입 */
     EV_ONBOARD,         /* a=1 성공 0 실패 */
     EV_GAS_PULSE,       /* a=누적 펄스, b=1펄스 L */
+    EV_STORE_BAD,       /* 저장 데이터 오류(hub_store). a=이번 부팅 누적 건수 — 자세한 내용은 /api/stats store_errors */
     EV__COUNT
 } hub_ev_t;
 

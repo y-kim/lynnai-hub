@@ -23,6 +23,8 @@
 #include "esp_zigbee.h"
 #include "ezbee/bdb.h"
 #include "hub_api.h"
+#include "hub_store.h"
+#include "hub_led.h"
 
 #define RING 256
 
@@ -43,7 +45,7 @@ static SemaphoreHandle_t s_lock;
 static const char *const NAMES[EV__COUNT] = {
     "boot", "ap_join", "ap_leave", "sta_up", "sta_down", "link_open", "link_dev_tls", "link_cloud_tls",
     "link_up", "link_close", "link_reject", "bootstrap", "zb_join_fail", "zb_joined", "zb_leave", "onboard",
-    "gas_pulse",
+    "gas_pulse", "store_bad",
 };
 
 static void ensure_init(void)
@@ -146,11 +148,20 @@ static esp_err_t stats_get(httpd_req_t *req)
     bool fresh = ezb_bdb_is_factory_new();
     esp_zigbee_lock_release();
     snprintf(buf, sizeof(buf), "{\"boot\":%lu,\"up\":%lu,\"zb_joined_now\":%s,\"zb_factory_new\":%s,\"zb_nvs_reset\":%s,"
-             "\"heap\":%lu,\"heap_min\":%lu,\"count\":{",
+             "\"heap\":%lu,\"heap_min\":%lu,",
              (unsigned long)s_boot_id, (unsigned long)(esp_timer_get_time() / 1000), zb ? "true" : "false",
              fresh ? "true" : "false", g_zb_nvs_was_reset ? "true" : "false",
              (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size());
     httpd_resp_sendstr_chunk(req, buf);
+    {
+        char errs[4 * 60 + 8];                  /* 저장 데이터 오류(hub_store): 건수 + 최근 4개 */
+        hub_store_errors_json(errs, sizeof(errs));
+        snprintf(buf, sizeof(buf), "\"store_bad\":%d,\"led_alarm\":%s,\"store_errors\":", hub_store_error_count(),
+                 hub_led_alarm_on() ? "true" : "false");
+        httpd_resp_sendstr_chunk(req, buf);
+        httpd_resp_sendstr_chunk(req, errs);
+        httpd_resp_sendstr_chunk(req, ",\"count\":{");
+    }
     for (int i = 0; i < EV__COUNT; i++) {
         snprintf(buf, sizeof(buf), "%s\"%s\":%lu", i ? "," : "", NAMES[i], (unsigned long)s_count[i]);
         httpd_resp_sendstr_chunk(req, buf);

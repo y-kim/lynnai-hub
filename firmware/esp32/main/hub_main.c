@@ -47,6 +47,31 @@
 #include "hub_pairs.h"
 #include "hub_api.h"
 #include "hub_zb_rinnai.h"
+#include "hub_store.h"
+#include "nvs.h"
+
+/* Zigbee 가입 표식(앱 NVS, 검사값 포함). 스택의 가입 정보(zb_nvs)는 스택이 직접 써서 감쌀 수 없으므로,
+ * '가입했었다'를 따로 남겨 두고 부팅 때 스택이 초기 상태면 "가입 정보 사라짐"으로 보고한다. */
+static void zb_mark_set(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("zbmark", NVS_READWRITE, &h) == ESP_OK) {
+        hs_set_u8(h, "joined", 1);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static bool zb_mark_get(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open("zbmark", NVS_READWRITE, &h) == ESP_OK) {
+        hs_get_u8(h, "zbmark", "joined", &v);
+        nvs_close(h);
+    }
+    return v == 1;
+}
 
 static const char *TAG = "TEMPERATURE_SENSOR";
 
@@ -259,6 +284,9 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             s_init_backoff_ms = 30000;
             ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
+            if (ezb_bdb_is_factory_new() && zb_mark_get()) {
+                hub_store_report("zigbee", "가입정보", "사라짐 — 재페어링 필요");   /* 가입했었는데 초기 상태 */
+            }
             if (ezb_bdb_is_factory_new()) {
                 /* 가입은 타이머 컨텍스트에서(Wi-Fi 중단·AP 온보딩 양보·stack lock 포함) */
                 alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 100);
@@ -283,6 +311,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         if (status == EZB_BDB_STATUS_SUCCESS) {
             ezb_extpanid_t extended_pan_id;
             ezb_nwk_get_extended_panid(&extended_pan_id);
+            zb_mark_set();                  /* 다음 부팅에 가입 정보가 사라졌는지 알 수 있게 */
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
             hub_event(EV_ZB_JOINED, NULL, ezb_nwk_get_panid(), ezb_nwk_get_current_channel());
@@ -420,6 +449,7 @@ void app_main(void)
             /* 여기서 지우면 Zigbee 가입 정보가 사라져 재페어링이 필요하다 — 흔적을 남긴다(/api/stats zb_nvs_reset) */
             ESP_LOGW(TAG, "zb_nvs 초기화 실패(%s) → 지우고 새로 만듦: Zigbee 가입 정보 사라짐", esp_err_to_name(e));
             g_zb_nvs_was_reset = true;
+            hub_store_report("zb_nvs", "partition", e == ESP_ERR_NVS_NO_FREE_PAGES ? "가득 참 → 지움" : "버전 바뀜 → 지움");
             ESP_ERROR_CHECK(nvs_flash_erase_partition("zb_nvs"));
             e = nvs_flash_init_partition("zb_nvs");
         }

@@ -8,6 +8,7 @@
 #include "mbedtls/pkcs5.h"
 #include "mbedtls/md.h"
 #include "nvs.h"
+#include "hub_store.h"
 
 #include "hub_state.h"
 
@@ -34,7 +35,7 @@ static void new_device_id(char out[HUB_ID_LEN + 1])
 static void get_str(nvs_handle_t h, const char *key, char *out, size_t len)
 {
     size_t n = len;
-    if (nvs_get_str(h, key, out, &n) != ESP_OK) {
+    if (hs_get_str(h, NS, key, out, &n) != ESP_OK) {
         out[0] = '\0';
     }
 }
@@ -50,12 +51,12 @@ esp_err_t hub_state_load(hub_state_t *st)
     get_str(h, "did", st->device_id, sizeof(st->device_id));
     if (strlen(st->device_id) != HUB_ID_LEN) {           /* 첫 부팅(또는 공장초기화 직후) */
         new_device_id(st->device_id);
-        nvs_set_str(h, "did", st->device_id);
+        hs_set_str(h, "did", st->device_id);
         nvs_commit(h);
         ESP_LOGI(TAG, "첫 부팅: 새 기기 ID %s", st->device_id);
     }
     uint8_t prov = 0;
-    nvs_get_u8(h, "prov", &prov);
+    hs_get_u8(h, NS, "prov", &prov);
     st->provisioned = prov == 1;
     get_str(h, "ap_ssid", st->ap_ssid, sizeof(st->ap_ssid));
     get_str(h, "ap_pass", st->ap_pass, sizeof(st->ap_pass));
@@ -118,13 +119,13 @@ esp_err_t hub_state_provision(hub_state_t *st,
 
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) FAIL("저장소 열기 실패");
-    nvs_set_str(h, "sta_ssid", sta_ssid);
-    nvs_set_str(h, "sta_pass", sta_pass);
-    nvs_set_str(h, "ap_ssid", ap_ssid);
-    nvs_set_str(h, "ap_pass", ap_pass);
-    nvs_set_blob(h, "adm_salt", salt, sizeof(salt));
-    nvs_set_blob(h, "adm_hash", hash, sizeof(hash));
-    nvs_set_u8(h, "prov", 1);                     /* 마지막에 표시 → 중간에 꺼져도 미설정으로 남음 */
+    hs_set_str(h, "sta_ssid", sta_ssid);
+    hs_set_str(h, "sta_pass", sta_pass);
+    hs_set_str(h, "ap_ssid", ap_ssid);
+    hs_set_str(h, "ap_pass", ap_pass);
+    hs_set_blob(h, "adm_salt", salt, sizeof(salt));
+    hs_set_blob(h, "adm_hash", hash, sizeof(hash));
+    hs_set_u8(h, "prov", 1);                     /* 마지막에 표시 → 중간에 꺼져도 미설정으로 남음 */
     esp_err_t e = nvs_commit(h);
     nvs_close(h);
     if (e != ESP_OK) FAIL("저장 실패");
@@ -146,8 +147,8 @@ bool hub_state_verify_admin(const char *pw)
     }
     uint8_t salt[SALT_LEN], want[HASH_LEN], got[HASH_LEN];
     size_t sl = sizeof(salt), hl = sizeof(want);
-    bool ok = nvs_get_blob(h, "adm_salt", salt, &sl) == ESP_OK &&
-              nvs_get_blob(h, "adm_hash", want, &hl) == ESP_OK &&
+    bool ok = hs_get_blob(h, NS, "adm_salt", salt, &sl) == ESP_OK &&
+              hs_get_blob(h, NS, "adm_hash", want, &hl) == ESP_OK &&
               sl == SALT_LEN && hl == HASH_LEN && hash_pw(pw, salt, got) == ESP_OK;
     nvs_close(h);
     if (!ok) {
