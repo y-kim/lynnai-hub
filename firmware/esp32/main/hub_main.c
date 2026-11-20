@@ -50,6 +50,7 @@
 #include "hub_api.h"
 #include "hub_zb_rinnai.h"
 #include "hub_store.h"
+#include "hub_devs.h"
 #include "nvs.h"
 
 /* Zigbee 가입 표식(앱 NVS, 검사값 포함). 스택의 가입 정보(zb_nvs)는 스택이 직접 써서 감쌀 수 없으므로,
@@ -534,6 +535,7 @@ void app_main(void)
     hub_expose_load();                      /* 항목별 노출 통로(Zigbee/LAN/Matter) */
     hub_pairs_load();                       /* 보일러↔써머스탯 수동 짝 */
     hub_sensors_start();                    /* 온습도계 + 가스 계량기 */
+    hub_devs_load();                        /* 등록된 린나이 기기 목록(등록 안 된 단말은 기기로 보지 않는다) */
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
     hub_heap_monitor_start();

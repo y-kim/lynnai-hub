@@ -21,10 +21,11 @@
 #include "hub_zigbee.h"
 #include "hub_led.h"
 #include "hub_events.h"
+#include "hub_devs.h"
 
 static const char *TAG = "HUB_ONBOARD";
 
-#define BOILER_AP_PREFIX   "Rinnai"        /* 보일러 SoftAP SSID 접두사 (확인 필요: 전체 형태) */
+#define BOILER_AP_PREFIX   "Rinnai_"       /* 기기 설정용 AP 이름의 앞부분(대소문자 무시). 이것으로 시작하는 AP 만 찾는다 */
 #define BOILER_AP_GW       "192.168.4.1"
 #define BOILER_SECURITY    "WPA-PERSONAL"   /* 문서 확인: WPA/WPA2 공통. 오픈=NONE, WEP=WEP */
 
@@ -150,6 +151,9 @@ static void onboard_task(void *arg)
     bool ok = post_network(s_st->ap_ssid, s_st->ap_pass);
     hub_led_set(ok ? HUB_LED_GREEN : HUB_LED_RED);
     hub_event(EV_ONBOARD, NULL, ok, 0);
+    if (ok) {
+        hub_devs_auto_open(HUB_DEVS_BUTTON_S);   /* 방금 버튼으로 등록한 기기가 허브 AP 에 붙으면 그대로 등록 */
+    }
 
 restore:
     ESP_LOGI(TAG, "집 Wi-Fi 로 복귀");

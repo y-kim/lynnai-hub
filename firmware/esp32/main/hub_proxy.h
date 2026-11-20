@@ -17,6 +17,7 @@
 
 /* 8883 에서 보일러(TLS 1.1)를 받는다. 모드에 따라 클라우드로 중계하거나 직접 응답한다. */
 void hub_proxy_start(void);
+void hub_proxy_relink(void);     /* 지금 기기 연결들을 끊어 다시 받게 한다(기기 등록 직후 곧바로 알아보게) */
 uint8_t hub_proxy_mode(void);
 void hub_proxy_render(char *out, size_t cap);                     /* 관리 화면 '동작 모드' */
 bool hub_proxy_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/mode */

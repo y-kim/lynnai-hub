@@ -21,6 +21,7 @@
 #include "hub_uplink.h"
 #include "hub_pairs.h"
 #include "hub_expose.h"
+#include "hub_devs.h"
 
 static const char *TAG = "HUB_RINNAI";
 
@@ -55,6 +56,7 @@ struct hub_link_tap {
     QueueHandle_t cmds;
     uint32_t peer_ip;               /* 이 연결의 상대 주소(허브 AP 대역) */
     bool refused;                   /* 토픽 MAC 이 상대와 안 맞아 거절함(로그 한 번만) */
+    bool pending;                   /* 등록 안 된 기기라 기기로 보지 않는 중(로그 한 번만) */
     bool used;
     bool poll_now;                  /* 단독 모드: 기기가 /get 을 구독하면 곧바로 상태 요청(fa) */
 };
@@ -239,7 +241,18 @@ static void learn_base(hub_link_tap_t *t, const char *topic, const char *slash)
         ESP_LOGW(TAG, "토픽의 기기 MAC 이 연결한 단말과 다름 — 이 연결은 기기로 보지 않음: %.*s", (int)(slash - topic), topic);
         return;
     }
+    /* 등록된 기기만 기기로 본다(kind 를 배우지 않으면 상태 읽기·연결 목록·명령이 모두 이 연결을 건너뛴다).
+     * 등록 안 된 단말의 중계 자체는 그대로 둔다. 관리 화면 "등록 대기"에서 등록하면 다음 연결부터 알아본다. */
+    if (!hub_devs_allowed(mac6)) {
+        if (!t->pending) {
+            t->pending = true;
+            ESP_LOGW(TAG, "등록 안 된 기기 %02x:%02x:%02x:%02x:%02x:%02x (f0%d) — 관리 화면 '등록 대기'에서 등록해야 읽는다", mac6[0],
+                     mac6[1], mac6[2], mac6[3], mac6[4], mac6[5], kind);
+        }
+        return;
+    }
     lock();
+    t->pending = false;
     t->kind = kind;
     memcpy(t->base, topic, slash - topic);
     t->base[slash - topic] = 0;
@@ -376,6 +389,7 @@ hub_link_tap_t *hub_rinnai_link_open(uint32_t peer_ip)
         memset(t->mac3, 0, 3);
         t->peer_ip = peer_ip;
         t->refused = false;
+        t->pending = false;
         if (!t->cmds) {
             t->cmds = xQueueCreate(16, sizeof(cmd_t *));   /* 방 7개에 한꺼번에(외출 등) + 여유 */
         }
@@ -768,8 +782,8 @@ void hub_rinnai_resend(void)
     kick();
 }
 
-/* 관리 화면: 기기 삭제. 허브 기기표(s_dev)에서 지우고, 드라이버에 CMD_FORGET 으로 알린다.
- * 지금 연결돼 relay 중인 기기면 다음 상태(70)에 다시 생길 수 있다(끊긴 기기 정리에 주로 쓴다). */
+/* 관리 화면: 기기 삭제. 허브 기기표(s_dev)와 등록 목록에서 지우고, 드라이버에 CMD_FORGET 으로 알린다.
+ * 지금 연결돼 있는 기기면 그 연결은 '등록 안 된 단말'이 되어 관리 화면 "등록 대기"에 나온다(다시 등록할 수 있다). */
 bool hub_rinnai_forget(const char *mac6)
 {
     if (!s_lock || !mac6) {
@@ -782,7 +796,16 @@ bool hub_rinnai_forget(const char *mac6)
     }
     uint8_t gone[MAX_DEV][4];
     int ng = 0;
+    hub_devs_remove3(m);                             /* 등록 해제 — 다시 붙어도 기기로 보지 않는다 */
     lock();
+    for (int i = 0; i < MAX_TAPS; i++) {             /* 지금 그 기기의 연결: 배운 것을 잊는다(다음 토픽에서 다시 판정) */
+        if (s_taps[i].used && s_taps[i].kind && mac3_eq(s_taps[i].mac3, m)) {
+            s_taps[i].kind = 0;
+            s_taps[i].base[0] = 0;
+            s_taps[i].pending = false;
+            s_links_dirty = true;
+        }
+    }
     for (int i = 0; i < MAX_DEV; i++) {
         if (s_dev[i].used && mac3_eq(s_dev[i].mac3, m)) {
             gone[ng][0] = s_dev[i].kind;

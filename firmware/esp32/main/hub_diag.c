@@ -36,6 +36,7 @@
 #include "hub_zb_rinnai.h"
 #include "hub_proxy.h"
 #include "hub_crypt.h"
+#include "hub_devs.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "diag";
@@ -169,6 +170,7 @@ static void dump(void)
     } else {
         printf("zb ready=0\n");
     }
+    hub_devs_print();
     printf("uplink=0x%02x mode=%s\n", hub_uplink_mask(), hub_proxy_mode() == HUB_MODE_STANDALONE ? "standalone" : "proxy");
 
     hub_dev_t *dev = s_dev;
@@ -222,6 +224,8 @@ static void on_line(char *l)
         dump();
     } else if (!strcmp(l, "crypt")) {
         hub_crypt_print();
+    } else if (!strncmp(l, "devs", 4)) {
+        hub_devs_usb(l + 4);
 #if HUB_CRYPT_SELFTEST
     } else if (!strcmp(l, "crypt selftest")) {
         extern void hub_crypt_request_selftest(void);

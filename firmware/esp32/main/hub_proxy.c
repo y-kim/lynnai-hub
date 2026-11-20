@@ -498,6 +498,11 @@ static uint32_t peer_ip(int fd)
     return 0;
 }
 
+void hub_proxy_relink(void)
+{
+    s_mode_gen++;                                    /* 연결 태스크들이 알아채고 닫는다 → 기기가 수 초 안에 다시 붙음 */
+}
+
 static const char *mqtt_name(uint8_t b0)
 {
     static const char *const n[16] = { "?", "CONNECT", "CONNACK", "PUBLISH", "PUBACK", "?", "?", "?", "SUBSCRIBE",

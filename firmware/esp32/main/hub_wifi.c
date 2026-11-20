@@ -256,6 +256,23 @@ bool hub_wifi_ap_peer_is(uint32_t ip, const uint8_t mac[6])
     return pair.ip.addr == ip;
 }
 
+int hub_wifi_ap_stations(hub_ap_sta_t *out, int max)
+{
+    wifi_sta_list_t list;
+    if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < list.num && n < max; i++) {
+        esp_netif_pair_mac_ip_t pair = { 0 };
+        memcpy(pair.mac, list.sta[i].mac, 6);
+        memcpy(out[n].mac, list.sta[i].mac, 6);
+        out[n].ip = (s_ap_netif && esp_netif_dhcps_get_clients_by_mac(s_ap_netif, 1, &pair) == ESP_OK) ? pair.ip.addr : 0;
+        n++;
+    }
+    return n;
+}
+
 /* ---- 보일러 온보딩 보조: 스캔 / 임시 STA 전환 / 복귀 ---- */
 
 /* prefix 로 시작하는 AP SSID 를 찾아 out 에 채운다(대소문자 무시). 스캔 중 AP/Zigbee 가 잠깐 끊길 수 있다. */
