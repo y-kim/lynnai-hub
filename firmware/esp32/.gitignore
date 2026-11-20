@@ -4,3 +4,5 @@ sdkconfig.old
 managed_components/
 main/srv.pem
 *.pem
+build_*/
+lynnai-hub-esp32c6-*.bin

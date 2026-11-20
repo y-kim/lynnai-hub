@@ -37,6 +37,7 @@
 #include "hub_proxy.h"
 #include "hub_crypt.h"
 #include "hub_devs.h"
+#include "hub_radio.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "diag";
@@ -163,7 +164,12 @@ static void dump(void)
         uint16_t pan = ezb_nwk_get_panid();
         uint8_t ch = ezb_nwk_get_current_channel();
         uint16_t sa = ezb_nwk_get_short_address();
+        ezb_extaddr_t ea;
+        ezb_nwk_get_extended_address(&ea);
         esp_zigbee_lock_release();
+        /* Zigbee 주소(EUI). 외부 라디오를 써도 호스트 칩의 주소여야 한다(hub_main 이 고정) */
+        printf("zb eui=%02x%02x%02x%02x%02x%02x%02x%02x\n", ea.u8[7], ea.u8[6], ea.u8[5], ea.u8[4], ea.u8[3], ea.u8[2], ea.u8[1],
+               ea.u8[0]);
         extern bool g_zb_nvs_was_reset;
         printf("zb joined=%d factory_new=%d nvs_reset=%d pan=0x%04x ch=%d short=0x%04x\n", joined, fresh,
                g_zb_nvs_was_reset, pan, ch, sa);
@@ -180,6 +186,7 @@ static void dump(void)
         printf("zb ready=0\n");
     }
     hub_devs_print();
+    hub_radio_print();
     printf("uplink=0x%02x mode=%s\n", hub_uplink_mask(), hub_proxy_mode() == HUB_MODE_STANDALONE ? "standalone" : "proxy");
 
     hub_dev_t *dev = s_dev;
@@ -209,7 +216,7 @@ static void dump(void)
 
 static void help(void)
 {
-    printf("\n#LYNNAI 시리얼 명령: diag(상태 전체) / led(LED 코드 뜻) / mode [proxy|standalone](동작 모드) / crypt(암호화·eFuse 상태) / help\n");
+    printf("\n#LYNNAI 시리얼 명령: diag(상태 전체) / led(LED 코드 뜻) / mode [proxy|standalone](동작 모드) / crypt(암호화·eFuse 상태) / scan(들리는 Wi-Fi AP) / devs(등록된 기기·등록 대기) / radio [auto|native|ext](Zigbee 라디오 고정, 시험용) / help\n");
     printf("#LED 빨강 N번 깜빡 → 2초 쉼: ");
     for (int c = 1; c <= HUB_LED_CODE_MAX; c++) {
         printf("%d=%s%s", c, hub_led_code_text(c), c < HUB_LED_CODE_MAX ? ", " : "\n");
@@ -237,6 +244,27 @@ static void on_line(char *l)
         hub_wifi_scan_print();
     } else if (!strncmp(l, "devs", 4)) {
         hub_devs_usb(l + 4);
+    } else if (!strncmp(l, "radio", 5)) {
+        /* 시험용: 내장/외부 라디오를 한쪽으로 고정(손대지 않고 두 구성을 번갈아 재 보려고). 바꾸면 재시작한다 */
+        const char *arg = l + 5;
+        while (*arg == ' ') {
+            arg++;
+        }
+        int f = !strcmp(arg, "auto") ? HUB_RADIO_AUTO : !strcmp(arg, "native") ? HUB_RADIO_NATIVE : !strcmp(arg, "ext") ? HUB_RADIO_EXT : -1;
+        if (!*arg) {
+            hub_radio_print();
+        } else if (!strcmp(arg, "test")) {
+            hub_radio_wiretest();
+        } else if (f < 0) {
+            printf("#radio auto|native|ext|test\n");
+        } else if (hub_radio_force((uint8_t)f)) {
+            printf("#radio %s: 저장 — 재시작\n", arg);
+            fflush(stdout);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();
+        } else {
+            printf("#radio %s: 저장 실패\n", arg);
+        }
 #if HUB_CRYPT_SELFTEST
     } else if (!strcmp(l, "crypt selftest")) {
         extern void hub_crypt_request_selftest(void);

@@ -51,6 +51,8 @@
 #include "hub_zb_rinnai.h"
 #include "hub_store.h"
 #include "hub_devs.h"
+#include "hub_radio.h"
+#include "esp_mac.h"
 #include "nvs.h"
 
 /* Zigbee 가입 표식(앱 NVS, 검사값 포함). 스택의 가입 정보(zb_nvs)는 스택이 직접 써서 감쌀 수 없으므로,
@@ -479,6 +481,20 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
     esp_zigbee_config_t config = ESP_ZIGBEE_DEFAULT_CONFIG();
 
     ESP_ERROR_CHECK(esp_zigbee_init(&config));
+#if CONFIG_ZB_RADIO_SPINEL_UART && CONFIG_SOC_IEEE802154_SUPPORTED
+    {
+        /* Zigbee 주소(EUI)를 호스트 칩 것으로 고정: 외부 라디오를 붙였다 떼도 SmartThings 에 같은 기기로 남게.
+         * (그대로 두면 라디오 칩의 주소를 써서, 라디오를 바꿀 때마다 다른 기기가 된다) */
+        uint8_t m[8];
+        if (esp_read_mac(m, ESP_MAC_IEEE802154) == ESP_OK) {
+            ezb_extaddr_t a;
+            for (int i = 0; i < 8; i++) {
+                a.u8[i] = m[7 - i];                  /* 스택은 리틀엔디언 */
+            }
+            ezb_nwk_set_extended_address(&a);
+        }
+    }
+#endif
 
     ESP_ERROR_CHECK(esp_zigbee_setup_commissioning());
 
@@ -486,8 +502,10 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
     /* Wi-Fi AP 와 라디오 공존: 평소엔 Zigbee 수신을 끄고(라디오를 Wi-Fi 에 양보) 2초마다 부모에게
      * 쌓인 메시지를 가져온다(폴링). 참여(join) 때 부모에게 알리는 값이라 바꾸면 재참여가 필요하다. */
+#if CONFIG_ZB_ZED
     ezb_set_rx_on_when_idle(false);
     ezb_nwk_set_keepalive_interval(2000);
+#endif                                    /* 라우터(라디오가 따로인 보드)는 늘 수신한다 — 폴링 설정이 없다 */
 
     ESP_ERROR_CHECK(esp_zigbee_start(false));
     hub_zigbee_mark_ready();              /* 이제 ezb_* 안전 — 이 전의 센서 전송은 무시됨 */
@@ -515,6 +533,7 @@ void app_main(void)
             hub_store_report("zb_nvs", "partition", "초기화 실패 → 지움");
         }
     }
+    hub_radio_boot();        /* 외부 Zigbee 라디오가 붙어 있나 보고, 맞는 펌웨어 칸이 아니면 넘어가 재시작(고정 설정은 nvs 에서 읽는다) */
 
     /* 허브: 설정 상태 → Wi-Fi(미설정이면 설정 AP, 설정 후엔 집 Wi-Fi + 전용 AP) → DNS → 설정 포털 */
     static hub_state_t s_hub;
@@ -548,9 +567,16 @@ void app_main(void)
             ESP_LOGE(TAG, "버튼 초기화 실패");
         }
     }
-    if (hub_uplink_mask() & HUB_UPLINK_ZIGBEE) {
+    if ((hub_uplink_mask() & HUB_UPLINK_ZIGBEE) && !hub_radio_usable()) {
+        ESP_LOGE(TAG, "Zigbee 라디오를 쓸 수 없음(외부 라디오용 펌웨어인데 라디오가 답하지 않음) — Zigbee 스택 시작 안 함");
+        hub_wifi_sta_release();
+    } else if (hub_uplink_mask() & HUB_UPLINK_ZIGBEE) {
+        if (hub_radio_external()) {
+            hub_wifi_sta_release();         /* 라디오가 따로라 Wi-Fi 를 미룰 이유가 없다 */
+        }
         ESP_LOGI(TAG, "Start ESP Zigbee Stack");
-        xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
+        /* 외부 라디오(Spinel UART)는 라디오 호출이 프레임 인코딩·UART 를 거쳐 스택을 더 쓴다(4096 이면 시작 직후 넘침, 실측) */
+        xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", hub_radio_external() ? 8192 : 4096, NULL, 5, NULL);
     } else {
         ESP_LOGI(TAG, "Zigbee 를 쓰지 않음(연결 방식) — Zigbee 스택 시작 안 함");
         hub_wifi_sta_release();             /* 기다릴 Zigbee 재가입이 없다 */

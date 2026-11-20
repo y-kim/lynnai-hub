@@ -57,8 +57,8 @@ static const plugin_t PLUGINS[] = {
 #define NPLUG (int)(sizeof(PLUGINS) / sizeof(PLUGINS[0]))
 
 /* 보드(ESP32-C6-DevKitC-1)에 나와 있고 허브가 안 쓰는 핀.
- * 빠진 것: 8 LED, 9 버튼, 12·13 USB, 16·17 콘솔(UART), 24~30 플래시. */
-static const int FREE_PINS[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 15, 18, 19, 20, 21, 22, 23 };
+ * 빠진 것: 2·3 외부 Zigbee 라디오(UART, 부팅 때 탐지), 8 LED, 9 버튼, 12·13 USB, 16·17 콘솔(UART), 24~30 플래시. */
+static const int FREE_PINS[] = { 0, 1, 4, 5, 6, 7, 10, 11, 15, 18, 19, 20, 21, 22, 23 };
 
 static bool s_on[NPLUG];
 static int s_val[NPLUG][4];
