@@ -52,6 +52,7 @@ static const uint8_t OLD_ZBIT[8] = { 0, 8, 11, 14, 17, 20, 23, 26 };   /* z1~z7 
 static uint32_t s_old[EXPOSE_NCH];
 static bool s_has_old[EXPOSE_NCH];
 #define MAX_LGDONE 8
+#define OLD_KEEP_BOOTS 5                               /* 옮긴 뒤 옛 값을 남겨 두는 부팅 횟수 */
 static uint8_t s_lgdone[MAX_LGDONE][4];                /* [종류][MAC끝3] */
 static int s_nlgdone;
 static hid_t s_hid[EXPOSE_NCH][MAX_HID];
@@ -142,16 +143,23 @@ static void hub_expose_load_l(void)
             s_nlgdone = (int)(n / 4);
         }
         if (s_nlgdone && !migrated) {
-            /* 지난 부팅에 이미 기기별로 옮겼다 — 옛 값은 이제 지운다(나중에 새로 붙는 기기에 옛 숨김이 걸리지 않게).
-             * 그 부팅에 안 보였던 기기는 옛 숨김 없이(보이는 채로) 시작한다. */
-            for (int c = 0; c < EXPOSE_NCH; c++) {
-                nvs_erase_key(h, OLD_KEY[c]);
-                s_has_old[c] = false;
+            /* 기기별로 옮긴 뒤 OLD_KEEP_BOOTS 번의 부팅 동안은 옛 값을 남겨 둔다 — 옮긴 부팅에 꺼져 있던 기기가
+             * 나중에 붙어도 옛 숨김을 이어받게. 그 뒤엔 지운다(훗날 새로 산 기기에 옛 숨김이 걸리지 않게). */
+            uint8_t boots = 0;
+            nvs_get_u8(h, "lgboots", &boots);
+            if (++boots >= OLD_KEEP_BOOTS) {
+                for (int c = 0; c < EXPOSE_NCH; c++) {
+                    nvs_erase_key(h, OLD_KEY[c]);
+                    s_has_old[c] = false;
+                }
+                nvs_erase_key(h, "lgdone");
+                nvs_erase_key(h, "lgboots");
+                s_nlgdone = 0;
+                ESP_LOGI(TAG, "옛 노출 설정 정리 끝");
+            } else {
+                nvs_set_u8(h, "lgboots", boots);
             }
-            nvs_erase_key(h, "lgdone");
             nvs_commit(h);
-            s_nlgdone = 0;
-            ESP_LOGI(TAG, "옛 노출 설정 정리 끝");
         }
         nvs_close(h);
     }

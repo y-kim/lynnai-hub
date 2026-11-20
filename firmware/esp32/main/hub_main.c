@@ -250,6 +250,18 @@ static void esp_zigbee_alarm_reinit(alarm_timer_arg_t arg)
     esp_zigbee_lock_release();
 }
 
+/* 지금 가입 시도를 시작할 수 있나(hub_zigbee_join_now 가 true 를 돌려줄 조건). 응답을 먼저 보내고 시작하려는 호출부용 */
+bool hub_zigbee_can_join(void)
+{
+    if (!(hub_uplink_mask() & HUB_UPLINK_ZIGBEE) || !hub_zigbee_is_ready() || !s_steer_allowed) {
+        return false;
+    }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    bool joined = ezb_bdb_dev_joined();
+    esp_zigbee_lock_release();
+    return !joined;
+}
+
 bool hub_zigbee_join_now(void)
 {
     if (!(hub_uplink_mask() & HUB_UPLINK_ZIGBEE) || !hub_zigbee_is_ready()) {

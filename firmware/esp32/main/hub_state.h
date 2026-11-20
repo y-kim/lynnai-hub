@@ -34,4 +34,3 @@ esp_err_t hub_state_provision(hub_state_t *st,
                               const char *admin_pw, char *err, int err_len);
 
 bool hub_state_verify_admin(const char *pw);
-

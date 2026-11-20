@@ -26,6 +26,7 @@
 #include "hub_store.h"
 #include "hub_led.h"
 #include "hub_portal.h"
+#include "hub_zb_rinnai.h"
 
 #define RING 256
 
@@ -168,10 +169,13 @@ static esp_err_t stats_get(httpd_req_t *req)
     char buf[160];
     extern bool g_zb_nvs_was_reset;          /* hub_main: 이번 부팅에 zb_nvs 를 지우고 새로 만들었나(가입 정보 날아감) */
     httpd_resp_set_type(req, "application/json");
-    esp_zigbee_lock_acquire(portMAX_DELAY);
-    bool zb = ezb_bdb_dev_joined();         /* 실제 가입 여부(zb_joined 카운트는 '이번 부팅 steering 성공 수'일 뿐) */
-    bool fresh = ezb_bdb_is_factory_new();
-    esp_zigbee_lock_release();
+    bool zb = false, fresh = false;
+    if (hub_zigbee_is_ready()) {            /* Zigbee 를 안 쓰면 스택이 없다 — ezb_* 를 부르면 assert 로 재부팅한다 */
+        esp_zigbee_lock_acquire(portMAX_DELAY);
+        zb = ezb_bdb_dev_joined();          /* 실제 가입 여부(zb_joined 카운트는 '이번 부팅 steering 성공 수'일 뿐) */
+        fresh = ezb_bdb_is_factory_new();
+        esp_zigbee_lock_release();
+    }
     snprintf(buf, sizeof(buf), "{\"boot\":%lu,\"up\":%lu,\"zb_joined_now\":%s,\"zb_factory_new\":%s,\"zb_nvs_reset\":%s,"
              "\"heap\":%lu,\"heap_min\":%lu,",
              (unsigned long)s_boot_id, (unsigned long)(esp_timer_get_time() / 1000), zb ? "true" : "false",
@@ -209,15 +213,27 @@ static esp_err_t zb_join_post(httpd_req_t *req)
             return ESP_OK;
         }
     }
-    bool started = hub_zigbee_join_now();
-    if (admin) {                                     /* 관리 화면 버튼: 되돌아가기 */
-        httpd_resp_set_status(req, "303 See Other");
-        httpd_resp_set_hdr(req, "Location", "/admin");
-        return httpd_resp_send(req, NULL, 0);
+    /* 가입 시도는 Wi-Fi 를 바로 멈추므로 응답을 먼저 보내고 시작한다(안 그러면 브라우저에 오류만 뜬다) */
+    bool can = hub_zigbee_can_join();
+    esp_err_t r;
+    if (admin) {                                     /* 관리 화면 버튼: 되돌아가지 않고 안내만(Wi-Fi 가 곧 멈춘다) */
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        r = httpd_resp_sendstr(req, can
+            ? "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+              "<p>Zigbee 가입 시도를 시작합니다. 최대 3분 동안 허브의 Wi-Fi 가 멈췄다 돌아옵니다.</p>"
+              "<p>SmartThings 앱에서 <b>기기 추가 → 주변 기기 검색</b>을 해 두세요. 끝나면 <a href=/admin>관리 화면</a>으로 돌아가세요.</p>"
+            : "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+              "<p>이미 Zigbee 망에 가입돼 있거나 Zigbee 를 쓰지 않습니다.</p><p><a href=/admin>관리 화면으로</a></p>");
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        r = httpd_resp_sendstr(req, can ? "{\"ok\":true,\"note\":\"3분간 가입 시도(그동안 Wi-Fi 멈춤)\"}"
+                                        : "{\"ok\":false,\"note\":\"이미 가입됐거나 Zigbee 를 쓰지 않음\"}");
     }
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, started ? "{\"ok\":true,\"note\":\"3분간 가입 시도(그동안 Wi-Fi 멈춤)\"}"
-                                           : "{\"ok\":false,\"note\":\"이미 가입됐거나 Zigbee 를 쓰지 않음\"}");
+    if (can) {
+        vTaskDelay(pdMS_TO_TICKS(500));              /* 응답이 나갈 시간 */
+        hub_zigbee_join_now();
+    }
+    return r;
 }
 
 void hub_events_register(httpd_handle_t srv)

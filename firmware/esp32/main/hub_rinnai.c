@@ -75,6 +75,7 @@ typedef struct {
 static rk_dev_t s_dev[MAX_DEV];
 
 static bool s_links_dirty = true;   /* 연결 목록을 다시 보낼지 */
+static bool s_expose_dirty;         /* 노출 마스크를 다시 보낼지(refresh 가 표시, zb_task 가 보냄) */
 static TaskHandle_t s_task;
 
 static void lock(void) { xSemaphoreTake(s_lock, portMAX_DELAY); }
@@ -376,7 +377,7 @@ hub_link_tap_t *hub_rinnai_link_open(uint32_t peer_ip)
         t->peer_ip = peer_ip;
         t->refused = false;
         if (!t->cmds) {
-            t->cmds = xQueueCreate(4, sizeof(cmd_t *));
+            t->cmds = xQueueCreate(16, sizeof(cmd_t *));   /* 방 7개에 한꺼번에(외출 등) + 여유 */
         }
         t->used = true;
     }
@@ -447,9 +448,10 @@ static bool token_ok(const char *s, int n, int max)
 /* 기기에 보내도 되는 쓰기 코드(드라이버가 쓰는 것, 실기로 확인한 것). 새 기능은 여기에 더한다.
  *   80 전원  b1 난방  b3 외출  b4 난방 방식  d1 온수 온도  df (d1 과 같이)  d2 난방수 온도  d4 실내 온도
  *   a0 각방 번호  96 예약 켜기  97 예약 간격 */
+/* 드라이버(edge-driver/src/core.lua)가 보내는 코드와 같아야 한다 — 드라이버 시험(sim.lua)이 이 줄을 읽어 대조한다 */
 static bool code_allowed(const char *c)
 {
-    static const char *const OK[] = { "80", "b1", "b3", "b4", "d1", "df", "d2", "d4", "a0", "96", "97" };
+    static const char *const OK[] = { "80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97" };
     for (size_t i = 0; i < sizeof(OK) / sizeof(OK[0]); i++) {
         if (!strcmp(c, OK[i])) {
             return true;
@@ -553,16 +555,18 @@ static void command_one(const char *text, int len)
     memcpy(s, text, len);
     s[len] = 0;
     if (!strcmp(s, "refresh")) {
+        /* 여기는 Zigbee 스택 잠금을 쥔 콜백 안일 수 있다 — 표시만 하고 보내기는 zb_task 가 한다.
+         * (노출 잠금을 여기서 잡으면, 노출 잠금을 쥐고 Zigbee 로 보내려는 다른 태스크와 서로 기다린다) */
         lock();
         for (int i = 0; i < MAX_DEV; i++) {
-            if (s_dev[i].used) {
-                s_dev[i].dirty = s_dev[i].n > 0;
+            if (s_dev[i].used) {       /* 연결된 기기만 — 끊긴 기기의 옛 상태를 보내면 드라이버가 온라인으로 본다 */
+                s_dev[i].dirty = s_dev[i].n > 0 && find_tap(s_dev[i].kind, s_dev[i].mac3) != NULL;
             }
         }
         s_links_dirty = true;
+        s_expose_dirty = true;         /* 노출 마스크도 다시(드라이버 재시작 후 비트 재동기화) */
         unlock();
         kick();
-        hub_expose_send_all();     /* 노출 마스크도 다시(드라이버 재시작 후 비트 재동기화) */
         return;
     }
     uint8_t kind = !strncmp(s, "f06", 3) ? HUB_KIND_F06 : !strncmp(s, "f09", 3) ? HUB_KIND_F09 : 0;
@@ -670,9 +674,15 @@ static void zb_task(void *arg)
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
         bool beat = xTaskGetTickCount() - last_beat >= pdMS_TO_TICKS(HEARTBEAT_S * 1000);
+        lock();
+        bool expose = s_expose_dirty;
+        s_expose_dirty = false;
+        unlock();
         if (beat) {
             last_beat = xTaskGetTickCount();
-            hub_expose_send_all();     /* 주기적으로 노출 마스크도(드라이버 재시작 후 동기화) */
+        }
+        if (beat || expose) {
+            hub_expose_send_all();     /* 주기적으로 + refresh 때 노출 마스크도(드라이버 재시작 후 동기화) */
         }
         if (xTaskGetTickCount() - last_poll >= pdMS_TO_TICKS(POLL_S * 1000)) {
             last_poll = xTaskGetTickCount();

@@ -477,6 +477,25 @@ static struct {
     int64_t until, last;
 } s_login[LOGIN_SLOTS];
 
+/* 주소를 바꿔 가며 틀리는 것 막기: 모든 주소의 실패를 합쳐 LOGIN_GMAX 번이면 5분 동안, 이번 부팅에 로그인에 성공한 적
+ * 없는 주소는 받지 않는다(성공한 적 있는 관리자 주소는 그대로 — 남이 일부러 틀려 관리자를 막지 못하게). */
+#define LOGIN_GMAX   20
+#define LOGIN_GOOD   4
+static int s_gfail;
+static int64_t s_glast, s_glock_until;
+static uint32_t s_good_ip[LOGIN_GOOD];
+static int s_good_n;
+
+static bool login_good_ip(uint32_t ip)
+{
+    for (int i = 0; i < LOGIN_GOOD; i++) {
+        if (ip && s_good_ip[i] == ip) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static uint32_t req_ip(httpd_req_t *req)
 {
     struct sockaddr_storage a;
@@ -488,9 +507,14 @@ static uint32_t req_ip(httpd_req_t *req)
         return ((struct sockaddr_in *)&a)->sin_addr.s_addr;
     }
 #if LWIP_IPV6
-    if (a.ss_family == AF_INET6) {
+    if (a.ss_family == AF_INET6) {              /* ::ffff:a.b.c.d (IPv4-mapped) 만 IPv4 로 본다 — 진짜 IPv6 는 0(모름) */
+        static const uint8_t MAPPED[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+        const uint8_t *b = ((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr;
         uint32_t v;
-        memcpy(&v, &((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr[12], 4);
+        if (memcmp(b, MAPPED, 12)) {
+            return 0;
+        }
+        memcpy(&v, b + 12, 4);
         return v;
     }
 #endif
@@ -527,7 +551,8 @@ static esp_err_t login_post(httpd_req_t *req)
     }
     uint32_t ip = req_ip(req);
     int ls = login_slot(ip, false);
-    if (ls >= 0 && esp_timer_get_time() < s_login[ls].until) {
+    if ((ls >= 0 && esp_timer_get_time() < s_login[ls].until) ||
+        (esp_timer_get_time() < s_glock_until && !login_good_ip(ip))) {
         memset(body, 0, sizeof(body));
         return login_page(req, "암호를 여러 번 틀려 5분 동안 잠겼습니다. 잠시 뒤 다시 하세요");
     }
@@ -539,6 +564,15 @@ static esp_err_t login_post(httpd_req_t *req)
         vTaskDelay(pdMS_TO_TICKS(1000));             /* 암호 맞히기 늦추기 */
         ls = login_slot(ip, true);
         s_login[ls].last = esp_timer_get_time();
+        if (s_login[ls].last - s_glast > 10LL * 60 * 1000000) {
+            s_gfail = 0;                               /* 10분 넘게 조용했으면 합계는 처음부터 */
+        }
+        s_glast = s_login[ls].last;
+        if (++s_gfail >= LOGIN_GMAX) {
+            s_gfail = 0;
+            s_glock_until = s_glast + LOGIN_LOCK_US;
+            ESP_LOGW(TAG, "관리자 암호를 여러 주소에서 %d번 틀림 — 로그인한 적 없는 주소는 5분 잠금", LOGIN_GMAX);
+        }
         if (++s_login[ls].fail >= LOGIN_MAX_FAIL) {
             s_login[ls].fail = 0;
             s_login[ls].until = esp_timer_get_time() + LOGIN_LOCK_US;
@@ -549,6 +583,9 @@ static esp_err_t login_post(httpd_req_t *req)
     }
     if (ls >= 0) {
         s_login[ls].fail = 0;
+    }
+    if (!login_good_ip(ip)) {
+        s_good_ip[s_good_n++ % LOGIN_GOOD] = ip;
     }
     uint8_t rnd[16];
     esp_fill_random(rnd, sizeof(rnd));

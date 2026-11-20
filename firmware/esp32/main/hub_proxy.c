@@ -484,9 +484,14 @@ static uint32_t peer_ip(int fd)
         return ((struct sockaddr_in *)&a)->sin_addr.s_addr;
     }
 #if LWIP_IPV6
-    if (a.ss_family == AF_INET6) {
+    if (a.ss_family == AF_INET6) {              /* ::ffff:a.b.c.d (IPv4-mapped) 만 IPv4 로 본다 — 진짜 IPv6 는 0(모름) */
+        static const uint8_t MAPPED[12] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+        const uint8_t *b = ((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr;
         uint32_t v;
-        memcpy(&v, &((struct sockaddr_in6 *)&a)->sin6_addr.s6_addr[12], 4);
+        if (memcmp(b, MAPPED, 12)) {
+            return 0;
+        }
+        memcpy(&v, b + 12, 4);
         return v;
     }
 #endif
@@ -500,12 +505,14 @@ static const char *mqtt_name(uint8_t b0)
     return n[b0 >> 4];
 }
 
-/* 한쪽에서 읽어 다른 쪽으로 쓴다. 0 이하면 연결 종료. 지나가는 바이트는 hub_rinnai 가 엿본다(상태·패킷 경계). */
+/* 한쪽에서 읽어 다른 쪽으로 쓴다. 음수면 연결 종료, 0 = 아직 넘길 데이터 없음(끊지 않는다).
+ * 0 인 경우: 앱 데이터가 없는 TLS 기록(세션 티켓·키 갱신)만 왔거나, 기록이 반만 오고 RELAY_READ_SEC 가 지남 —
+ * 읽은 조각은 wolfSSL 이 갖고 있다가 나머지가 오면 잇는다. 지나가는 바이트는 hub_rinnai 가 엿본다(상태·패킷 경계). */
 static int pump(WOLFSSL *from, WOLFSSL *to, const char *arrow, char *buf, int cap, hub_link_tap_t *tap, bool down)
 {
     int n = wolfSSL_read(from, buf, cap);
     if (n <= 0) {
-        return n;
+        return wolfSSL_get_error(from, n) == WOLFSSL_ERROR_WANT_READ ? 0 : -1;
     }
     if ((buf[0] >> 4) != 12 && (buf[0] >> 4) != 13) {          /* 핑은 로그 생략 */
         ESP_LOGI(TAG, "%s %s %d바이트", arrow, mqtt_name((uint8_t)buf[0]), n);
@@ -635,6 +642,9 @@ static int broker_loop(WOLFSSL *down, int fd, char *buf, hub_link_tap_t *tap, ui
         }
         int n = wolfSSL_read(down, acc + an, 2048 - an);
         if (n <= 0) {
+            if (wolfSSL_get_error(down, n) == WOLFSSL_ERROR_WANT_READ) {
+                continue;                            /* 기록이 반만 왔거나 앱 데이터 없는 기록 — 끊지 않고 다음 바퀴(유휴 감시는 그대로) */
+            }
             closer = 1;
             break;
         }
@@ -839,21 +849,21 @@ static void link_task(void *arg)
                 continue;
             }
             last_io = esp_timer_get_time();
-            if (FD_ISSET(down_fd, &rd) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) <= 0) {
+            if (FD_ISSET(down_fd, &rd) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) < 0) {
                 closer = 1;
                 break;
             }
-            if (FD_ISSET(up_fd, &rd) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) <= 0) {
+            if (FD_ISSET(up_fd, &rd) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) < 0) {
                 closer = 2;
                 break;
             }
         } else {
             last_io = esp_timer_get_time();
-            if (wolfSSL_pending(down) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) <= 0) {
+            if (wolfSSL_pending(down) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) < 0) {
                 closer = 1;
                 break;
             }
-            if (wolfSSL_pending(up) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) <= 0) {
+            if (wolfSSL_pending(up) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) < 0) {
                 closer = 2;
                 break;
             }
