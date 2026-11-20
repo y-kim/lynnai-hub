@@ -1,11 +1,15 @@
 name: lynnai-hub
 components:
   - id: main
+    label: LYNNAI 허브
     capabilities:
-      - id: temperatureMeasurement
-        version: 1
-        optional: true          # 허브 칩 온도 — 관리 화면 노출 설정(비트 11)에서 끌 수 있음
       - id: refresh
         version: 1
     categories:
-      - name: Thermostat
+      - name: Bridge
+  - id: chip
+    label: 허브 내부 온도
+    capabilities:
+      - id: temperatureMeasurement
+        version: 1
+        optional: true          # 허브 칩 온도(방 온도 아님) — 노출 설정(비트 11)에서 켜면 이 하위 상태로만 보임

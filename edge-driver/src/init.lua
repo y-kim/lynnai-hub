@@ -15,6 +15,15 @@ local core = require "core"
 local CLUSTER = 0xFC31
 local CMD_REQUEST = 0x00
 local HUB_EP = 10
+local TEMP_CLUSTER = 0x0402      -- 표준 Zigbee 온도 클러스터(허브 칩 온도)
+
+-- 허브 칩 온도는 main 이 아니라 'chip' 하위 컴포넌트로 보낸다(본체 타일을 온도계로 만들지 않게).
+local function on_chip_temp(_, device, value)
+  if value and value.value then
+    device:emit_component_event(device.profile.components.chip,
+      require("st.capabilities").temperatureMeasurement.temperature({ value = value.value / 100.0, unit = "C" }))
+  end
+end
 
 local driver
 
@@ -59,10 +68,12 @@ end
 
 local driver_template = {
   supported_capabilities = {
-    capabilities.temperatureMeasurement,
     capabilities.refresh,
   },
   zigbee_handlers = {
+    attr = {
+      [TEMP_CLUSTER] = { [0x0000] = on_chip_temp },   -- 칩 온도 → chip 컴포넌트
+    },
     cluster = {
       [CLUSTER] = {
         [0x01] = from_hub(0x01),

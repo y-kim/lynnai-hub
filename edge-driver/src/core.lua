@@ -694,7 +694,7 @@ local function apply_hub_caps(parent)
   if applied[parent.id] == sig then return end
   applied[parent.id] = sig
   log.info("허브 온도 " .. (#want > 0 and "보임" or "숨김"))
-  parent:try_update_metadata({ profile = "lynnai-hub", optional_component_capabilities = { { "main", want } } })
+  parent:try_update_metadata({ profile = "lynnai-hub", optional_component_capabilities = { { "chip", want } } })
 end
 
 -- 이 통로에 무엇을 보일지(관리 화면 '노출'). 종류별 컨트롤 마스크 + 기기·방별 숨김.

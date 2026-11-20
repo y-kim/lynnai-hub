@@ -349,10 +349,10 @@ print("[13] 노출: 허브 칩 온도(비트 11) 끄고 켜기")
 reset()
 expose(0x7FFFFFFF & ~(1 << 11), {})
 local hc = hub._caps or {}
-check(hc.main ~= nil and not hc.main["temperatureMeasurement"], "비트 11 끔 → 허브 온도 숨김")
+check(hc.chip ~= nil and not hc.chip["temperatureMeasurement"], "비트 11 끔 → 허브 온도 숨김")
 expose(0x7FFFFFFF, {})
 hc = hub._caps or {}
-check(hc.main and hc.main["temperatureMeasurement"], "비트 11 켬 → 허브 온도 보임")
+check(hc.chip and hc.chip["temperatureMeasurement"], "비트 11 켬 → 허브 온도 보임")
 
 print("[14] 각방 '예약' 스위치(f09 96/97)·상태(stat 0x08)")
 reset()
