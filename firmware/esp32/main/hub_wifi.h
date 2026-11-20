@@ -24,6 +24,7 @@ esp_err_t hub_wifi_sta_temp_open(const char *ssid, uint32_t *ip_out);
 /* 허브 AP 쪽 IP(네트워크 바이트 순서) */
 uint32_t hub_wifi_ap_ip(void);
 bool hub_wifi_is_ap_peer(uint32_t ip);
+void hub_wifi_scan_print(void);   /* USB 진단 "scan": 들리는 AP 의 채널·신호 */
 typedef struct {
     uint8_t mac[6];
     uint32_t ip;            /* DHCP 로 준 주소(네트워크 순서), 모르면 0 */
@@ -32,6 +33,7 @@ int hub_wifi_ap_stations(hub_ap_sta_t *out, int max);   /* 지금 허브 AP 에 
 bool hub_wifi_ap_peer_is(uint32_t ip, const uint8_t mac[6]);   /* 이 MAC 이 AP 에 붙어 있고 그 주소가 ip 인가 */   /* 상대 IPv4(네트워크 순서)가 허브 AP 대역인가 */
 
 /* 2.4GHz 라디오 공유: Zigbee 가입(steering) 동안 Wi-Fi 를 멈췄다가 다시 켠다. */
+void hub_wifi_sta_release(void);       /* 부팅 때 미뤄 둔 Wi-Fi(AP·집 Wi-Fi)를 켠다(Zigbee 재가입 결과가 나왔을 때. 안 불러도 13초 뒤) */
 void hub_wifi_radio_pause(void);
 void hub_wifi_radio_resume(void);
 bool hub_wifi_radio_paused(void);     /* 지금 멈춰 둔 상태인가(진단: 이때의 STA 끊김은 오류 아님) */

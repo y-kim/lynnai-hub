@@ -340,6 +340,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case EZB_BDB_SIGNAL_DEVICE_REBOOT: {
         ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
+        hub_wifi_sta_release();             /* 부팅 재가입 결과가 나왔다 — 미뤄 둔 집 Wi-Fi 접속 시작 */
         zb_join_session_end();              /* 재초기화 세션이었다면 Wi-Fi 다시 켬 */
         if (status == EZB_BDB_STATUS_SUCCESS) {
             s_init_backoff_ms = 30000;
@@ -552,5 +553,6 @@ void app_main(void)
         xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", 4096, NULL, 5, NULL);
     } else {
         ESP_LOGI(TAG, "Zigbee 를 쓰지 않음(연결 방식) — Zigbee 스택 시작 안 함");
+        hub_wifi_sta_release();             /* 기다릴 Zigbee 재가입이 없다 */
     }
 }

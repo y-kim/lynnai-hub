@@ -33,11 +33,86 @@ static esp_netif_t *s_sta_netif;
 static bool s_sta_on;
 static esp_timer_handle_t s_retry_timer;
 
+/* 부팅 직후엔 Wi-Fi(허브 AP 와 집 Wi-Fi 접속 모두)를 켜지 않고 Zigbee 재가입에 라디오를 먼저 내준다. 라디오가 하나라
+ * Wi-Fi 가 켜져 있으면(AP 는 늘 듣고 있어야 한다) Zigbee 재가입 시도가 셋 중 하나꼴로 실패하고(실측: 재가입이 1.5초 →
+ * 4.2초 → 6.9초로 밀림), 네 번 연달아 실패하면 그 부팅은 Zigbee 없이 뜬다. 재가입 결과가 나올 때(hub_wifi_sta_release)
+ * 또는 STA_HOLD_MS(재가입 한 바퀴 ≈ 12초)가 지나면 Wi-Fi 를 켠다. */
+#define STA_HOLD_MS 13000
+static bool s_radio_paused;            /* Zigbee 가입 세션 동안 Wi-Fi 를 멈춰 둔 상태 */
+static volatile bool s_sta_hold;
+static esp_timer_handle_t s_hold_timer;
+
+/* 약한 AP 에 붙어 있으면 잠시 뒤 다시 훑어, 같은 이름의 훨씬 센 AP 가 있으면 옮겨 간다. 접속 순간의 스캔이 가까운 AP 를
+ * 놓쳐(그때 Zigbee 가 라디오를 쓰고 있으면 흔하다) 먼 AP(-90dBm)에 붙은 채 지내는 일을 막는다. 훑는 동안 허브 AP 가
+ * 잠깐 느려질 수 있어, 신호가 약할 때만·부팅당 ROAM_MAX 번까지만 한다. */
+#define ROAM_FIRST_US  (90LL * 1000000)
+#define ROAM_AGAIN_US  (30LL * 60 * 1000000)
+#define ROAM_WEAK_DBM  (-75)
+#define ROAM_GAIN_DB   15
+#define ROAM_MAX       3
+static esp_timer_handle_t s_roam_timer;
+static volatile bool s_roam_scan;
+static int s_roam_n;
+static char s_sta_ssid[33];
+static wifi_ap_record_t s_roam_ap[6];
+
+static void roam_cb(void *arg)
+{
+    wifi_ap_record_t ap;
+    if (!s_sta_on || s_sta_hold || s_radio_paused || s_roam_n >= ROAM_MAX || esp_wifi_sta_get_ap_info(&ap) != ESP_OK ||
+        ap.rssi >= ROAM_WEAK_DBM) {
+        return;
+    }
+    wifi_scan_config_t sc = { .ssid = (uint8_t *)s_sta_ssid };
+    if (esp_wifi_scan_start(&sc, false) == ESP_OK) {
+        s_roam_scan = true;                           /* 결과는 SCAN_DONE 에서 */
+    }
+    esp_timer_start_once(s_roam_timer, ROAM_AGAIN_US);   /* 여전히 약하면 한참 뒤 다시 */
+}
+
+static void roam_decide(void)
+{
+    uint16_t n = sizeof(s_roam_ap) / sizeof(s_roam_ap[0]);
+    wifi_ap_record_t cur;
+    if (esp_wifi_scan_get_ap_records(&n, s_roam_ap) != ESP_OK || esp_wifi_sta_get_ap_info(&cur) != ESP_OK) {
+        return;
+    }
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        if (memcmp(s_roam_ap[i].bssid, cur.bssid, 6) && !strcmp((char *)s_roam_ap[i].ssid, s_sta_ssid) &&
+            (best < 0 || s_roam_ap[i].rssi > s_roam_ap[best].rssi)) {
+            best = i;
+        }
+    }
+    if (best >= 0 && s_roam_ap[best].rssi >= cur.rssi + ROAM_GAIN_DB) {
+        s_roam_n++;
+        ESP_LOGW(TAG, "집 Wi-Fi 신호 약함(%d dBm) — 더 센 AP(채널 %d, %d dBm)로 옮김", cur.rssi, s_roam_ap[best].primary,
+                 s_roam_ap[best].rssi);
+        esp_wifi_disconnect();                        /* 끊김 처리에서 다시 접속 — 전 채널을 훑어 가장 센 AP 를 고른다 */
+    }
+}
+
 static void retry_cb(void *arg)
 {
-    if (s_sta_on) {
+    if (s_sta_on && !s_sta_hold) {
         esp_wifi_connect();
     }
+}
+
+void hub_wifi_sta_release(void)
+{
+    if (!s_sta_hold) {
+        return;
+    }
+    s_sta_hold = false;
+    if (!s_radio_paused) {
+        esp_wifi_start();                             /* 설정은 hub_wifi_start 가 해 뒀다. STA 는 STA_START 에서 접속 */
+    }
+}
+
+static void hold_cb(void *arg)
+{
+    hub_wifi_sta_release();
 }
 
 /* AP 기기별 접속 시각(유지 시간 계산용) */
@@ -82,7 +157,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             break;
         }
         case WIFI_EVENT_STA_START:
-            if (s_sta_on) {
+            if (s_sta_on && !s_sta_hold) {
                 esp_wifi_connect();
             }
             break;
@@ -90,18 +165,27 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             const wifi_event_sta_connected_t *e = data;
             ESP_LOGI(TAG, "집 Wi-Fi 연결됨: 채널 %d (허브 AP 도 이 채널로)", e->channel);
             hub_event(EV_STA_UP, e->bssid, e->channel, 0);
+            esp_timer_stop(s_roam_timer);
+            esp_timer_start_once(s_roam_timer, ROAM_FIRST_US);
             break;
         }
         case WIFI_EVENT_STA_DISCONNECTED: {
             const wifi_event_sta_disconnected_t *e = data;
             ESP_LOGW(TAG, "집 Wi-Fi 끊김(사유 %d) — 10초 뒤 재시도", e->reason);
             hub_event(EV_STA_DOWN, e->bssid, e->reason, 0);
+            esp_timer_stop(s_roam_timer);
             if (s_sta_on) {
                 esp_timer_stop(s_retry_timer);
                 esp_timer_start_once(s_retry_timer, STA_RETRY_US);
             }
             break;
         }
+        case WIFI_EVENT_SCAN_DONE:
+            if (s_roam_scan) {
+                s_roam_scan = false;
+                roam_decide();
+            }
+            break;
         default:
             break;
         }
@@ -140,6 +224,8 @@ esp_err_t hub_wifi_init(void)
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, NULL), TAG, "ip ev");
     const esp_timer_create_args_t t = { .callback = retry_cb, .name = "sta_retry" };
     ESP_RETURN_ON_ERROR(esp_timer_create(&t, &s_retry_timer), TAG, "timer");
+    const esp_timer_create_args_t rt = { .callback = roam_cb, .name = "sta_roam" };
+    ESP_RETURN_ON_ERROR(esp_timer_create(&rt, &s_roam_timer), TAG, "roam timer");
     return ESP_OK;
 }
 
@@ -166,14 +252,28 @@ esp_err_t hub_wifi_start(const hub_state_t *st)
 
         wifi_config_t sta = { 0 };
         strlcpy((char *)sta.sta.ssid, st->sta_ssid, sizeof(sta.sta.ssid));
+        strlcpy(s_sta_ssid, st->sta_ssid, sizeof(s_sta_ssid));
         strlcpy((char *)sta.sta.password, st->sta_pass, sizeof(sta.sta.password));
         sta.sta.threshold.authmode = st->sta_pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
         sta.sta.pmf_cfg.capable = true;
+        /* 같은 이름의 AP 가 여럿(메시)이면 신호가 가장 센 것에 붙는다. 기본값(빠른 스캔)은 낮은 채널에서 먼저 찾은 AP 에
+         * 붙어, 먼 AP(-88dBm)에 붙은 채로 지내는 일이 있었다. 전 채널을 훑느라 접속이 1~2초 늦다. */
+        sta.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        sta.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
         ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "mode");
         ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap), TAG, "ap cfg");
         ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &sta), TAG, "sta cfg");
         ESP_LOGI(TAG, "전용 AP '%s'(WPA2) + 집 Wi-Fi '%s' 연결 시도", st->ap_ssid, st->sta_ssid);
+        if (!s_hold_timer) {                          /* 부팅 때 한 번: Zigbee 재가입에 라디오를 먼저 내준다 */
+            const esp_timer_create_args_t ht = { .callback = hold_cb, .name = "sta_hold" };
+            if (esp_timer_create(&ht, &s_hold_timer) == ESP_OK) {
+                s_sta_hold = true;
+                esp_timer_start_once(s_hold_timer, (uint64_t)STA_HOLD_MS * 1000);
+                ESP_LOGI(TAG, "Wi-Fi 는 Zigbee 재가입 뒤에 켠다(길어도 %d초)", STA_HOLD_MS / 1000);
+                return ESP_OK;
+            }
+        }
     }
     return esp_wifi_start();
 }
@@ -188,7 +288,6 @@ esp_err_t hub_wifi_apply(const hub_state_t *st)
 
 /* Zigbee 가입(steering) 동안 2.4GHz 라디오를 Zigbee 에 양보하려고 Wi-Fi 를 잠깐 멈춘다.
  * 설정(mode/config)은 남으므로 resume 은 다시 start 만 하면 된다(STA 재접속은 STA_START 핸들러). */
-static bool s_radio_paused;
 
 void hub_wifi_radio_pause(void)
 {
@@ -208,7 +307,9 @@ void hub_wifi_radio_resume(void)
     }
     s_radio_paused = false;
     ESP_LOGI(TAG, "Zigbee 가입 끝: Wi-Fi 재개");
-    esp_wifi_start();           /* 저장된 mode/config 로 복귀, STA 는 STA_START 에서 재접속 */
+    if (!s_sta_hold) {          /* 부팅 보류 중이면 hub_wifi_sta_release 가 켠다 */
+        esp_wifi_start();       /* 저장된 mode/config 로 복귀, STA 는 STA_START 에서 재접속 */
+    }
 }
 
 bool hub_wifi_radio_paused(void) { return s_radio_paused; }
@@ -303,6 +404,36 @@ esp_err_t hub_wifi_scan_prefix(const char *prefix, char *out, size_t len)
     }
     free(r);
     return res;
+}
+
+/* USB 진단 "scan": 허브가 지금 듣는 AP 들(채널·신호). 무선이 안 좋을 때 어느 대역이 안 들리는지 본다. */
+void hub_wifi_scan_print(void)
+{
+    wifi_scan_config_t sc = { 0 };
+    esp_err_t e = esp_wifi_scan_start(&sc, true);
+    if (e != ESP_OK) {
+        printf("#scan 실패: %s\n", esp_err_to_name(e));
+        return;
+    }
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    if (n > 24) {
+        n = 24;
+    }
+    wifi_ap_record_t *r = n ? calloc(n, sizeof(*r)) : NULL;
+    if (r) {
+        esp_wifi_scan_get_ap_records(&n, r);
+    } else {
+        esp_wifi_clear_ap_list();
+        n = 0;
+    }
+    printf("#SCAN-BEGIN %u\n", n);
+    for (int i = 0; i < n; i++) {
+        printf("ap ch=%u rssi=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x ssid=%s\n", r[i].primary, r[i].rssi, r[i].bssid[0],
+               r[i].bssid[1], r[i].bssid[2], r[i].bssid[3], r[i].bssid[4], r[i].bssid[5], (char *)r[i].ssid);
+    }
+    printf("#SCAN-END\n");
+    free(r);
 }
 
 /* STA 를 개방 AP(ssid)로 잠깐 옮겨 붙이고 DHCP IP 를 기다린다(자동 재시도는 끈다). */

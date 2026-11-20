@@ -167,6 +167,15 @@ static void dump(void)
         extern bool g_zb_nvs_was_reset;
         printf("zb joined=%d factory_new=%d nvs_reset=%d pan=0x%04x ch=%d short=0x%04x\n", joined, fresh,
                g_zb_nvs_was_reset, pan, ch, sa);
+        /* 이웃(부모) 신호: Zigbee 링크가 약한지 본다. rssi 가 -85 아래면 재가입이 들쭉날쭉할 수 있다 */
+        ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
+        ezb_nwk_neighbor_info_t nb;
+        esp_zigbee_lock_acquire(portMAX_DELAY);
+        for (int i = 0; i < 8 && ezb_nwk_get_next_neighbor(&it, &nb) == EZB_ERR_NONE; i++) {
+            printf("zb nbr short=0x%04x rel=%d type=%d lqi=%d rssi=%d\n", nb.short_addr, nb.relationship, nb.device_type,
+                   nb.lqi, nb.rssi);
+        }
+        esp_zigbee_lock_release();
     } else {
         printf("zb ready=0\n");
     }
@@ -224,6 +233,8 @@ static void on_line(char *l)
         dump();
     } else if (!strcmp(l, "crypt")) {
         hub_crypt_print();
+    } else if (!strcmp(l, "scan")) {
+        hub_wifi_scan_print();
     } else if (!strncmp(l, "devs", 4)) {
         hub_devs_usb(l + 4);
 #if HUB_CRYPT_SELFTEST
