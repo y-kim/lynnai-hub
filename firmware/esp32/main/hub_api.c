@@ -161,6 +161,7 @@ deny:
 
 typedef struct {
     bool ok, power, heat, outing, hotwater, preheat, indoor;
+    bool heat_burn, hw_burn;        /* 실제 연소 중(난방/온수) — 스펙 heatCombustionStatus/hotWaterCombustionStatus */
     int hw_set, ondol_set, room_set;
 } boiler_t;
 
@@ -177,6 +178,8 @@ static boiler_t decode_boiler(const uint8_t *b, int n)
     r.power = nib(b, 0) == 1;
     r.heat = nib(b, 2) == 1;
     r.hotwater = nib(b, 3) == 1;
+    r.heat_burn = nib(b, 8) == 1;   /* 난방 연소 중 */
+    r.hw_burn = nib(b, 9) == 1;     /* 온수 연소 중 */
     r.preheat = nib(b, 5) == 1;
     r.indoor = nib(b, 7) == 1;
     r.outing = nib(b, 19) == 1;
@@ -293,6 +296,7 @@ static esp_err_t state_get(httpd_req_t *req)
         CHUNK("\"boiler\":{\"power\":%s,\"heat\":%s,\"outing\":%s,\"hotwater\":%s,\"preheat\":%s,\"heat_mode\":\"%s\",",
               bo.power ? "true" : "false", bo.heat ? "true" : "false", bo.outing ? "true" : "false",
               bo.hotwater ? "true" : "false", bo.preheat ? "true" : "false", bo.indoor ? "indoor" : "ondol");
+        CHUNK("\"heat_burn\":%s,\"hw_burn\":%s,", bo.heat_burn ? "true" : "false", bo.hw_burn ? "true" : "false");
         CHUNK("\"heat_set\":%d,\"ondol_set\":%d,\"room_set\":%d,\"hw_set\":%d,\"raw\":\"%s\"},",
               bo.indoor ? bo.room_set : bo.ondol_set, bo.ondol_set, bo.room_set, bo.hw_set, raw);
     } else {
@@ -409,6 +413,7 @@ static esp_err_t metrics_get(httpd_req_t *req)
         if (!bo.ok) continue;
         const char *m = MACSTR3(dev[i]);
         CHUNK("lynnai_boiler_on{mac=\"%s\",what=\"power\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"heat\"} %d\n", m, bo.power, m, bo.heat);
+        CHUNK("lynnai_boiler_on{mac=\"%s\",what=\"heat_burn\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"hw_burn\"} %d\n", m, bo.heat_burn, m, bo.hw_burn);
         CHUNK("lynnai_boiler_on{mac=\"%s\",what=\"outing\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"hotwater\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"preheat\"} %d\n",
               m, bo.outing, m, bo.hotwater, m, bo.preheat);
     }

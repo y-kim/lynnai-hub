@@ -16,6 +16,8 @@
 #include "freertos/queue.h"
 
 #include "hub_rinnai.h"
+#include "hub_events.h"
+#include "hub_sensors.h"
 #include "hub_wifi.h"
 #include "hub_proxy.h"
 #include "hub_uplink.h"
@@ -73,7 +75,15 @@ typedef struct {
     uint8_t blob[HUB_BLOB_MAX];
     int n;
     bool dirty;
+    uint8_t burn;       /* f06: 마지막 연소 상태(비트 1 난방 2 온수) — 바뀔 때만 이벤트 */
+    uint8_t out_mask;   /* f09: 마지막 존별 외출 비트 — 바뀐 존만 이벤트 */
 } rk_dev_t;
+
+/* f06 연소·f09 외출 추출용. 각방 stat/현재온도 바이트 위치(hub_api.c ZONES 와 같은 순서 z1,z2,z4,z5,z6,z7,z3) */
+#define RK_NZ 7
+static const uint8_t RK_ZSTAT[RK_NZ] = { 0, 7, 14, 21, 28, 35, 42 };
+static const uint8_t RK_ZCUR[RK_NZ]  = { 3, 10, 17, 24, 31, 38, 45 };
+static int bnib(const uint8_t *b, int i) { return i % 2 ? b[i / 2] & 0xf : b[i / 2] >> 4; }
 static rk_dev_t s_dev[MAX_DEV];
 
 static bool s_links_dirty = true;   /* 연결 목록을 다시 보낼지 */
@@ -140,6 +150,8 @@ static rk_dev_t *dev_get(uint8_t kind, const uint8_t *mac3)
             memcpy(s_dev[i].mac3, mac3, 3);
             s_dev[i].n = 0;
             s_dev[i].dirty = false;
+            s_dev[i].burn = 0;
+            s_dev[i].out_mask = 0;
             return &s_dev[i];
         }
     }
@@ -353,15 +365,47 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
         }
         lock();
         rk_dev_t *d = dev_get(kind, t->mac3);
-        if (d && (d->n != bn || memcmp(d->blob, blob, bn))) {
+        bool changed = d && (d->n != bn || memcmp(d->blob, blob, bn));
+        bool burn_ch = false;
+        uint8_t burn_v = 0;
+        int out_ev[RK_NZ], nout = 0;             /* 항목: 존<<1 | (외출?1:0) */
+        if (changed) {
             memcpy(d->blob, blob, bn);
             d->n = bn;
             d->dirty = true;
-            unlock();
+            if (kind == HUB_KIND_F06 && bn > 4) {
+                uint8_t nb = (uint8_t)((bnib(blob, 8) ? 1 : 0) | (bnib(blob, 9) ? 2 : 0));
+                if (nb != d->burn) {
+                    d->burn = nb;
+                    burn_ch = true;
+                    burn_v = nb;
+                }
+            } else if (kind == HUB_KIND_F09) {
+                for (int z = 0; z < RK_NZ; z++) {
+                    int st = RK_ZSTAT[z];
+                    bool present = st < bn && (blob[st] || (RK_ZCUR[z] < bn && blob[RK_ZCUR[z]]));
+                    uint8_t bit = (present && (blob[st] & 0x10)) ? (uint8_t)(1 << z) : 0;
+                    if (bit != (d->out_mask & (1 << z))) {
+                        d->out_mask = (uint8_t)((d->out_mask & ~(1 << z)) | bit);
+                        out_ev[nout++] = (z << 1) | (bit ? 1 : 0);
+                    }
+                }
+            }
+        }
+        unlock();
+        if (changed) {
             ESP_LOGI(TAG, "f0%d %02x%02x%02x 상태 바뀜 (%d바이트)", kind, t->mac3[0], t->mac3[1], t->mac3[2], bn);
+            uint8_t m6[6] = { t->mac3[0], t->mac3[1], t->mac3[2], 0, 0, 0 };   /* 이벤트 mac 은 6바이트 */
+            if (burn_ch) {
+                gas_view_t gv;
+                uint32_t step;
+                uint32_t pulses = hub_sensors_gas(&gv, &step) ? gv.count : 0;
+                hub_event(EV_BOIL_BURN, m6, burn_v, (int32_t)pulses);   /* 가스↔연소 상관용 */
+            }
+            for (int k = 0; k < nout; k++) {
+                hub_event(EV_ROOM_OUT, m6, out_ev[k] >> 1, out_ev[k] & 1);
+            }
             kick();
-        } else {
-            unlock();
         }
         return;
     }

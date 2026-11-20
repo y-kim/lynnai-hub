@@ -47,7 +47,7 @@ static SemaphoreHandle_t s_lock;
 static const char *const NAMES[EV__COUNT] = {
     "boot", "ap_join", "ap_leave", "sta_up", "sta_down", "link_open", "link_dev_tls", "link_cloud_tls",
     "link_up", "link_close", "link_reject", "bootstrap", "zb_join_fail", "zb_joined", "zb_leave", "onboard",
-    "gas_pulse", "store_bad",
+    "gas_pulse", "store_bad", "boil_burn", "room_out",
 };
 
 static void ensure_init(void)

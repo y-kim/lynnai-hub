@@ -9,6 +9,7 @@ lynnai-hub-watch — LYNNAI 허브 장기 기록기 (표준 라이브러리만, 
 가스 사용량은 펄스 이벤트(정확한 시각)로 센다. 기록기가 잠시 멈춰도 허브 이벤트 버퍼(256개)
 안이면 나중에 그대로 채워진다. 그래프는 이 DB 를 Grafana(SQLite 플러그인) 등으로 보거나,
 허브 /metrics 를 Prometheus 로 따로 긁어도 된다.
+  python lynnai_hub_watch.py burn [시간]  — 가스↔연소(난방/온수) 상관, 각방 외출 전환 시각
 
   python lynnai_hub_watch.py                 # 기록 (컨테이너 lynnai-hub-watch)
   python lynnai_hub_watch.py summary [시간]   # 연결 품질 요약 (기본 24)
@@ -170,6 +171,38 @@ def main():
 
 # ---------------------------------------------------------------- 보기
 
+def burn(hours):
+    """가스↔연소 상관: boil_burn 이벤트로 모드별 구간을 만들고, 그 구간의 가스 사용(가스 누적펄스 델타)을 합산.
+    가스 하나하나는 gas_pulse 이벤트로도 있으니 시각으로 더 세밀히 맞출 수도 있다."""
+    c = db()
+    since = (datetime.now() - timedelta(hours=hours)).isoformat()
+    rows = c.execute("select ts, a, b from events where type='boil_burn' and ts>=? order by ts", (since,)).fetchall()
+    if len(rows) < 2:
+        print("boil_burn 이벤트가 부족합니다 (새 펌웨어 필요하거나 수집을 더 기다리세요)."); return
+    step = c.execute("select gas_l_total*1.0/gas_pulses from state where gas_pulses>0 order by ts desc limit 1").fetchone()
+    L = (step and step[0]) or 10.0                      # 1펄스 L
+    MODE = {0: "대기(연소 없음)", 1: "난방 연소", 2: "온수 연소", 3: "난방+온수"}
+    agg = {}                                             # mode -> [sec, pulses]
+    for (t1, a1, b1), (t2, a2, b2) in zip(rows, rows[1:]):
+        sec = (datetime.fromisoformat(t2) - datetime.fromisoformat(t1)).total_seconds()
+        dp = (b2 - b1) if (b2 is not None and b1 is not None and b2 >= b1) else 0
+        A = agg.setdefault(a1, [0.0, 0]); A[0] += sec; A[1] += dp
+    print(f"최근 {hours:g}시간 · 1펄스 {L:g} L · boil_burn 이벤트 {len(rows)}개")
+    print(f"{'모드':14} {'시간(분)':>9} {'가스(L)':>9} {'L/시간':>8}")
+    for m in sorted(agg):
+        sec, p = agg[m]; liters = p * L
+        print(f"{MODE.get(m, str(m)):14} {sec/60:9.1f} {liters:9.1f} {(liters/(sec/3600) if sec else 0):8.1f}")
+    heat = agg.get(1, [0, 0])[1] * L + agg.get(3, [0, 0])[1] * L
+    hw = agg.get(2, [0, 0])[1] * L
+    if heat + hw > 0:
+        print(f"\n가스 배분: 난방 {heat:.0f} L ({100*heat/(heat+hw):.0f}%) · 온수 {hw:.0f} L ({100*hw/(heat+hw):.0f}%)")
+    outs = c.execute("select ts, mac, a, b from events where type='room_out' and ts>=? order by ts", (since,)).fetchall()
+    if outs:
+        print("\n각방 외출 전환(최근 20):")
+        for ts, mac, a, b in outs[-20:]:
+            print(f"  {ts[:19]} 존{a} {'외출 켬' if b else '외출 끔'} (f09 {mac})")
+
+
 def summary(hours):
     c = db()
     since = (datetime.now() - timedelta(hours=hours)).isoformat()
@@ -246,5 +279,7 @@ if __name__ == "__main__":
         gas(int(arg or 14))
     elif cmd == "temps":
         temps(arg or 24)
+    elif cmd == "burn":
+        burn(arg or 24)
     else:
         main()
