@@ -13,6 +13,8 @@
 #include "esp_flash_encrypt.h"
 #include "esp_secure_boot.h"
 #include "bootloader_random.h"
+#include "esp_rom_crc.h"
+#include "mbedtls/aes.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "nvs_sec_provider.h"
@@ -68,15 +70,18 @@ static bool selectable(int k)
 
 static esp_err_t sec_cfg_hmac(int key, nvs_sec_cfg_t *cfg)
 {
-    static nvs_sec_scheme_t *sch;
-    if (!sch) {
+    static nvs_sec_scheme_t *sch[6];               /* 블록마다 따로(옛 형식 판별 때 여러 블록을 볼 수 있다) */
+    if (key < 0 || key > 5) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!sch[key]) {
         nvs_sec_config_hmac_t c = { .hmac_key_id = (hmac_key_id_t)key };
-        esp_err_t e = nvs_sec_provider_register_hmac(&c, &sch);
+        esp_err_t e = nvs_sec_provider_register_hmac(&c, &sch[key]);
         if (e != ESP_OK) {
             return e;
         }
     }
-    return nvs_flash_read_security_cfg_v2(sch, cfg);   /* 키가 없으면 실패(굽지 않는다) */
+    return nvs_flash_read_security_cfg_v2(sch[key], cfg);   /* 키가 없으면 실패(굽지 않는다) */
 }
 
 /* ---------------------------------------------------------------- 파티션 열기 */
@@ -326,12 +331,13 @@ static bool same(const char *part, const ent_t *l)
     return ok && n == m;
 }
 
-/* ---------------------------------------------------------------- 전환 저널 + 마커 (ota_1)
- * ota_1 은 OTA 를 쓰지 않아 비어 있다. 앞부분 = 전환 저널(원본 그대로의 백업 + 진행 단계), 마지막 4KB = 영구 마커.
+/* ---------------------------------------------------------------- 전환 저널 + 마커 (전용 영역 cryptj)
+ * 앞부분 = 전환 저널(원본 그대로의 백업 + 진행 단계), 마지막 4KB = 영구 마커.
  *   저널  [헤더 4KB][nvs 원본 24KB][zb_nvs 원본 64KB]   — 전환 중에만 있고, 끝나면 지운다(평문 비밀값이 남지 않게)
  *   단계  state 낱말의 비트를 지우지 않고 1→0 으로만 바꿔 기록: 백업됨 → 키 구움 → 완료
+ *         포기(평문으로 되돌림)는 tries 의 맨 윗비트로 따로 적는다 — state 를 쓰다 끊긴 값과 헷갈리지 않게
  *   마커  "우리가 KEY n 으로 암호화했다" — 부팅 때 이것이 있어야 암호화로 연다(다른 용도의 HMAC 키와 구분)
- * 나중에 OTA 를 넣으면 이 영역을 피해야 한다. */
+ */
 #define J_MAGIC  "LYNCRJ01"
 #define M_MAGIC  "LYNCRM01"
 #define ST_BACKUP 0xFFFFFFFFu
@@ -340,6 +346,7 @@ static bool same(const char *part, const ent_t *l)
 #define J_SEC     4096
 #define J_TRIES   3
 #define J_TEST    7                  /* 시험 빌드: 되돌리기만 하고 굽지 않는 시험 저널 */
+#define T_RESTORED 0x80000000u       /* tries 의 맨 윗비트를 지우면 "평문으로 되돌림 끝, 백업 지우기만 남음" */
 
 typedef struct {
     char magic[8];
@@ -367,7 +374,17 @@ static uint32_t crc32b(uint32_t c, const void *d, size_t n)
     return ~c;
 }
 
-static const esp_partition_t *ota1(void)
+/* 저널·마커 자리 = 전용 영역 "cryptj"(파티션 표 맨 뒤, 128KB). 앱 영역 두 칸(ota_0·ota_1)은 내장 라디오용·외부 라디오용
+ * 펌웨어가 하나씩 쓰므로(hub_radio) 거기엔 두지 않는다. 전용 영역이 없는 옛 파티션 표에서는 NULL —
+ * 그러면 암호화 켜기는 "백업 실패"로 그만두고, 이미 암호화한 허브는 옛 자리(ota_1 끝)의 마커를 읽기만 한다. */
+#define J_PART_LABEL "cryptj"
+static const esp_partition_t *jpart(void)
+{
+    return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, J_PART_LABEL);
+}
+
+/* 옛 자리: 전용 영역이 생기기 전엔 ota_1 의 끝 두 섹터에 마커를 뒀다(지금 ota_1 에 펌웨어가 들어 있어도 끝은 비어 있다) */
+static const esp_partition_t *legacy_part(void)
 {
     return esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
 }
@@ -380,9 +397,8 @@ static const esp_partition_t *data_part(const char *label)
 /* 마커는 두 벌(마지막 섹터, 그 앞 섹터) — 한 벌이 깨져도 평문으로 잘못 열지 않게(그러면 암호화된 항목이 다 지워진다) */
 #define M_OFF(o, n) ((o)->size - J_SEC * (size_t)((n) + 1))
 
-static int marker_read(int n)
+static int marker_read_p(const esp_partition_t *o, int n)
 {
-    const esp_partition_t *o = ota1();
     marker_t m;
     if (!o || esp_partition_read(o, M_OFF(o, n), &m, sizeof(m)) != ESP_OK || memcmp(m.magic, M_MAGIC, 8) ||
         m.key > 5 || m.crc != crc32b(0, &m, offsetof(marker_t, crc))) {
@@ -391,12 +407,27 @@ static int marker_read(int n)
     return (int)m.key;
 }
 
+static int marker_read(int n)
+{
+    return marker_read_p(jpart(), n);
+}
+
+static int legacy_marker(void)
+{
+    const esp_partition_t *o = legacy_part();
+    int a = marker_read_p(o, 0);
+    return a >= 0 ? a : marker_read_p(o, 1);
+}
+
 static esp_err_t marker_put(int n, int key)
 {
-    const esp_partition_t *o = ota1();
+    const esp_partition_t *o = jpart();
     marker_t m = { .key = (uint32_t)key };
     memcpy(m.magic, M_MAGIC, 8);
     m.crc = crc32b(0, &m, offsetof(marker_t, crc));
+    if (!o) {
+        return ESP_ERR_NOT_FOUND;
+    }
     esp_err_t e = esp_partition_erase_range(o, M_OFF(o, n), J_SEC);
     return e == ESP_OK ? esp_partition_write(o, M_OFF(o, n), &m, sizeof(m)) : e;
 }
@@ -410,25 +441,74 @@ static esp_err_t marker_write(int key)
 /* 어느 한 벌이라도 맞으면 그 키. 한 벌만 맞으면 다른 벌을 고쳐 둔다 */
 static int marker_key(void)
 {
+    if (!jpart()) {
+        return legacy_marker();                      /* 옛 파티션 표: 옛 자리의 마커를 읽기만 */
+    }
     int a = marker_read(0), b = marker_read(1);
     int k = a >= 0 ? a : b;
     if (k >= 0 && (a != k || b != k)) {
         ESP_LOGW(TAG, "암호화 표시 한 벌이 깨져 있어 고침");
         marker_put(a != k ? 0 : 1, k);
     }
+    if (k < 0) {
+        k = legacy_marker();                         /* 옛 자리(ota_1 끝)에 있으면 전용 영역으로 옮겨 적는다 */
+        if (k >= 0) {
+            ESP_LOGW(TAG, "암호화 표시를 옛 자리에서 전용 영역으로 옮김(KEY%d)", k);
+            marker_write(k);
+        }
+    }
     return k;
 }
 
-static bool journal_read(jhdr_t *h)
+/* 마커가 key 로 (적어도 한 벌) 읽히게 한다. 쓰고 다시 읽어 확인 — 이것이 true 가 되기 전엔 평문 백업을 지우지 않는다 */
+static bool marker_ensure(int key)
 {
-    const esp_partition_t *o = ota1();
-    return o && esp_partition_read(o, 0, h, sizeof(*h)) == ESP_OK && !memcmp(h->magic, J_MAGIC, 8) &&
-           h->hdr_crc == crc32b(0, h, offsetof(jhdr_t, hdr_crc));
+    if (marker_key() != key) {
+        marker_write(key);
+    }
+    return marker_read(0) == key || marker_read(1) == key;
+}
+
+/* 저널 헤더 상태. 헤더는 [나머지 필드] → [magic] 순으로 쓰므로(journal_backup) magic 이 온전하면 헤더를 다 쓴 것이다 */
+typedef enum {
+    JR_NONE,        /* 헤더 자리가 비어 있음(0xFF) */
+    JR_OK,          /* 온전한 헤더 */
+    JR_TORN,        /* magic 이 없음: 백업 끝에 헤더를 쓰다 끊김(원본은 아직 손대지 않았다) */
+    JR_BAD,         /* magic 은 있는데 CRC 가 틀림: 나중에 깨짐 — 판단하지 않는다 */
+    JR_IOERR,       /* 읽기 실패 — 판단하지 않는다 */
+} jr_t;
+
+static jr_t journal_probe(jhdr_t *h)
+{
+    const esp_partition_t *o = jpart();
+    if (!o) {
+        return JR_NONE;
+    }
+    esp_err_t e = ESP_FAIL;
+    for (int i = 0; i < 3 && e != ESP_OK; i++) {
+        e = esp_partition_read(o, 0, h, sizeof(*h));
+    }
+    if (e != ESP_OK) {
+        return JR_IOERR;
+    }
+    const uint8_t *p = (const uint8_t *)h;
+    bool blank = true;
+    for (size_t i = 0; i < sizeof(*h) && blank; i++) {
+        blank = p[i] == 0xFF;
+    }
+    if (blank) {
+        return JR_NONE;
+    }
+    if (memcmp(h->magic, J_MAGIC, 8)) {
+        return JR_TORN;
+    }
+    return h->hdr_crc == crc32b(0, h, offsetof(jhdr_t, hdr_crc)) ? JR_OK : JR_BAD;
 }
 
 static esp_err_t journal_set(size_t field_off, uint32_t v)
 {
-    return esp_partition_write(ota1(), field_off, &v, sizeof(v));   /* 비트를 1→0 으로만(지우지 않고 덧씀) */
+    const esp_partition_t *o = jpart();
+    return o ? esp_partition_write(o, field_off, &v, sizeof(v)) : ESP_ERR_NOT_FOUND;   /* 비트를 1→0 으로만(지우지 않고 덧씀) */
 }
 
 static size_t journal_len(void)
@@ -441,19 +521,23 @@ static size_t journal_len(void)
 /* 평문 백업(데이터)부터 지우고 헤더는 마지막에 — 중간에 끊기면 헤더가 남아 다음 부팅이 다시 지운다 */
 static esp_err_t journal_erase(void)
 {
-    const esp_partition_t *o = ota1();
+    const esp_partition_t *o = jpart();
+    if (!o) {
+        return ESP_ERR_NOT_FOUND;
+    }
     esp_err_t e = esp_partition_erase_range(o, J_SEC, journal_len() - J_SEC);
     return e == ESP_OK ? esp_partition_erase_range(o, 0, J_SEC) : e;
 }
 
 /* 헤더 없이 남은 백업 조각(백업 도중 끊김 등)이 있나 — 있으면 Wi-Fi 암호 등 평문이 남아 있는 것 */
-static bool journal_dirty(void)
+static bool journal_dirty(size_t from)
 {
-    const esp_partition_t *o = ota1();
+    const esp_partition_t *o = jpart();
     uint32_t *buf = o ? malloc(J_SEC) : NULL;
     bool dirty = false;
-    for (size_t off = 0; buf && !dirty && off < journal_len(); off += J_SEC) {
+    for (size_t off = from; buf && !dirty && off < journal_len(); off += J_SEC) {
         if (esp_partition_read(o, off, buf, J_SEC) != ESP_OK) {
+            dirty = true;                              /* 못 읽으면 '있다'로 본다(비었다고 단정하지 않는다) */
             break;
         }
         for (int i = 0; i < J_SEC / 4; i++) {
@@ -467,10 +551,10 @@ static bool journal_dirty(void)
     return dirty;
 }
 
-/* 파티션 src 를 4KB 씩 ota_1 의 off 로 복사(dir=0) 하거나 되돌린다(dir=1). crc 를 계산해 돌려준다 */
+/* 파티션 src 를 4KB 씩 저널 영역의 off 로 복사(dir=0) 하거나 되돌린다(dir=1). crc 를 계산해 돌려준다 */
 static esp_err_t raw_copy(const esp_partition_t *p, size_t off, bool back, uint32_t *crc)
 {
-    const esp_partition_t *o = ota1();
+    const esp_partition_t *o = jpart();
     uint8_t *buf = malloc(J_SEC);
     if (!buf) {
         return ESP_ERR_NO_MEM;
@@ -491,10 +575,28 @@ static esp_err_t raw_copy(const esp_partition_t *p, size_t off, bool back, uint3
     return e;
 }
 
-/* 1단계: 두 파티션을 원본 그대로 ota_1 에 백업하고 다시 읽어 CRC 확인 */
+/* 파티션 p 의 [off, off+len) CRC */
+static esp_err_t region_crc(const esp_partition_t *p, size_t off, size_t len, uint32_t *crc)
+{
+    uint8_t *buf = malloc(J_SEC);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t e = ESP_OK;
+    uint32_t c = 0;
+    for (size_t i = 0; e == ESP_OK && i < len; i += J_SEC) {
+        e = esp_partition_read(p, off + i, buf, J_SEC);
+        c = crc32b(c, buf, J_SEC);
+    }
+    free(buf);
+    *crc = c;
+    return e;
+}
+
+/* 1단계: 두 파티션을 원본 그대로 저널 영역에 백업하고 다시 읽어 CRC 확인 */
 static esp_err_t journal_backup(int key)
 {
-    const esp_partition_t *o = ota1(), *a = data_part(PART_MAIN), *b = data_part(PART_ZB);
+    const esp_partition_t *o = jpart(), *a = data_part(PART_MAIN), *b = data_part(PART_ZB);
     if (!o || !a || !b || o->size < J_SEC * 2 + a->size + b->size) {
         return ESP_ERR_NOT_FOUND;
     }
@@ -504,32 +606,41 @@ static esp_err_t journal_backup(int key)
     if (e == ESP_OK) e = raw_copy(a, J_SEC, false, &h.nvs_crc);
     if (e == ESP_OK) e = raw_copy(b, J_SEC + a->size, false, &h.zb_crc);
     /* 다시 읽어 확인 */
-    uint8_t *buf = e == ESP_OK ? malloc(J_SEC) : NULL;
     uint32_t c1 = 0, c2 = 0;
-    for (size_t i = 0; buf && e == ESP_OK && i < a->size + b->size; i += J_SEC) {
-        e = esp_partition_read(o, J_SEC + i, buf, J_SEC);
-        if (i < a->size) c1 = crc32b(c1, buf, J_SEC); else c2 = crc32b(c2, buf, J_SEC);
-    }
-    free(buf);
+    if (e == ESP_OK) e = region_crc(o, J_SEC, a->size, &c1);
+    if (e == ESP_OK) e = region_crc(o, J_SEC + a->size, b->size, &c2);
     if (e == ESP_OK && (c1 != h.nvs_crc || c2 != h.zb_crc)) {
         e = ESP_ERR_INVALID_CRC;
     }
     if (e == ESP_OK) {
+        /* 헤더는 마지막에 — 헤더가 있으면 백업이 온전하다. 그 안에서도 magic 을 맨 나중에 써서, 헤더를 쓰다 끊긴 것
+         * (magic 없음 = 원본은 그대로)과 다 쓴 뒤 깨진 것(magic 있음, CRC 틀림)을 구분한다 */
         h.hdr_crc = crc32b(0, &h, offsetof(jhdr_t, hdr_crc));
-        e = esp_partition_write(o, 0, &h, sizeof(h));   /* 헤더는 마지막에 — 헤더가 있으면 백업이 온전하다 */
+        e = esp_partition_write(o, 8, (const uint8_t *)&h + 8, sizeof(h) - 8);
+        if (e == ESP_OK) e = esp_partition_write(o, 0, h.magic, 8);
     }
     return e;
 }
 
-/* 백업을 두 파티션에 되돌린다(원본 평문 상태로) */
+/* 백업을 두 파티션에 되돌린다(원본 평문 상태로).
+ * 먼저 백업 자체를 검사한다 — 크기나 CRC 가 안 맞으면 아무것도 건드리지 않고 ESP_ERR_INVALID_STATE.
+ * 되돌린 뒤엔 두 파티션을 다시 읽어 CRC 를 확인한다(안 맞으면 ESP_ERR_INVALID_CRC). */
 static esp_err_t journal_restore(const jhdr_t *h)
 {
-    const esp_partition_t *a = data_part(PART_MAIN), *b = data_part(PART_ZB);
-    uint32_t c1, c2;
+    const esp_partition_t *o = jpart(), *a = data_part(PART_MAIN), *b = data_part(PART_ZB);
+    uint32_t c1 = 0, c2 = 0;
+    if (!o || !a || !b || h->nvs_size != a->size || h->zb_size != b->size ||
+        region_crc(o, J_SEC, a->size, &c1) != ESP_OK || region_crc(o, J_SEC + a->size, b->size, &c2) != ESP_OK ||
+        c1 != h->nvs_crc || c2 != h->zb_crc) {
+        ESP_LOGE(TAG, "백업이 온전하지 않음 — 저장소는 건드리지 않음");
+        return ESP_ERR_INVALID_STATE;
+    }
     nvs_flash_deinit_partition(PART_MAIN);
     nvs_flash_deinit_partition(PART_ZB);
-    esp_err_t e = raw_copy(a, J_SEC, true, &c1);
-    if (e == ESP_OK) e = raw_copy(b, J_SEC + h->nvs_size, true, &c2);
+    esp_err_t e = raw_copy(a, J_SEC, true, NULL);
+    if (e == ESP_OK) e = raw_copy(b, J_SEC + a->size, true, NULL);
+    if (e == ESP_OK) e = region_crc(a, 0, a->size, &c1);
+    if (e == ESP_OK) e = region_crc(b, 0, b->size, &c2);
     if (e == ESP_OK && (c1 != h->nvs_crc || c2 != h->zb_crc)) {
         e = ESP_ERR_INVALID_CRC;
     }
@@ -564,7 +675,10 @@ static bool encrypt_from_plain(int key)
         ESP_LOGE(TAG, "KEY%d 는 다른 용도로 쓰는 중", key);
         goto out;
     }
-    journal_set(offsetof(jhdr_t, state), ST_KEY);
+    if (journal_set(offsetof(jhdr_t, state), ST_KEY) != ESP_OK) {   /* 이 기록 없이 원본을 건드리지 않는다 */
+        ESP_LOGE(TAG, "단계 기록 실패");
+        goto out;
+    }
     nvs_sec_cfg_t cfg;
     if (sec_cfg_hmac(key, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "HMAC 로 암호화 키를 못 만듦");
@@ -579,8 +693,8 @@ static bool encrypt_from_plain(int key)
         goto out;
     }
     /* 완료 → 마커 → 저널(평문 백업) 지우기. 사이에 꺼져도 부팅이 이어서 마무리한다 */
-    if (journal_set(offsetof(jhdr_t, state), ST_DONE) != ESP_OK || marker_write(key) != ESP_OK) {
-        ESP_LOGE(TAG, "완료 기록 실패");
+    if (journal_set(offsetof(jhdr_t, state), ST_DONE) != ESP_OK || !marker_ensure(key)) {
+        ESP_LOGE(TAG, "완료 기록 실패");               /* 저널은 남는다 — 다음 부팅이 마커부터 다시 */
         goto out;
     }
     journal_erase();
@@ -589,6 +703,63 @@ out:
     free_list(a);
     free_list(b);
     return ok;
+}
+
+/* ---------------------------------------------------------------- 마커 없는 저장소 판별
+ * 마커가 없는데 HMAC(상향) 키 블록이 있으면 둘 중 하나다: 다른 용도의 키가 있는 평문 허브, 또는 마커를 쓰기 전의
+ * 펌웨어(dd0d9a9)가 암호화해 둔 허브. NVS 를 열어 보면 안 된다(틀린 방식으로 열면 NVS 가 '깨진 항목'을 지운다) —
+ * 앱 nvs 의 첫 항목 32바이트를 날것으로 읽어 항목 CRC 로 가린다. cfg 가 있으면 NVS 와 같은 XTS-AES 로 풀어서 본다.
+ *   페이지 = [헤더 32][항목 상태 2비트×126 = 32][항목 32바이트×126], 항목 = ns,type,span,chunk,crc32,key[16],data[8] */
+typedef enum { RAW_EMPTY, RAW_OK, RAW_NO } raw_t;
+
+static raw_t raw_first_entry(const char *part, const nvs_sec_cfg_t *cfg)
+{
+    const esp_partition_t *p = data_part(part);
+    uint8_t pg[64], it[32];
+    for (size_t base = 0; p && base + J_SEC <= p->size; base += J_SEC) {
+        if (esp_partition_read(p, base, pg, sizeof(pg)) != ESP_OK) {
+            return RAW_NO;
+        }
+        if (pg[0] == 0xFF && pg[1] == 0xFF && pg[2] == 0xFF && pg[3] == 0xFF) {
+            continue;                                       /* 안 쓴 페이지 */
+        }
+        for (int i = 0; i < 126; i++) {
+            int st = (pg[32 + i / 4] >> ((i % 4) * 2)) & 3;
+            if (st == 3) {
+                break;                                      /* 빈 칸 — 이 페이지엔 더 없다 */
+            }
+            if (st != 2) {
+                continue;                                   /* 지운 칸 */
+            }
+            size_t off = base + 64 + (size_t)i * 32;        /* 앞이 모두 지운 칸이므로 이 칸은 항목의 머리다 */
+            if (esp_partition_read(p, off, it, sizeof(it)) != ESP_OK) {
+                return RAW_NO;
+            }
+            if (cfg) {
+                mbedtls_aes_xts_context x;
+                uint8_t unit[16] = { 0 }, key[64];
+                uint32_t rel = (uint32_t)off;
+                memcpy(unit, &rel, sizeof(rel));
+                memcpy(key, cfg->eky, 32);
+                memcpy(key + 32, cfg->tky, 32);
+                mbedtls_aes_xts_init(&x);
+                int r = mbedtls_aes_xts_setkey_dec(&x, key, 512);
+                if (r == 0) {
+                    r = mbedtls_aes_crypt_xts(&x, MBEDTLS_AES_DECRYPT, sizeof(it), unit, it, it);
+                }
+                mbedtls_aes_xts_free(&x);
+                memset(key, 0, sizeof(key));
+                if (r != 0) {
+                    return RAW_NO;
+                }
+            }
+            uint32_t crc = esp_rom_crc32_le(0xffffffff, it, 4), have;
+            crc = esp_rom_crc32_le(crc, it + 8, 24);
+            memcpy(&have, it + 4, 4);
+            return crc == have ? RAW_OK : RAW_NO;
+        }
+    }
+    return RAW_EMPTY;
 }
 
 /* 앱 nvs 를 열 수 없을 때: 지우지 않고 USB 로 사람이 고르게 한다(빨간 LED 깜빡임) */
@@ -603,7 +774,7 @@ static void recovery_console(const char *why)
         if (esp_timer_get_time() >= next) {
             next = esp_timer_get_time() + 5000000;
             printf("\n#복구 모드: 설정 저장소(nvs)를 열 수 없음 — %s\n"
-                   "#  'nvs erase' = 설정을 지우고 첫 설정부터(Zigbee 가입은 유지)   'reboot' = 다시 시도\n", why);
+                   "#  'nvs erase' = 설정(과 남은 전환 백업)을 지우고 첫 설정부터   'reboot' = 다시 시도\n", why);
             fflush(stdout);
         }
         uint8_t c;
@@ -621,6 +792,7 @@ static void recovery_console(const char *why)
         if (!strcmp(line, "nvs erase")) {
             printf("#설정 저장소를 지우고 재시작\n");
             nvs_flash_erase_partition(PART_MAIN);
+            journal_erase();                       /* 남은 전환 백업도(안 지우면 다음 부팅이 또 되돌리려 든다) */
             esp_restart();
         } else if (!strcmp(line, "reboot")) {
             esp_restart();
@@ -644,8 +816,15 @@ static void selftest(void)
     memset(cfg.tky, 0xa5, sizeof(cfg.tky));
     bool ok = rewrite(PART_MAIN, &cfg, a) == ESP_OK && rewrite(PART_ZB, &cfg, b) == ESP_OK;
     ok = ok && same(PART_MAIN, a) && same(PART_ZB, b);
+    /* 마커 없는 저장소 판별(날것 읽기): 암호화된 동안엔 평문으로는 안 맞고 그 키로는 맞아야 한다 */
+    nvs_sec_cfg_t wrong;
+    memset(&wrong, 0x11, sizeof(wrong));
+    bool raw_enc = raw_first_entry(PART_MAIN, NULL) == RAW_NO && raw_first_entry(PART_MAIN, &cfg) == RAW_OK &&
+                   raw_first_entry(PART_MAIN, &wrong) == RAW_NO;
     bool back = rewrite(PART_MAIN, NULL, a) == ESP_OK && rewrite(PART_ZB, NULL, b) == ESP_OK;
     back = back && same(PART_MAIN, a) && same(PART_ZB, b);
+    bool raw_plain = raw_first_entry(PART_MAIN, NULL) == RAW_OK;
+    ESP_LOGW(TAG, "시험 결과: 날것 판별 암호화 %s, 평문 %s", raw_enc ? "통과" : "실패", raw_plain ? "통과" : "실패");
     ESP_LOGW(TAG, "시험 결과: 암호화 왕복 %s, 평문 복원 %s", ok ? "통과" : "실패", back ? "통과" : "실패");
     free_list(a);
     free_list(b);
@@ -665,6 +844,34 @@ static void selftest(void)
 }
 #endif
 
+/* 마커가 없을 때: 평문이면 -1. 옛 방식으로 암호화돼 있고 그 키 블록을 찾으면 마커를 써 주고 그 번호.
+ * 평문도 아니고 맞는 키도 없으면 복구 모드(지우지 않는다). */
+static int adopt_unmarked(void)
+{
+    bool any = false;
+    for (int k = 0; k < 6; k++) {
+        any |= esp_efuse_get_key_purpose(EFUSE_BLK_KEY0 + k) == ESP_EFUSE_KEY_PURPOSE_HMAC_UP;
+    }
+    if (!any || raw_first_entry(PART_MAIN, NULL) != RAW_NO) {
+        return -1;                                          /* 대부분 여기: HMAC 키가 없거나, 평문(또는 빈) 저장소 */
+    }
+    for (int k = 0; k < 6; k++) {
+        nvs_sec_cfg_t cfg;
+        if (esp_efuse_get_key_purpose(EFUSE_BLK_KEY0 + k) != ESP_EFUSE_KEY_PURPOSE_HMAC_UP || sec_cfg_hmac(k, &cfg) != ESP_OK) {
+            continue;
+        }
+        if (raw_first_entry(PART_MAIN, &cfg) == RAW_OK) {
+            ESP_LOGW(TAG, "표시 없이 암호화된 저장소(옛 펌웨어) — eFuse KEY%d 로 풀림, 표시를 남김", k);
+            if (!marker_ensure(k)) {
+                recovery_console("암호화 표시를 쓰지 못함");
+            }
+            return k;
+        }
+    }
+    recovery_console("저장소가 평문이 아닌데 맞는 eFuse 키를 찾지 못함");
+    return -1;
+}
+
 /* ---------------------------------------------------------------- 부팅 */
 
 static esp_err_t open_main(nvs_sec_cfg_t *cfg)
@@ -678,34 +885,64 @@ static esp_err_t open_main(nvs_sec_cfg_t *cfg)
 
 esp_err_t hub_crypt_boot(bool *zb_reset)
 {
-    /* 1) 끝나지 않은 전환이 있으면: 백업을 되돌리고 이어서(최대 J_TRIES 번), 넘으면 평문으로 되돌리고 포기 */
+    /* 1) 끝나지 않은 전환이 있으면: 백업을 되돌리고 이어서(최대 J_TRIES 번), 넘으면 평문으로 되돌리고 포기.
+     *    헤더를 읽지 못했거나 깨졌으면 판단하지 않는다(백업을 남겨 둔 채 복구 모드) */
     jhdr_t jh;
-    if (journal_read(&jh)) {
-        if (jh.state == ST_DONE) {                 /* 끝났는데 마무리 전에 꺼짐: 마커 확인 후 평문 백업 지우기 */
-            if (marker_key() != (int)jh.key) {
-                marker_write((int)jh.key);
+    jr_t jr = journal_probe(&jh);
+    if (jr == JR_IOERR) {
+        recovery_console("전환 기록을 읽지 못함(백업은 남겨 둠)");
+    } else if (jr == JR_BAD) {
+        if (journal_dirty(J_SEC)) {
+            recovery_console("전환 기록이 깨짐(백업은 남겨 둠)");
+        }
+        journal_erase();                           /* 백업 데이터는 이미 다 지워짐 = 저널을 지우다(헤더가 마지막) 끊긴 것 */
+    } else if (jr == JR_OK) {
+        if (jh.state == ST_DONE) {                 /* 끝났는데 마무리 전에 꺼짐: 마커를 읽어 확인한 뒤에만 평문 백업을 지운다 */
+            if (!marker_ensure((int)jh.key)) {
+                recovery_console("암호화 표시를 쓰지 못함(백업은 남겨 둠)");
             }
             journal_erase();
             ESP_LOGW(TAG, "전환 마무리(평문 백업 지움)");
+        } else if (!(jh.tries & T_RESTORED)) {     /* 평문으로 되돌리기는 끝났고 백업 지우기만 남음(지우다 꺼졌던 것) */
+            journal_erase();
+            ESP_LOGW(TAG, "되돌린 뒤 정리 마무리(평문 백업 지움)");
         } else if (jh.key == J_TEST) {
             esp_err_t e = journal_restore(&jh);
             ESP_LOGW(TAG, "시험 저널: 백업에서 되돌림 %s(%s)", e == ESP_OK ? "통과" : "실패", esp_err_to_name(e));
             if (e != ESP_OK) {
                 recovery_console("시험 백업을 되돌리지 못함");
             }
-            journal_erase();
+            if (journal_set(offsetof(jhdr_t, tries), jh.tries & ~T_RESTORED) == ESP_OK) {
+#if HUB_CRYPT_SELFTEST
+                /* 시험: 되돌린 뒤 백업을 지우다(한 섹터만 지운 채) 끊긴 것처럼 — 다음 부팅은 다시 덮어쓰지 말고 정리만 해야 한다 */
+                esp_partition_erase_range(jpart(), J_SEC, J_SEC);
+                ESP_LOGW(TAG, "시험: 정리 도중 끊김 흉내 — 재시작");
+                vTaskDelay(pdMS_TO_TICKS(200));
+                esp_restart();
+#endif
+                journal_erase();
+            }
         } else {
             int used = 0;
-            for (uint32_t t = jh.tries; !(t & 1) && used < 32; t >>= 1) {
+            for (uint32_t t = jh.tries; !(t & 1) && used < 31; t >>= 1) {
                 used++;
             }
             ESP_LOGW(TAG, "끝나지 않은 암호화 전환 발견(KEY%d, 시도 %d) — 백업에서 되돌림", (int)jh.key, used + 1);
-            if (journal_restore(&jh) != ESP_OK) {
-                recovery_console("전환 백업을 되돌리지 못함");
+            esp_err_t re = journal_restore(&jh);
+            bool give_up = used >= J_TRIES;
+            if (re == ESP_ERR_INVALID_STATE && jh.state == ST_BACKUP) {
+                /* 백업이 깨졌지만 단계가 '백업됨' = 원본에 손대기 전이다 — 원본 그대로 두고 전환만 그만둔다 */
+                ESP_LOGE(TAG, "백업이 깨짐(원본은 그대로) — 전환을 그만둠");
+                give_up = true;
+            } else if (re != ESP_OK) {
+                recovery_console("전환 백업을 되돌리지 못함(백업은 남겨 둠)");
             }
-            if (used >= J_TRIES) {
-                ESP_LOGE(TAG, "%d번 실패 — 평문으로 되돌린 채 포기", J_TRIES);
-                journal_erase();
+            if (give_up) {
+                ESP_LOGE(TAG, "평문으로 둔 채 전환 포기");
+                /* '되돌림 끝' 을 먼저 적고 지운다 — 지우다 꺼져도 다음 부팅이 반쯤 지운 백업을 다시 덮어쓰지 않게 */
+                if (journal_set(offsetof(jhdr_t, tries), jh.tries & ~T_RESTORED) == ESP_OK) {
+                    journal_erase();
+                }
             } else {
                 journal_set(offsetof(jhdr_t, tries), jh.tries & ~(1u << used));
                 if (open_main(NULL) == ESP_OK && encrypt_from_plain((int)jh.key)) {
@@ -715,13 +952,16 @@ esp_err_t hub_crypt_boot(bool *zb_reset)
                 esp_restart();                     /* 성공이든 실패든 깨끗하게 다시(실패면 다음 부팅에 또 되돌림) */
             }
         }
-    } else if (journal_dirty()) {                    /* 헤더 없는 백업 조각: 평문 비밀값이 남지 않게 지운다 */
+    } else if (journal_dirty(0)) {                   /* 헤더 없는(쓰다 만) 백업 조각: 평문 비밀값이 남지 않게 지운다 */
         ESP_LOGW(TAG, "남은 백업 조각 지움");
         journal_erase();
     }
 
     /* 2) 우리가 암호화해 둔 표시(마커)가 있으면 그 키로 연다 — 다른 용도의 HMAC 키만으로는 판정하지 않는다 */
     int key = marker_key();
+    if (key < 0) {
+        key = adopt_unmarked();                    /* 마커 이전 펌웨어가 암호화해 둔 허브면 여기서 마커가 생긴다 */
+    }
     if (key >= 0) {
         if (esp_efuse_get_key_purpose(EFUSE_BLK_KEY0 + key) != ESP_EFUSE_KEY_PURPOSE_HMAC_UP) {
             recovery_console("암호화 표시는 있는데 eFuse 키가 없음");
@@ -830,9 +1070,9 @@ void hub_crypt_render(char *o, size_t cap)
     if (!s_on) {
         strlcat(o, "<label class=chk><input type=checkbox name=ok> eFuse 는 한 번 쓰면 되돌릴 수 없고, 암호화를 켜면 끌 수 "
                    "없다는 것을 이해했습니다</label>"
-                   "<p class=muted>누른 뒤 60초 안에 <b>허브의 버튼을 짧게</b> 눌러야 진행합니다(허브 앞에 있는 사람만 켤 수 있게). "
-                   "그러면 허브가 재시작하며 옮깁니다(수 초). 중간에 전원이 끊기면 다음 부팅에 원래대로 되돌린 뒤 다시 "
-                   "시도합니다.</p><button class=sv>암호화 켜기</button></form>", cap);
+                   "<p class=muted>암호화 켜기를 누른 뒤 60초 안에 <b>허브 버튼을 짧게</b> 누르면 허브가 재시작해 현재 설정을 암호화합니다.</p>"
+                   "<p class=warn>암호화에 실패하면 허브를 다시 설정하거나 SmartThings와 Zigbee 페어링을 다시 해야 할 수 있습니다.</p>"
+                   "<button class=sv>암호화 켜기</button></form>", cap);
     }
     strlcat(o, "</div>", cap);
 }

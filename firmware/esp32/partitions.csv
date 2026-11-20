@@ -1,7 +1,9 @@
 # Name,     Type, SubType, Offset, Size, Flags
 # 8MB 플래시. nvs = 앱 설정(Wi-Fi·관리자암호·플러그인·짝·가스…). Zigbee 자격증명은 전용 zb_nvs 로 분리
 # (앱 NVS 쓰기가 많아 공용 nvs 에 두면 간헐적으로 손상돼 재부팅 시 factory-new 가 됨 — 2026-11-19 확인).
-# 앱은 OTA 두 칸(3MB씩): 새 펌웨어가 잘못돼도 이전 칸으로 돌아갈 수 있게.
+# 앱 두 칸(3MB씩): ota_0 = 내장 라디오용 펌웨어, ota_1 = 외부 라디오(UART 로 붙인 C6/H2)용 펌웨어.
+#   부팅 때 외부 라디오가 있는지 보고 맞는 칸으로 넘어간다(hub_radio).
+# cryptj = 저장 데이터 암호화 전환 기록(평문 백업 저널 + 완료 마커). 맨 뒤에 둬서 기존 영역의 위치는 그대로다.
 nvs,        data, nvs,     ,       0x6000,
 otadata,    data, ota,     ,       0x2000,
 phy_init,   data, phy,     ,       0x1000,
@@ -10,3 +12,4 @@ ota_1,      app,  ota_1,   ,       3M,
 zb_storage, data, fat,     ,       16K,
 zb_fct,     data, fat,     ,       1K,
 zb_nvs,     data, nvs,     ,       0x10000,
+cryptj,     data, 0x40,    ,       0x20000,
