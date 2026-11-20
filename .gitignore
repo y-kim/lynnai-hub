@@ -22,6 +22,8 @@ pulses.csv.bad
 *.p12
 *.pfx
 mqtt.json
+# NAS 허브 운영 데이터(개인키·LAN 토큰·기기 MAC/IP·부트스트랩 캐시)
+server/lynnai-nas/data/
 secrets.*
 
 # OS / editor

@@ -14,7 +14,7 @@ hub_lan.py (대응 ESP32: hub_lan.c) -- SmartThings LAN Edge 드라이버가 붙
 import hmac
 import json
 import os
-import select
+import selectors
 import socket
 import struct
 import threading
@@ -28,6 +28,8 @@ HELLO_SEC = 5
 DENY_DELAY = 1.0
 MAX_LINE = 512                  # 인증 전엔 넘으면 끊고, 뒤엔 버림
 _HEX = set("0123456789abcdef")
+# select.select() 는 파일 번호가 1024 이상이면 ValueError 라 poll 기반으로(없는 플랫폼은 그 기본값)
+_Selector = getattr(selectors, "PollSelector", selectors.DefaultSelector)
 
 
 def _token_ok(t):
@@ -110,7 +112,10 @@ class LanUplink:
     def _send_now(conn, b):
         """기다리지 않고 보낸다. 다 못 보내면(상대가 안 읽어 버퍼 참) 끊는다 — 받는 스레드가 정리."""
         try:   # 제한시간 있는 소켓은 버퍼가 꽉 차면 send 가 기다리므로, 쓸 자리가 있는지 먼저 본다
-            if select.select([], [conn], [], 0)[1] and conn.send(b, socket.MSG_DONTWAIT) == len(b):
+            with _Selector() as sel:
+                sel.register(conn, selectors.EVENT_WRITE)
+                ready = sel.select(0)
+            if ready and conn.send(b, socket.MSG_DONTWAIT) == len(b):
                 return True
         except (OSError, ValueError):
             pass

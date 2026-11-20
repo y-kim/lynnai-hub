@@ -4,6 +4,7 @@ services:
     build: .
     container_name: lynnai-hub-watch
     restart: unless-stopped
+    init: true                  # PID 1 은 tini — SIGTERM 을 파이썬에 넘겨 docker stop 이 바로 끝나게
     environment:
       - HUB_URL=${HUB_URL:?HUB_URL(허브 주소, 예 http://192.168.0.50)을 .env 에}
       - HUB_TOKEN=${HUB_TOKEN:-}

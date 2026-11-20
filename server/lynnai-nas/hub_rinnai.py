@@ -21,6 +21,7 @@ CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_PAIRS = 0x00, 0x01, 0x02, 0x07
 KIND_F06, KIND_F09 = 6, 9
 HEARTBEAT_S = 300
 POLL_S = 30
+MAX_STATE = 16                 # 상태표 항목 상한(실제는 보일러 + 조절기 몇 대). 넘으면 끊긴 기기의 것부터 버린다
 _STATE_RE = re.compile(rb'"id":"70","data":"([0-9a-fA-F]+)"')
 _TOK = re.compile(r"[0-9a-z]{1,2}")
 _VAL = re.compile(r"[0-9a-z]{1,16}")
@@ -190,20 +191,27 @@ class HubCore:
         key = (kind, bytes(ln.mac3))
         with self.lock:
             changed = self.state.get(key) != blob
+            if key not in self.state:
+                self._make_room()
             self.state[key] = blob
         if changed and blob:
             self.log(f"[core] f0{kind} {ln.mac3.hex()} 상태 {blob.hex()}")
             self._emit(CMD_STATE, bytes([kind]) + ln.mac3 + blob)
 
+    def _make_room(self):
+        """상태표가 꽉 찼으면 한 칸 비운다(lock 을 쥔 채 부른다). 링크가 토픽을 바꿔 가며 올려도 표가 끝없이 늘지 않게 —
+        지금 연결 안 된 기기의 것 중 가장 먼저 들어온 것부터, 다 연결돼 있으면 가장 먼저 들어온 것."""
+        while len(self.state) >= MAX_STATE:
+            live = {(ln.kind, bytes(ln.mac3)) for ln in self.links if ln.kind}
+            old = next((k for k in self.state if k not in live), None) or next(iter(self.state))
+            del self.state[old]
+            self.log(f"[core] 상태표 꽉 참({MAX_STATE}) — f0{old[0]} {old[1].hex()} 버림")
+
     # ---- 앱에서 온 명령 ----
     def command(self, text):
         text = text.strip()
         if text == "refresh":
-            with self.lock:
-                items = list(self.state.items())
-            self._send_links()
-            for (kind, mac), blob in items:
-                self._emit(CMD_STATE, bytes([kind]) + mac + blob)
+            self._resend()
             return
         for one in text.split(";"):
             self._command_one(one.strip())
@@ -248,14 +256,20 @@ class HubCore:
             live = {(ln.kind, bytes(ln.mac3)) for ln in self.links if ln.kind}
             return [(k, mac.hex(), blob, (k, mac) in live) for (k, mac), blob in self.state.items()]
 
+    def _resend(self):
+        """연결 목록 + 지금 연결된 기기의 상태만 다시 보낸다. 끊긴 기기의 마지막 상태는 보내지 않는다 —
+        드라이버는 상태를 받으면 그 기기를 온라인으로 표시하므로(ESP32 hub_rinnai.c 의 주기 재전송과 같은 규칙)."""
+        with self.lock:
+            live = {(ln.kind, bytes(ln.mac3)) for ln in self.links if ln.kind}
+            items = [(k, blob) for k, blob in self.state.items() if k in live and blob]
+        self._send_links()
+        for (kind, mac), blob in items:
+            self._emit(CMD_STATE, bytes([kind]) + mac + blob)
+
     def _heartbeat(self):
         while True:
             time.sleep(HEARTBEAT_S)
             try:
-                with self.lock:
-                    items = list(self.state.items())
-                self._send_links()
-                for (kind, mac), blob in items:
-                    self._emit(CMD_STATE, bytes([kind]) + mac + blob)
+                self._resend()
             except Exception as e:
                 self.log(f"[core] 하트비트 오류: {e}")

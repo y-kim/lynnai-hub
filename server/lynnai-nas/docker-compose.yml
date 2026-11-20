@@ -1,5 +1,5 @@
 # lynnai-nas: NAS 모드. DNS(:53)·MQTT(:8883)가 집 LAN 에서 보여야 하고, 린나이 기기의
-# '진짜 출발지 IP'로 걸러내야 하므로 host 네트워크로 띄운다(NAS 에서 가장 간단).
+# '진짜 출발지 IP'와 호스트 ARP 표(그 IP 의 MAC)로 걸러내야 하므로 host 네트워크로 띄운다(NAS 에서 가장 간단).
 # 빌드 컨텍스트는 레포 루트(standalone/ 을 담기 위해): docker compose 를 레포 루트에서 실행하거나 아래처럼.
 services:
   lynnai-nas:
@@ -8,7 +8,7 @@ services:
       dockerfile: server/lynnai-nas/Dockerfile
     container_name: lynnai-nas
     restart: unless-stopped
-    network_mode: host          # :53/:8883 를 LAN 에 직접. 출발지 IP 보존(only_src 필터)
+    network_mode: host          # :53/:8883 를 LAN 에 직접. 출발지 IP 보존 + 호스트 ARP 표(/proc/net/arp)로 MAC 확인
     init: true                  # PID 1 은 tini — SIGTERM 을 파이썬에 넘겨 docker stop 이 바로 끝나게
     # root 로 돈다: :53/:80 바인드(host 네트워크라 sysctl 로 못 낮춤)와 기존 /data(root 소유, 0600 키·토큰) 때문.
     # 대신 capability 는 전부 빼고 1024 미만 바인드만 남긴다(iptables·raw 소켓 안 씀). /data 는 root 소유여야 한다.
@@ -21,10 +21,17 @@ services:
     environment:
       - MODE=${MODE:-proxy}      # proxy = 클라우드 중계(앱 유지) / standalone = 클라우드 없이 허브가 직접(ESP32 와 동일)
       - NAS_IP=${NAS_IP:?NAS_IP 를 .env 에}        # 이 NAS 의 LAN 주소
-      - ONLY_SRC=${RINNAI_IPS:-}                   # 보일러/각방 IP(쉼표). 공유기에서 고정 권장 — DNS 하이재킹 대상
-      - RINNAI_IPS=${RINNAI_IPS:-}                 # 같은 목록 — MQTT(:8883) 종단·/key/server 를 이 기기들에게만
-      - API_TOKEN=${API_TOKEN:-}                   # /api·/metrics Bearer 토큰(.env, 16자 이상). 비우면 LAN 에 열림
-      - HIJACK_NAMES=rkiot.net
+      # 등록된 기기(DNS 가로채기·MQTT(:8883) 종단·/key/server 를 받는 기기) = 승인한 기기 + RINNAI_IPS.
+      # 승인: 등록 안 된 기기가 rkiot.net 을 물으면 후보로 보인다 → http://NAS/devices 에서 승인(API_TOKEN 필요)
+      #       또는 DEVICE_PAIR=1 로 시작 후 600초 동안 자동 등록.
+      # RINNAI_IPS(선택): 고정 등록할 IP(쉼표, 공유기에서 고정). 비우면 고정 등록 없음. IPv4 가 아닌 항목이 있으면 뜨지 않는다.
+      #       집 LAN 의 모든 출발지를 받으려면 any 를 명시(권장 안 함 — 시작할 때 경고)
+      - RINNAI_IPS=${RINNAI_IPS:-}
+      - DEVICE_PAIR=${DEVICE_PAIR:-}               # 1이면 시작 후 600초 동안 보이는 후보를 바로 등록. 끝나면 지울 것
+      - ONLY_SRC=${ONLY_SRC:-}                     # DNS 가로채기 대상만 따로 좁힐 때. 비우면 등록된 기기 전부
+      - API_TOKEN=${API_TOKEN:-}                   # /api·/metrics Bearer 토큰(.env, 16자 이상). 비우면 LAN 에 열림(기기 승인·삭제는 안 받음)
+      - HIJACK_NAMES=${HIJACK_NAMES:-rkiot.net}    # 가로챌 도메인(쉼표)
+      - MAX_CONN=${MAX_CONN:-16}                   # :8883 동시 연결 상한(등록 안 된 출발지끼리, 출발지당 4. 등록된 기기는 따로)
       - FORWARD=${FORWARD:-}                       # 비우면 기본 게이트웨이(공유기), none 이면 완전독립
       - UPSTREAM_IP=${UPSTREAM_IP:-}               # 진짜 린나이 클라우드 IP. 비우면 www.rkiot.net 을 DNS 로 조회(proxy 모드)
       - DEBUG_MQTT=${DEBUG_MQTT:-}                 # 1이면 복호화 payload 로그(비밀값 포함)

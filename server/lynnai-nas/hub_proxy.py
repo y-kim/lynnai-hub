@@ -6,10 +6,12 @@
 ESP32 펌웨어 hub_proxy.c 의 파이썬 판.
 (원본: Pi 의 rkprobe/bridge.py — 하드코딩 경로·기기 IP 를 환경변수로 바꾸고, 평문 payload 로깅은 기본 끔.)
 
-환경변수: NAS_CERT, UPSTREAM_IP/UPSTREAM_PORT, UPSTREAM_SNI, RINNAI_IPS(중계할 기기, 쉼표),
-          UPSTREAM_CA(클라우드 사설 CA, 기본 이 폴더의 cloud_ca.crt — 비우면 검증 안 함),
-          MQTT_PORT, DEBUG_MQTT(1이면 복호화 payload 까지 로그 — 비밀값 포함, 평소엔 끔)."""
-import os, socket, ssl, threading, time
+환경변수: NAS_CERT, UPSTREAM_IP/UPSTREAM_PORT, UPSTREAM_SNI,
+          RINNAI_IPS(고정 등록할 기기 IP, 쉼표 — 선택. 비우면 고정 등록 없음: 승인한 기기(REGISTRY = hub_devices)만 받는다.
+                     IPv4 주소가 아닌 항목이 있으면 시작하지 않는다. 모든 출발지를 받으려면 any 를 명시),
+          UPSTREAM_CA(클라우드 사설 CA, 기본 이 폴더의 cloud_ca.crt — 비우거나 파일이 없으면 클라우드에 붙지 않음),
+          MQTT_PORT, MAX_CONN, DEBUG_MQTT(1이면 복호화 payload 까지 로그 — 비밀값 포함, 평소엔 끔)."""
+import ipaddress, os, selectors, socket, ssl, threading, time
 import upstream
 
 CERT = os.environ.get("NAS_CERT", "/data/certs/server.crt")
@@ -31,10 +33,12 @@ def log(m, f=None):
     print(f"{datetime.datetime.now().isoformat(timespec='seconds')} [relay] {m}", flush=True)
 
 MAX_PKT = 64 * 1024        # MQTT 패킷 하나의 상한(실제 기기·클라우드는 수백 바이트). 넘으면 연결을 끊는다
-MAX_CONN = int(os.environ.get("MAX_CONN", "16"))   # :8883 동시 연결 상한(스레드 2~3개씩)
+MAX_CONN = int(os.environ.get("MAX_CONN") or "16")   # :8883 동시 연결 상한(등록된 기기는 따로 센다 — Slots)
 MAX_PER_IP = 4             # 한 출발지당 — LAN 기기 하나가 슬롯을 다 잡아 진짜 기기를 막지 못하게
 MAX_PENDING = 32           # 기기에 끼워 넣을 명령 대기 상한
 RELAY_READ_SEC = 1         # 중계 중 한 번 읽기의 최대 대기(넘으면 다음 바퀴로 — TLS 1.3 세션 티켓처럼 앱 데이터가 없는 기록 때문)
+# 소켓 기다리기: select.select() 는 파일 번호가 1024 이상이면 ValueError 라 poll 기반으로(없는 플랫폼은 그 기본값)
+Selector = getattr(selectors, "PollSelector", selectors.DefaultSelector)
 
 class FrameError(ValueError):
     pass
@@ -127,8 +131,37 @@ def pump(src, dst, arrow, decode=True, on_publish=None, wlock=None, act=None):
         try: socket.socket.shutdown(dst, socket.SHUT_WR)
         except Exception: pass
 
-# 중계(TLS 종단)할 기기 = 등록된 린나이 기기. 비우면 모두 중계. 그 밖의 클라이언트는 passthrough.
-DEVICE_IP = {ip.strip() for ip in os.environ.get("RINNAI_IPS", "").replace(";", ",").split(",") if ip.strip()}
+def parse_devices(raw):
+    """RINNAI_IPS 값 → (고정 등록 IP 집합, 모두 받기). 'any' 만 모두 받기다. 비어 있으면 (빈 집합, False) —
+    고정 등록 없음이지 모두 받기가 아니다(승인한 기기만 받는다). IPv4 주소가 아닌 항목이 있으면 ValueError(시작을 거부하게)."""
+    raw = (raw or "").strip()
+    if raw.lower() == "any":
+        return set(), True
+    ips = set()
+    for tok in raw.replace(";", ",").split(","):
+        tok = tok.strip()
+        if not tok: continue
+        try: ips.add(str(ipaddress.IPv4Address(tok)))
+        except ValueError: raise ValueError(f"RINNAI_IPS 의 {tok!r} 는 IPv4 주소가 아님(쉼표로 나눈 IP, 또는 any)") from None
+    return ips, False
+
+# 중계(TLS 종단)할 기기 = 등록된 린나이 기기: RINNAI_IPS 에 적은 고정 IP + 승인한 기기(REGISTRY).
+# 그 밖의 클라이언트는 passthrough(단독이면 끊음). hub_api(/key/server)·nas_hub(DNS, 시작 검사)도 이 값을 쓴다.
+# 값이 잘못됐으면 DEVICE_ERR 에 이유 — 고정 등록으로는 아무도 기기로 안 본다(nas_hub·run 이 시작을 거부).
+try:
+    DEVICE_IP, DEVICE_ANY = parse_devices(os.environ.get("RINNAI_IPS", "")); DEVICE_ERR = ""
+except ValueError as e:
+    DEVICE_IP, DEVICE_ANY, DEVICE_ERR = set(), False, str(e)
+
+REGISTRY = None   # 승인한 기기 등록부(hub_devices.Devices). nas_hub 가 넣는다. 없으면 RINNAI_IPS 만 본다.
+
+def is_device(ip):
+    if DEVICE_ANY or ip in DEVICE_IP: return True
+    return REGISTRY is not None and REGISTRY.is_registered(ip)
+
+def _apart(ip):
+    """연결 수를 따로 세는 출발지(등록된 기기)인가. any 로는 기기를 가려낼 수 없어 넣지 않는다."""
+    return ip in DEVICE_IP or (REGISTRY is not None and REGISTRY.is_registered(ip, learn=False))
 
 def passthrough(raw, addr):
     """Non-device client (e.g. the NAS logger): forward its TLS straight to the real cloud so its own
@@ -154,7 +187,12 @@ CORE = None   # 설정되면 상태 스눕 + 명령 주입을 한다(hub_core.Hu
 
 def handle(raw, addr):
     # 등록된 린나이 기기만 TLS 종단(중계), 나머지(로거·헬스체크 등)는 passthrough 로 안 깨뜨린다.
-    if DEVICE_IP and addr[0] not in DEVICE_IP:
+    if not is_device(addr[0]):
+        if STANDALONE:                       # 단독 모드는 밖으로 아무것도 잇지 않는다(README 의 약속)
+            log(f"{addr[0]} 등록 안 된 출발지 — 단독 모드라 끊음")
+            try: raw.close()
+            except Exception: pass
+            return
         passthrough(raw, addr); return
     sctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     try:
@@ -188,12 +226,11 @@ def handle(raw, addr):
 
 
 def relay(down, up, addr):
-    """기기(down) ↔ 클라우드(up) 중계 — 한 스레드가 select 로 양쪽을 다 읽고 쓴다(펌웨어 hub_proxy.c 와 같은 구조).
+    """기기(down) ↔ 클라우드(up) 중계 — 한 스레드가 poll 로 양쪽을 다 읽고 쓴다(펌웨어 hub_proxy.c 와 같은 구조).
     파이썬 SSL 소켓은 한 객체를 두 스레드가 동시에 읽고 쓰면 TLS 기록이 깨질 수 있어(실측: 클라우드 쪽
     'wrong version number') 스레드를 나누지 않는다. 클라우드→기기는 다 온 패킷만 보내므로 기기 쪽 흐름은 늘 패킷
     경계 — 그 사이에 명령(주입 대기열)을 끼워 넣는다. 대기열은 0.3초마다 확인한다."""
-    import select
-    down.settimeout(RELAY_READ_SEC); up.settimeout(RELAY_READ_SEC)   # select 뒤 읽기가 오래 매달리지 않게(쓰기도 이 제한)
+    down.settimeout(RELAY_READ_SEC); up.settimeout(RELAY_READ_SEC)   # poll 뒤 읽기가 오래 매달리지 않게(쓰기도 이 제한)
     link = None; on_pub = None
     pending = []; plock = threading.Lock()
     if CORE is not None:
@@ -204,17 +241,19 @@ def relay(down, up, addr):
                 pending.append(pkt)
         link = CORE.link_open(inject)
         def on_pub(topic, payload): CORE.on_device_publish(link, topic, payload)
-    bm = bc = b""; last = time.monotonic(); why = "?"
+    bm = bc = b""; last = time.monotonic(); why = "?"; sel = None
     try:
+        sel = Selector()
+        sel.register(down, selectors.EVENT_READ); sel.register(up, selectors.EVENT_READ)
         while True:
             with plock:
                 q, pending[:] = pending[:], []
             for pkt in q:
                 down.sendall(pkt)
                 log(f"{addr[0]} 명령 주입 {len(pkt)}B")
-            ready = [s for s in (down, up) if s.pending()]
+            ready = [s for s in (down, up) if s.pending()]   # TLS 가 이미 풀어 둔 데이터는 소켓에 안 보인다 — 먼저 확인
             if not ready:
-                ready, _, _ = select.select([down, up], [], [], 0.3)
+                ready = [k.fileobj for k, _ in sel.select(0.3)]
                 if not ready:
                     if time.monotonic() - last > IDLE_SEC:
                         why = "유휴"; break
@@ -243,7 +282,7 @@ def relay(down, up, addr):
     finally:
         if link is not None:
             CORE.link_close(link)
-        for s in (down, up):
+        for s in (sel, down, up):
             try: s.close()
             except Exception: pass
         log(f"{addr[0]} closed ({why})")
@@ -344,17 +383,27 @@ def broker(down, addr):
         except Exception: pass
         log(f"{addr[0]} 연결 종료 ({why})")
 
-_slots = {}; _slock = threading.Lock()
+class Slots:
+    """출발지별 동시 연결 수(:8883 과 hub_api 의 :80 이 하나씩 쓴다). 전체 상한(total)은 등록 안 된 출발지끼리만 나눠 쓴다 —
+    등록된 기기(RINNAI_IPS·승인한 기기)는 따로 세므로, 다른 출발지가 슬롯을 다 잡아도 기기의 재접속은 받는다(기기도
+    출발지당 per_ip 는 지킨다). RINNAI_IPS=any 면 기기를 가려낼 수 없어 모두 전체 상한을 같이 쓴다."""
+    def __init__(self, total, per_ip):
+        self.total, self.per_ip = total, per_ip
+        self.n = {}; self.lock = threading.Lock()
 
-def _take(ip):
-    with _slock:
-        if sum(_slots.values()) >= MAX_CONN or _slots.get(ip, 0) >= MAX_PER_IP: return False
-        _slots[ip] = _slots.get(ip, 0) + 1; return True
+    def take(self, ip):
+        with self.lock:
+            if self.n.get(ip, 0) >= self.per_ip: return False
+            if not _apart(ip) and sum(v for k, v in self.n.items() if not _apart(k)) >= self.total: return False
+            self.n[ip] = self.n.get(ip, 0) + 1; return True
 
-def _give(ip):
-    with _slock:
-        _slots[ip] -= 1
-        if not _slots[ip]: del _slots[ip]
+    def give(self, ip):
+        with self.lock:
+            self.n[ip] -= 1
+            if not self.n[ip]: del self.n[ip]
+
+_conn = Slots(MAX_CONN, MAX_PER_IP)
+_slots, _take, _give = _conn.n, _conn.take, _conn.give
 
 def _serve(c, a):
     try: handle(c, a)
@@ -367,6 +416,8 @@ def _serve(c, a):
 def run(core=None):
     global CORE
     CORE = core
+    if DEVICE_ERR:                                   # nas_hub 가 먼저 걸러 주지만 이 파일만 돌릴 때도 잘못된 값으로 뜨지 않게
+        log(f"오류: {DEVICE_ERR}"); raise SystemExit(2)
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(LISTEN); s.listen(16)
     if not STANDALONE and not UP_CA:
@@ -374,9 +425,11 @@ def run(core=None):
     elif not STANDALONE and not os.path.exists(UP_CA):
         log(f"오류: UPSTREAM_CA 파일 없음({UP_CA}) — 클라우드에 붙지 않음")
     log(f"기기 대기 :{LISTEN[1]}  {'단독 모드(클라우드 없음)' if STANDALONE else '프록시 -> ' + upstream.ip(log) + ':' + str(UP_PORT)}"
-        f"  대상={DEVICE_IP or '모든 기기'}  동시 연결 {MAX_CONN}(출발지당 {MAX_PER_IP})")
-    if not DEVICE_IP:
-        log("경고: RINNAI_IPS 가 비어 있음 — 집 LAN 의 아무 기기나 린나이 기기로 받아들임(가짜 상태·명령 가로채기 가능)")
+        f"  대상={'모든 출발지(any)' if DEVICE_ANY else sorted(DEVICE_IP)}"
+        f"{'' if REGISTRY is None else ' + 승인한 기기 %d대' % len(REGISTRY.snapshot()['registered'])}"
+        f"  동시 연결 {MAX_CONN}(출발지당 {MAX_PER_IP}, 등록된 기기는 따로)")
+    if DEVICE_ANY:
+        log("경고: RINNAI_IPS=any — 집 LAN 의 아무 기기나 린나이 기기로 받아들임(가짜 상태·명령 가로채기 가능)")
     while True:
         try:
             c, a = s.accept()

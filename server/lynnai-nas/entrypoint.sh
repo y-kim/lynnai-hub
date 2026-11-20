@@ -18,11 +18,26 @@ if [ ! -f "$DATA/certs/server.crt" ]; then
 fi
 
 # 환경변수 → config.json. NAS_IP 는 이 컨테이너의 LAN 주소(DNS 가 린나이 기기에게 답할 값).
-#   ONLY_SRC : 등록된 린나이 기기 IP(쉼표). 비우면 모든 기기의 rkiot 질의를 가로챈다(권장: 채워 둘 것).
-#   FORWARD  : 목록 밖 기기·다른 도메인을 넘길 상위 DNS(기본 공유기). "none" 이면 안 넘김(완전 독립).
+#   RINNAI_IPS : 고정 등록할 린나이 기기 IP(쉼표) — 선택. 비우면 고정 등록 없이 뜬다(후보를 /devices 에서 승인하거나
+#                DEVICE_PAIR=1). any 면 모든 출발지를 기기로 받는다(경고). IPv4 가 아닌 항목이 있으면 nas_hub 가 시작을 거부한다.
+#   ONLY_SRC   : DNS 가로채기 대상만 따로 줄 때. 비우면 등록된 기기 전부(RINNAI_IPS + 승인한 기기 — nas_hub 가 질의마다 판정).
+#                모든 기기의 질의를 가로채는 것은 RINNAI_IPS=any 일 때만.
+#   FORWARD    : 목록 밖 기기·다른 도메인을 넘길 상위 DNS(기본 공유기). "none" 이면 안 넘김(완전 독립).
 : "${NAS_IP:?NAS_IP(이 컨테이너의 LAN 주소)를 지정하세요}"
+SRC=$(printf '%s' "${ONLY_SRC:-}" | tr ';' ',')                 # 파이썬 쪽처럼 ';' 도 구분자로
+if [ -n "${GATE_TEST:-}" ] && [ -z "$(printf '%s' "$SRC" | tr -d ' ,')" ]; then
+  # 관문 시험(server_pi3.py)은 등록부를 모르고 only_src 가 비면 모든 질의를 가로챈다 — 예전처럼 RINNAI_IPS 가 있어야 한다
+  if [ -z "$(printf '%s' "${RINNAI_IPS:-}" | tr -d ' ,;')" ]; then
+    echo "오류: GATE_TEST 는 RINNAI_IPS(또는 ONLY_SRC)가 있어야 함 — 시험할 기기 IP 를 적을 것(모든 출발지면 RINNAI_IPS=any 를 명시)" >&2
+    exit 2
+  fi
+  SRC=$(printf '%s' "$RINNAI_IPS" | tr ';' ',')
+fi
+if [ "$(printf '%s' "$SRC" | tr -d ' ' | tr 'A-Z' 'a-z')" = "any" ]; then
+  SRC=""                        # 빈 목록 — nas_hub 는 등록된 기기만(RINNAI_IPS=any 일 때만 제한 없음), 관문 시험은 제한 없음
+fi
 HIJACK_JSON=$(printf '%s' "${HIJACK_NAMES:-rkiot.net}" | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i);printf "%s\"%s\"",(i>1?",":""),$i}}')
-SRC_JSON=$(printf '%s' "${ONLY_SRC:-}" | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i);if($i!="")printf "%s\"%s\"",(c++?",":""),$i}}')
+SRC_JSON=$(printf '%s' "$SRC" | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i);if($i!="")printf "%s\"%s\"",(c++?",":""),$i}}')
 if [ "${FORWARD:-}" = "none" ]; then
   FWD_JSON=null
 else

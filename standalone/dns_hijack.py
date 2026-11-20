@@ -55,7 +55,7 @@ def _build_answer(query, ip):
 
 class DnsHijack:
     def __init__(self, listen_ip, answer_ip, hijack_names, logger=None,
-                 forward=None, catch_all=False, only_src=None):
+                 forward=None, catch_all=False, only_src=None, is_src_ok=None, on_unregistered=None):
         """
         listen_ip   : 바인드할 IP (AP측 IP, 예 192.168.50.1)
         answer_ip   : 하이재킹 대상에 답할 IP (대개 listen_ip와 동일)
@@ -64,6 +64,10 @@ class DnsHijack:
         catch_all   : True면 하이재킹 외 도메인도 answer_ip로 답(캡티브 포털식).
         only_src    : 이 출발지 IP 목록에서 온 질의만 하이재킹(=등록된 린나이 기기).
                       None/빈 목록이면 제한 없음. 목록 밖 기기의 질의는 forward 로 그대로 넘긴다.
+        is_src_ok   : 함수(ip) -> bool. 주면 only_src 대신 이것으로 등록된 기기인지 그때그때 묻는다
+                      (시작할 때 굳힌 목록이 아니라 살아 있는 등록부 — lynnai-nas). 예외가 나면 등록 안 된 것으로 본다.
+        on_unregistered : 함수(ip, name). 등록 안 된 출발지가 하이재킹 대상 이름을 물을 때마다 부른다(후보 기록용).
+                      True 를 돌려주면 그 자리에서 등록된 것으로 보고 이 질의부터 하이재킹한다. 아니면 평소처럼 넘긴다.
         """
         self.listen_ip = listen_ip
         self.answer_ip = answer_ip
@@ -72,6 +76,8 @@ class DnsHijack:
         self.forward = forward
         self.catch_all = catch_all
         self.only_src = set(only_src or [])
+        self.is_src_ok = is_src_ok
+        self.on_unregistered = on_unregistered
         self.sock = None
         self._slots = threading.BoundedSemaphore(FWD_MAX) if threading else None
 
@@ -122,6 +128,23 @@ class DnsHijack:
         qname = qname.rstrip(".")
         return any(qname == n or qname.endswith("." + n) for n in self.names)
 
+    def _src_ok(self, src, qname):
+        """이 출발지의 질의를 하이재킹해도 되나(등록된 기기인가)."""
+        if self.is_src_ok is None:
+            ok = not self.only_src or src in self.only_src
+        else:
+            try:
+                ok = bool(self.is_src_ok(src))
+            except Exception as e:
+                self._log("[dns] 등록 판정 오류 %s: %s" % (src, e))
+                ok = False
+        if not ok and self.on_unregistered and self._is_hijacked(qname):
+            try:
+                ok = self.on_unregistered(src, qname) is True
+            except Exception as e:
+                self._log("[dns] 후보 기록 오류 %s: %s" % (src, e))
+        return ok
+
     def handle_once(self):
         """select 루프에서 readable일 때 1패킷 처리."""
         data, addr = self.sock.recvfrom(BUF)
@@ -132,8 +155,8 @@ class DnsHijack:
         except Exception:
             return
         src = addr[0]
-        # 등록된 린나이 기기 목록이 있으면, 목록 밖 기기의 질의는 건드리지 않고 그대로 넘긴다.
-        if self.only_src and src not in self.only_src:
+        # 등록된 린나이 기기 목록(또는 판정 함수)이 있으면, 등록 안 된 기기의 질의는 건드리지 않고 그대로 넘긴다.
+        if not self._src_ok(src, qname):
             self._forward(data, addr, qname)
             return
         if self._is_hijacked(qname):
