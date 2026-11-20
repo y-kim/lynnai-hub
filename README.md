@@ -24,6 +24,7 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 3. **SmartThings**: 초대 링크 <https://bestow-regional.api.smartthings.com/invite/Qrjp9gnaJbMq> 로 드라이버
    *LYNNAI Hub (Zigbee)* 를 설치 → 앱에서 **기기 추가 → 주변 기기 검색** → 허브 버튼 **짧게**.
 4. **린나이 기기**: 보일러·온도 조절기 Wi-Fi 모듈을 설정 모드로 두고 허브 버튼 **길게(3초)**.
+   또는 린나이 스마트링크 앱에서 Wi-Fi 로 허브 AP 를 골라 등록한 뒤, 관리 화면 **등록 대기**에서 **등록**.
 
 ## 시험한 기기
 
@@ -62,9 +63,9 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 | `firmware/esp32/` | **ESP32-C6 허브 펌웨어**(ESP-IDF v5.5): 허브 AP·DNS·TLS 중계/단독 브로커·Zigbee·LAN·관리 화면·API·센서·진단 |
 | `edge-driver/` | SmartThings Edge 드라이버(Zigbee). 공통 로직 `src/core.lua`, 하드웨어 없는 시험 `test/` |
 | `edge-driver-lan/` | 같은 코어를 쓰는 LAN 드라이버(SSDP + TCP 8484) |
-| `docs/` | 설치·운영 안내 |
+| `docs/` | 설치·운영 안내: [ESP32 허브](docs/esp32-hub.md), [NAS 허브](docs/nas-hub.md) |
 | `tools/hub_doctor.py` | PC 에서 허브 고장 진단(API · SmartThings CLI · USB 시리얼) |
-| `server/lynnai-nas/` | ESP32 없이 **NAS 도커**로 같은 일을 하는 LAN 전용 허브(파이썬 판, 프록시/단독) |
+| `server/lynnai-nas/` | ESP32 없이 **NAS 도커**로 같은 일을 하는 LAN 전용 허브(파이썬 판, 프록시/단독). 집 네트워크의 DNS 서버를 바꿔야 한다 — [docs/nas-hub.md](docs/nas-hub.md) |
 | `server/lynnai-hub-watch/` | 허브 API 를 SQLite 로 모으는 NAS 기록기 |
 | `standalone/` | 클라우드를 대체하는 최소 MQTT 브로커 + DNS 하이재킹(Pi 시절 검증용, NAS 단독 모드가 재사용) |
 | `appliance/`, `plugins/` | 라즈베리 파이 판 제품(프로비저닝 포털·플러그인). ESP32 허브로 옮겨 오며 지금은 참고용 |
@@ -75,15 +76,18 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
   펌웨어에 들어 있는 인증서는 공개 정보인 린나이 클라우드 CA 뿐이다.
 - **클라우드 검증**: 허브(와 NAS 프록시)는 린나이 클라우드 인증서를 사설 CA "ckstack" 과 인증서 이름
   (`dev2.ckpush.com`)으로 검증하고, 검증할 수 없으면 붙지 않는다.
-- **받는 쪽 제한**: 기기용 MQTT(8883)·`/key/server` 는 허브 AP 대역에서만 받는다. LAN 통로(8484)는 기본 꺼짐이고,
+- **받는 쪽 제한**: 기기용 MQTT(8883)·`/key/server` 는 허브 AP 대역에서만 받는다. 허브 AP 에 붙었더라도 등록된 기기(버튼 등록,
+  또는 관리 화면 **등록 대기**에서 승인)만 읽고 SmartThings 에 내보낸다. LAN 통로(8484)는 기본 꺼짐이고,
   켜도 새 드라이버는 허브 버튼으로 연 3분 창 안에서만 등록된다. Wi-Fi 를 멈추는 Zigbee 가입 API 는 관리자 세션이나
   API 토큰이 필요하고, 관리자 로그인은 주소별로 5번 틀리면 5분 잠긴다.
+  LAN 통로는 토큰·명령이 평문이라 믿을 수 있는 집 네트워크에서만 쓴다.
 - **첫 설정 AP** 는 개방망 → 설정 페이지에서 허브 AP 암호(WPA2)와 관리자 암호를 반드시 정한다.
   관리자 암호는 PBKDF2-HMAC-SHA256 해시로만 저장하고, 로그아웃은 세션을 확인한 POST 로만 된다.
 - **저장 데이터 검사**: 설정마다 CRC32 를 같이 저장해 손상을 찾아 알린다(LED 4번).
-- **저장 데이터 암호화(선택)**: 관리 화면에서 eFuse 키 블록 하나를 골라 켜면 허브가 그 블록에 HMAC 키를 굽고
-  저장 데이터(Wi-Fi 암호·API 토큰·Zigbee 가입 정보 등)를 XTS-AES 로 암호화한다(켤 때 허브 버튼 확인, 전원이 끊겨도
-  원래대로 되돌린 뒤 다시 시도). 막는 것은 플래시 덤프이고, 보안 부팅이 없어 다른 펌웨어를 올리면 풀린다. 되돌릴 수 없어 기본은 꺼짐 —
+- **저장 데이터 암호화(선택)**: 관리 화면에서 eFuse 키 블록을 고르고 허브 버튼으로 확인하면, 비어 있는 블록에는 HMAC 키를 굽고
+  기존 HMAC 키가 있으면 그 키를 사용해 저장 데이터(Wi-Fi 암호·API 토큰·Zigbee 가입 정보 등)를 XTS-AES 로 암호화한다.
+  암호화에 실패하면 허브 재설정이나 SmartThings와의 Zigbee 재페어링이 필요할 수 있다.
+  막는 것은 플래시 덤프이고, 보안 부팅이 없어 다른 펌웨어를 올리면 풀린다. 되돌릴 수 없어 기본은 꺼짐 —
   꺼져 있으면 USB 로 플래시를 읽을 때 평문이 보인다. USB 진단 `diag` 는 비밀값을 출력하지 않는다.
   기기(보일러 모듈)는 허브 인증서를 검증하지 않는다.
 
