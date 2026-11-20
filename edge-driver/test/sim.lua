@@ -581,5 +581,36 @@ check(#sent_cmds == 0, "방1 이 다시 보임 → 명령 없음")
 state(9, "d4e5f6", f09_rooms(false, false, false))
 check(last_cmd_has("f06@a1b2c3 b1=0"), "방1 을 실제로 끄면 난방 끔")
 
+print("[25] 허브가 고장으로 본 센서는 오프라인(플러그인 알림 둘째 바이트), 풀리면 다시 온라인")
+reset()
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 305, 0xFFFFFFFF, 0, 0, 0))
+local room, gas = driver._children["room"], driver._children["gas"]
+check(room and gas and room._online == true and gas._online == true, "센서 둘 다 온라인")
+core.on_message(hub, CMD.PLUGINS, string.char(3))                  -- 옛 펌웨어(첫 바이트만): 고장 없음
+check(room._online == true and gas._online == true, "옛 펌웨어 알림(1바이트) → 그대로 온라인")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 1))               -- 온습도계 응답 없음
+check(room._online == false and gas._online == true, "온습도계 고장 → 온습도계만 오프라인")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 가스도: 난방 중인데 펄스 없음
+check(gas._online == false, "가스 고장 → 가스 계량기 오프라인")
+check(lastv("gas", "flow", "status") == "펄스 없음 — 센서 확인", "가스 기기에 이유 표시")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 305, 0xFFFFFFFF, 0, 0, 0))
+check(gas._online == false, "고장 중 1분마다 오는 가스 값으로 온라인이 되지 않음")
+core.info_changed(nil, room)
+check(room._online == false, "기기 정보가 바뀌어 다시 그려도 고장이면 오프라인")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 2))               -- 온습도계가 다시 응답(허브는 '정상' 을 값보다 먼저 보낸다)
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2190, 3900))
+check(room._online == true and gas._online == false, "온습도계 복구 → 온라인, 가스는 그대로")
+defer_timers = true
+core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 3초 안에 풀리면 오프라인으로 남지 않는다
+core.on_message(hub, CMD.PLUGINS, string.char(3, 2))
+run_timers()
+defer_timers = false
+check(room._online == true, "오프라인 예약 뒤 3초 안에 풀림 → 온라인 유지")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 0))               -- 펄스가 다시 옴
+check(gas._online == true, "가스 복구 → 온라인")
+core.on_message(hub, CMD.PLUGINS, string.char(2, 1))               -- 온습도계 플러그인을 뺌: 기기 삭제(고장 비트는 의미 없음)
+check(deleted["room"] and driver._children["gas"] ~= nil, "플러그인을 빼면 그 기기만 삭제")
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

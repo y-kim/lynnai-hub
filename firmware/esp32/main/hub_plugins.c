@@ -65,6 +65,7 @@ static int s_val[NPLUG][4];
 static const char *s_act_label[NPLUG];
 static const char *s_act_hint[NPLUG];
 static hub_plugin_action_fn s_act_fn[NPLUG];
+static hub_plugin_status_fn s_stat_fn[NPLUG];
 
 static const plugin_t *find(const char *id, int *idx)
 {
@@ -86,6 +87,14 @@ void hub_plugin_register_action(const char *id, const char *label, const char *h
         s_act_label[i] = label;
         s_act_hint[i] = hint;
         s_act_fn[i] = fn;
+    }
+}
+
+void hub_plugin_register_status(const char *id, hub_plugin_status_fn fn)
+{
+    int i;
+    if (find(id, &i)) {
+        s_stat_fn[i] = fn;
     }
 }
 
@@ -174,6 +183,13 @@ void hub_plugins_render(char *o, size_t cap)
                  "onclick=\"return confirm('플러그인을 삭제할까요? 센서를 더 이상 읽지 않고, 모든 플랫폼에서 기기가 빠집니다.')\">"
                  "\U0001f5d1️</button></form></div><p class=muted>%s</p>", p->name, p->id, p->help);
         cat(o, cap, t);
+        if (s_stat_fn[i]) {                         /* 지금 상태: 정상(값) / 오프라인(이유) */
+            char st[200];
+            st[0] = 0;
+            bool ok = s_stat_fn[i](st, sizeof(st));
+            snprintf(t, sizeof(t), "<p class=%s>%s %s</p>", ok ? "ok" : "warn", ok ? "●" : "● 오프라인 —", st);
+            cat(o, cap, t);
+        }
         /* 설정 + 노출을 한 폼, 저장 하나로 */
         snprintf(t, sizeof(t), "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->id);
         cat(o, cap, t);

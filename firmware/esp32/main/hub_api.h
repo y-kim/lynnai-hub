@@ -9,6 +9,10 @@ void hub_api_register(httpd_handle_t srv);
 /* 읽기 API 인증(토큰이 있으면 Bearer 요구). false 면 401 을 이미 보냈다 */
 bool hub_api_authorized(httpd_req_t *req);
 
+/* 지금 난방으로 보일러를 쓰는 중인가(가스 계량기 감시용): 연결된 조절기의 켜진 방 중 '난방 중' 이 하나라도 있고,
+ * 보일러 조절기가 있으면 그 전원·난방도 켜져 있을 때. 온수만 쓰는 것은 상태에 표시가 없어 알 수 없다. */
+bool hub_api_heating(void);
+
 /* 관리 화면 */
 bool hub_api_has_token(void);
 bool hub_api_token_new(char out[33]);   /* 저장 실패면 false(토큰 그대로) */

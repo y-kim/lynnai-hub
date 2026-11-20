@@ -9,6 +9,10 @@ void hub_sensors_reload(void);   /* 핀·설정 바뀜: 재부팅 없이 센서�
 bool hub_sensors_set_reading(double m3);         /* 계량기 숫자 맞추기(관리 화면) */
 /* 가스/온습도 값은 hub_api 가 스냅샷으로 가져가 /api/v1/state·/metrics 로 낸다(플러그인은 경로를 안 연다) */
 void hub_sensors_refresh(void);
+/* 고장으로 본 센서(PLUG_ROOM / PLUG_GAS 비트). 플랫폼에는 플러그인 알림의 둘째 바이트로 간다 → 그 기기 오프라인
+ *   온습도계: 읽기가 3번 연속 실패(약 40초)   가스 계량기: 난방 중인 시간이 한도만큼 쌓이도록 펄스가 없음 */
+uint8_t hub_sensors_faults(void);
+void hub_sensors_print(void);                   /* USB diag */
 
 /* 서버 API 용 */
 typedef struct {

@@ -18,6 +18,9 @@
 typedef bool (*hub_plugin_action_fn)(const char *value, char *msg, size_t msglen);
 void hub_plugin_register_action(const char *id, const char *label, const char *hint, hub_plugin_action_fn fn);
 bool hub_plugins_action(const char *form, char *msg, size_t msglen);   /* POST /admin/plugin-action */
+/* 플러그인이 등록하는 '지금 상태'(관리 화면 카드에 한 줄): out 에 문구를 쓰고, 정상이면 true(오프라인이면 false) */
+typedef bool (*hub_plugin_status_fn)(char *out, size_t cap);
+void hub_plugin_register_status(const char *id, hub_plugin_status_fn fn);
 
 void hub_plugins_load(void);
 bool hub_plugin_enabled(const char *id);

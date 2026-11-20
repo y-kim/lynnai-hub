@@ -4,7 +4,7 @@
 -- 기기는 종류(f06/f09)가 아니라 MAC 끝 3바이트(instance, 6 hex)로 식별한다 → 보일러 N대·써머스탯 N개.
 --   허브 → ST  0x01 상태 [종류 6|9][MAC끝3(3B)][EPC70 블롭]
 --              0x02 연결 ([종류][MAC끝3]) * n  (목록에 없으면 오프라인)
---              0x03 온습도 int16 x2   0x04 가스 u32 x5   0x05 플러그인 비트   0x06 노출 u32
+--              0x03 온습도 int16 x2   0x04 가스 u32 x5   0x05 플러그인 비트(+고장 비트)   0x06 노출 u32
 --   ST → 허브  0x00 명령 "f06@<mac> b1=1" / "f09@<mac> a0=7,d4=10" / "refresh" (여러 개는 ";")
 --
 -- 자식 기기 키: 보일러 = "b"..mac, 존 = "t"..mac.."_"..slot. 센서는 "room"/"gas"(허브 1개당 하나).
@@ -622,8 +622,13 @@ local function on_links(parent, b)
 end
 
 -- 허브에 직접 꽂은 센서(허브 1개당 하나) — 식별 MAC 없음, 키 고정
+-- 허브가 고장으로 본 센서(플러그인 알림의 둘째 바이트: 1 온습도계 응답 없음, 2 난방 중인데 가스 펄스 없음)는 오프라인.
+local FAULT_ROOM, FAULT_GAS = 1, 2
+local function faulty(parent, bit) return ((hub_state(parent).plug_fault or 0) & bit) ~= 0 end
+
 local function show_room(parent)
   local child = parent:get_child_by_parent_assigned_key(ROOM_KEY)
+  if child and faulty(parent, FAULT_ROOM) then return go_offline(child, false, true) end   -- 글자 칸이 없는 기기
   local v = hub_state(parent).room
   if not child or not v then return end
   mark_online(child)
@@ -640,6 +645,10 @@ end
 
 local function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
+  if child and faulty(parent, FAULT_GAS) then
+    emit(child, "flow", status_cap.status("펄스 없음 — 센서 확인"))
+    return go_offline(child, false, true)
+  end
   local v = hub_state(parent).gas
   if not child or not v then return end
   local count, reading, hour, day, flow = table.unpack(v)
@@ -661,12 +670,19 @@ end
 local PLUGIN_CHILD = { [1] = { key = ROOM_KEY, field = "room" }, [2] = { key = GAS_KEY, field = "gas" } }
 local function on_plugins(parent, b)
   local m = b:byte(1) or 0
+  local s = hub_state(parent)
+  local was = s.plug_fault or 0
+  s.plug_fault = b:byte(2) or 0                      -- 옛 펌웨어는 첫 바이트만 보낸다 → 고장 없음
   for bit, p in pairs(PLUGIN_CHILD) do
     if (m & bit) == 0 then
-      hub_state(parent)[p.field] = nil
+      s[p.field] = nil
       local child = parent:get_child_by_parent_assigned_key(p.key)
       if child then delete_child(child) end
     end
+  end
+  if s.plug_fault ~= was then                        -- 바뀐 순간에만(5분마다 오는 알림으로 값을 다시 내보내지 않게)
+    show_room(parent)
+    show_gas(parent)
   end
 end
 

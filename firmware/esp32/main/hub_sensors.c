@@ -30,6 +30,7 @@
 #include "hub_plugins.h"
 #include "hub_expose.h"
 #include "hub_events.h"
+#include "hub_api.h"
 
 static const char *TAG = "HUB_SENSORS";
 
@@ -43,6 +44,16 @@ static uint32_t s_step_l;
 #define GAS_HIGH_MS  300
 #define GAS_POLL_MS  20
 #define FLOW_STOP_S  900              /* 이만큼 펄스가 없으면 유량 0 */
+/* 고장 판정. 온습도계: 읽기 실패하면 20초 뒤 다시, 3번 연속이면 오프라인(그 뒤로는 30초마다 다시 본다).
+ * 가스 계량기: '난방 중' 인 시간(펄스가 오면 0부터 다시)이 한도를 넘도록 펄스가 없으면 오프라인.
+ *   한도 = 1펄스 양(L) × 180초, 최소 30분 — 난방 중이면 평균 20 L/h 는 쓴다고 보고 넉넉히 잡는다(10 L 펄스 = 30분).
+ *   버너가 켜졌다 꺼졌다 하는 것을 감안한 값. 온수만 쓸 때는 보일러 상태에 표시가 없어 감시하지 못한다. */
+#define ROOM_FAIL_N       3
+#define ROOM_RETRY_S      20
+#define ROOM_RETRY_BAD_S  30
+#define GAS_FAULT_MIN_S   1800
+#define GAS_FAULT_S_PER_L 180
+#define GAS_WATCH_S       5
 #define RING         1024             /* 최근 24시간 펄스 시각(초). 넘치면 '하루' 가 적게 나온다 */
 #define NS           "gas"
 #define UNSET        0xFFFFFFFFu
@@ -64,6 +75,28 @@ static bool s_run_gas_on, s_run_room_on;
 static int s_run_gas_pin = -1, s_run_sda = -1, s_run_scl = -1;
 static int16_t s_room_t100, s_room_h100;      /* 마지막 온습도(서버 API 용) */
 static int64_t s_room_at_us;
+static volatile bool s_room_fault, s_gas_fault;
+static volatile int s_room_fails;             /* 연속 읽기 실패 */
+static volatile uint32_t s_gas_heat_s;        /* 마지막 펄스 뒤로 '난방 중' 이었던 시간(초) */
+static volatile bool s_heating_now;           /* 마지막으로 본 '난방 중'(diag 용) */
+
+uint8_t hub_sensors_faults(void)
+{
+    return (uint8_t)((s_room_fault && s_run_room_on ? PLUG_ROOM : 0) | (s_gas_fault && s_run_gas_on ? PLUG_GAS : 0));
+}
+
+/* 플랫폼에 알림: [켜진 플러그인 비트][고장 비트]. 옛 드라이버는 첫 바이트만 본다 */
+static void send_plugins(void)
+{
+    uint8_t m[2] = { hub_plugins_mask(), hub_sensors_faults() };
+    hub_uplink_send(HUB_RK_CMD_PLUGINS, m, 2);
+}
+
+static uint32_t gas_fault_limit_s(void)
+{
+    uint32_t lim = s_step_l * GAS_FAULT_S_PER_L;
+    return lim < GAS_FAULT_MIN_S ? GAS_FAULT_MIN_S : lim;
+}
 
 static uint32_t now_s(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
@@ -141,12 +174,34 @@ static void gas_pulse(void)
     }
     xSemaphoreGive(s_lock);
     s_count_unsaved++;        /* NVS 저장은 펄스마다 하지 않고 모아서(아래) — Zigbee 자격증명 있는 플래시 마모·간섭 줄임 */
+    s_gas_heat_s = 0;
+    if (s_gas_fault) {        /* 펄스가 다시 온다: 값 보고보다 먼저 '정상' 을 알린다 */
+        s_gas_fault = false;
+        ESP_LOGI(TAG, "가스 계량기: 펄스가 다시 들어옴 — 정상");
+        send_plugins();
+    }
     s_gas_dirty = true;
     hub_event(EV_GAS_PULSE, NULL, (int32_t)s_count, (int32_t)s_step_l);   /* 서버가 정확한 시각으로 다시 셀 수 있게 */
     ESP_LOGI(TAG, "가스 펄스 %lu", (unsigned long)s_count);
 }
 
 static void send_gas(void);
+
+/* GAS_WATCH_S 초마다: 난방 중인 시간을 쌓고, 한도를 넘도록 펄스가 없으면 고장으로 본다 */
+static void gas_watch(void)
+{
+    s_heating_now = hub_api_heating();
+    if (s_gas_fault || !s_heating_now) {
+        return;
+    }
+    s_gas_heat_s += GAS_WATCH_S;
+    if (s_gas_heat_s >= gas_fault_limit_s()) {
+        s_gas_fault = true;
+        ESP_LOGW(TAG, "가스 계량기: 난방 중 %lu분 동안 펄스 없음 — 오프라인으로 알림(스위치 선·자석 위치 확인)",
+                 (unsigned long)(s_gas_heat_s / 60));
+        send_plugins();
+    }
+}
 
 static void gas_task(void *arg)
 {
@@ -161,7 +216,7 @@ static void gas_task(void *arg)
     gpio_config(&io);
     int low_ms = 0, high_ms = 0;
     bool armed = false;
-    int64_t next_gas = 0, next_save = 60LL * 1000000;
+    int64_t next_gas = 0, next_save = 60LL * 1000000, next_watch = 0;
     for (;;) {
         if (gen != s_gas_gen) {                        /* 가스 설정이 바뀜 — 이 태스크만 종료 */
             s_gas_alive = false;
@@ -184,6 +239,10 @@ static void gas_task(void *arg)
         }
         /* 보고: 펄스가 오면 곧바로(최소 5초 간격), 아니면 1분마다. 센 적·보정한 적 없으면 안 보냄 */
         int64_t t = esp_timer_get_time();
+        if (t >= next_watch) {
+            next_watch = t + GAS_WATCH_S * 1000000LL;
+            gas_watch();
+        }
         if ((s_count || s_base_l != UNSET) && (t >= next_gas || (s_gas_dirty && t >= next_gas - 55LL * 1000000))) {
             s_gas_dirty = false;
             next_gas = t + 60LL * 1000000;
@@ -201,6 +260,9 @@ static void send_gas(void)
 {
     gas_view_t v = gas_view();
     uint32_t p[5] = { v.count, v.reading_l, v.hour_l, v.day_l, v.flow_lph };
+    if (s_gas_fault) {
+        send_plugins();       /* 고장 중엔 값보다 먼저 다시 알린다(드라이버가 재시작해 잊었어도 온라인으로 되돌리지 않게) */
+    }
     hub_uplink_send(HUB_RK_CMD_GAS, (uint8_t *)p, sizeof(p));   /* 리틀엔디언 u32 x5 */
 }
 
@@ -231,12 +293,19 @@ static bool sht_init(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    if (i2c_new_master_bus(&bc, &s_bus) != ESP_OK) {
+    if (!s_bus && i2c_new_master_bus(&bc, &s_bus) != ESP_OK) {      /* 실패하면 다음 차례에 다시 해 본다 */
         s_bus = NULL;
         return false;
     }
+    if (s_sht) {
+        return true;
+    }
     i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = SHT_ADDR, .scl_speed_hz = 100000 };
-    return i2c_master_bus_add_device(s_bus, &dc, &s_sht) == ESP_OK;
+    if (i2c_master_bus_add_device(s_bus, &dc, &s_sht) != ESP_OK) {
+        s_sht = NULL;
+        return false;
+    }
+    return true;
 }
 
 static bool sht_read(float *t, float *h)
@@ -262,7 +331,6 @@ static void room_task(void *arg)
 {
     uint32_t gen = (uint32_t)(uintptr_t)arg;
     s_room_alive = true;
-    bool sht = sht_init();
     bool sht_seen = false;
     int64_t next_sht = 0;
     for (;;) {
@@ -271,21 +339,38 @@ static void room_task(void *arg)
             vTaskDelete(NULL);
         }
         int64_t t = esp_timer_get_time();
-        if (sht && t >= next_sht) {
-            next_sht = t + (int64_t)s_every_s * 1000000;   /* 간격은 매번 다시 읽음(재시작 불필요) */
+        if (t >= next_sht) {
             float tc, rh;
-            if (sht_read(&tc, &rh)) {
-                if (!sht_seen) {
-                    ESP_LOGI(TAG, "SHT31 찾음: %.1f°C %.0f%%", tc, rh);
+            if (sht_init() && sht_read(&tc, &rh)) {
+                next_sht = t + (int64_t)s_every_s * 1000000;   /* 간격은 매번 다시 읽음(재시작 불필요) */
+                if (!sht_seen || s_room_fault) {
+                    ESP_LOGI(TAG, "SHT31 %s: %.1f°C %.0f%%", s_room_fault ? "다시 응답" : "찾음", tc, rh);
                 }
                 sht_seen = true;
+                s_room_fails = 0;
+                if (s_room_fault) {                    /* 값 보고보다 먼저 '정상' 을 알린다 */
+                    s_room_fault = false;
+                    send_plugins();
+                }
                 int16_t p[2] = { (int16_t)(tc * 100), (int16_t)(rh * 100) };
                 s_room_t100 = p[0];
                 s_room_h100 = p[1];
                 s_room_at_us = esp_timer_get_time();
                 hub_uplink_send(HUB_RK_CMD_ROOM, (uint8_t *)p, sizeof(p));
-            } else if (sht_seen) {
-                ESP_LOGW(TAG, "SHT31 읽기 실패");
+            } else {
+                int retry = s_room_fault ? ROOM_RETRY_BAD_S : ROOM_RETRY_S;
+                if (retry > s_every_s) {
+                    retry = s_every_s;
+                }
+                next_sht = t + (int64_t)retry * 1000000;
+                if (s_room_fails < ROOM_FAIL_N && ++s_room_fails == ROOM_FAIL_N) {
+                    s_room_fault = true;
+                    ESP_LOGW(TAG, "SHT31 이 %d번 연속 응답하지 않음 — 오프라인으로 알림(배선 3V3·GND·SDA %d·SCL %d 확인)",
+                             ROOM_FAIL_N, s_sda, s_scl);
+                    send_plugins();
+                } else if (sht_seen && s_room_fails == 1) {
+                    ESP_LOGW(TAG, "SHT31 읽기 실패 — %d초 뒤 다시", retry);
+                }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -301,8 +386,7 @@ static void announce_task(void *arg)
         if (t >= next || s_plug_dirty) {
             s_plug_dirty = false;
             next = t + 300LL * 1000000;
-            uint8_t m = hub_plugins_mask();
-            hub_uplink_send(HUB_RK_CMD_PLUGINS, &m, 1);
+            send_plugins();
             hub_expose_send_all();
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -328,6 +412,48 @@ bool hub_sensors_gas(gas_view_t *v, uint32_t *step_l)
     *v = gas_view();
     *step_l = s_step_l;
     return true;
+}
+
+/* 관리 화면 카드의 상태 줄 */
+static bool room_status(char *out, size_t cap)
+{
+    if (s_room_fault) {
+        snprintf(out, cap, "센서가 응답하지 않습니다. 배선(3V3·GND·SDA·SCL)을 확인하세요.");
+        return false;
+    }
+    if (!s_room_at_us) {
+        snprintf(out, cap, "확인 중…");
+        return true;
+    }
+    snprintf(out, cap, "정상 · %.1f°C · %.0f%% (%d초 전)", s_room_t100 / 100.0f, s_room_h100 / 100.0f,
+             (int)((esp_timer_get_time() - s_room_at_us) / 1000000));
+    return true;
+}
+
+static bool gas_status(char *out, size_t cap)
+{
+    uint32_t last = s_last_s, t = now_s();
+    if (s_gas_fault) {
+        snprintf(out, cap, "난방 중 %lu분 동안 펄스가 없습니다. 스위치 선과 자석 위치를 확인하세요.",
+                 (unsigned long)(s_gas_heat_s / 60));
+        return false;
+    }
+    if (!last) {
+        snprintf(out, cap, "정상 · 누적 %lu펄스 · 켜진 뒤 펄스 없음", (unsigned long)s_count);
+    } else {
+        snprintf(out, cap, "정상 · 누적 %lu펄스 · 마지막 펄스 %lu분 전", (unsigned long)s_count, (unsigned long)((t - last) / 60));
+    }
+    return true;
+}
+
+void hub_sensors_print(void)
+{
+    printf("sensor room on=%d fault=%d fails=%d age=%llds\n", s_run_room_on, s_room_fault, s_room_fails,
+           s_room_at_us ? (long long)((esp_timer_get_time() - s_room_at_us) / 1000000) : -1LL);
+    printf("sensor gas on=%d fault=%d pin=%d level=%d pulses=%lu last=%lds heating=%d heat_s=%lu limit_s=%lu\n", s_run_gas_on,
+           s_gas_fault, s_run_gas_pin, s_run_gas_on && s_run_gas_pin >= 0 ? gpio_get_level(s_run_gas_pin) : -1,
+           (unsigned long)s_count, s_last_s ? (long)(now_s() - s_last_s) : -1L, s_heating_now,
+           (unsigned long)s_gas_heat_s, (unsigned long)gas_fault_limit_s());
 }
 
 void hub_sensors_refresh(void)
@@ -381,6 +507,8 @@ static void gas_apply(void)
         return;                                     /* 켜짐·핀 그대로면 가스 태스크는 안 건드림 */
     }
     s_gas_gen++;                                    /* 돌던 가스 태스크만 종료 */
+    s_gas_fault = false;                            /* 켜짐·핀이 바뀌면 처음부터 다시 본다 */
+    s_gas_heat_s = 0;
     for (int i = 0; i < 40 && s_gas_alive; i++) {
         vTaskDelay(pdMS_TO_TICKS(25));
     }
@@ -393,6 +521,7 @@ static void gas_apply(void)
     if (want) {
         ESP_LOGI(TAG, "가스 계량기: 핀 %d, 1펄스 %lu L, 누적 %lu", pin, (unsigned long)s_step_l, (unsigned long)s_count);
         hub_plugin_register_action("gas", "계량기 숫자 맞추기 (㎥)", "예: 1676.47", gas_calibrate);
+        hub_plugin_register_status("gas", gas_status);
         xTaskCreate(gas_task, "hub_gas", 4096, (void *)(uintptr_t)s_gas_gen, 6, NULL);
     } else {
         ESP_LOGI(TAG, "가스 계량기 꺼짐");
@@ -429,7 +558,11 @@ static void room_apply(void)
     s_run_room_on = want;
     s_run_sda = sda;
     s_run_scl = scl;
+    s_room_fault = false;                           /* 켜짐·핀이 바뀌면 처음부터 다시 본다 */
+    s_room_fails = 0;
+    s_room_at_us = 0;
     if (want) {
+        hub_plugin_register_status("room", room_status);
         ESP_LOGI(TAG, "온습도계: SDA %d, SCL %d, %d초마다", sda, scl, s_every_s);
         xTaskCreate(room_task, "hub_room", 3072, (void *)(uintptr_t)s_room_gen, 3, NULL);
     } else {

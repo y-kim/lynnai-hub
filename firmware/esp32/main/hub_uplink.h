@@ -27,7 +27,8 @@
 #define HUB_RK_CMD_ROOM     0x03    /* 온습도 int16 x2 (°C*100, %*100) */
 #define HUB_RK_CMD_GAS      0x04    /* u32 x5 (펄스, 계량기 L|FFFFFFFF, 1시간 L, 24시간 L, 유량 L/h) */
 #define HUB_RK_CMD_EXPOSE   0x06    /* u32: 이 통로에 노출할 항목 비트(hub_expose.h) */
-#define HUB_RK_CMD_PLUGINS  0x05    /* [켜진 플러그인 비트: 1 온습도계, 2 가스] — 꺼진 것의 기기는 지운다 */
+#define HUB_RK_CMD_PLUGINS  0x05    /* [켜진 플러그인 비트: 1 온습도계, 2 가스][고장 비트(같은 자리)] — 꺼진 것의 기기는 지우고,
+                                     * 고장인 것은 오프라인으로 보인다. 옛 펌웨어는 첫 바이트만 보낸다 */
 #define HUB_RK_CMD_PAIRS    0x07    /* 보일러↔써머스탯 짝: ([f09 MAC끝3(3)][f06 MAC끝3(3)]) * n (관리 화면 수동) */
 #define HUB_RK_CMD_FORGET   0x08    /* 기기 삭제: [종류 6|9][MAC끝3바이트] — 드라이버가 그 기기 자식들을 지운다 */
 

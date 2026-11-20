@@ -38,6 +38,7 @@
 #include "hub_crypt.h"
 #include "hub_devs.h"
 #include "hub_radio.h"
+#include "hub_sensors.h"
 #include "nvs_flash.h"
 
 static const char *TAG = "diag";
@@ -187,6 +188,7 @@ static void dump(void)
     }
     hub_devs_print();
     hub_radio_print();
+    hub_sensors_print();
     printf("uplink=0x%02x mode=%s\n", hub_uplink_mask(), hub_proxy_mode() == HUB_MODE_STANDALONE ? "standalone" : "proxy");
 
     hub_dev_t *dev = s_dev;

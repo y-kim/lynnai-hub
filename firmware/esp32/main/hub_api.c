@@ -186,6 +186,32 @@ static boiler_t decode_boiler(const uint8_t *b, int n)
     return r;
 }
 
+bool hub_api_heating(void)
+{
+    hub_dev_t dev[6];
+    int nd = hub_rinnai_snapshot(dev, 6);
+    bool heating = false, boiler = false, boiler_on = false;
+    for (int i = 0; i < nd; i++) {
+        if (!dev[i].linked) {
+            continue;                              /* 끊긴 기기의 옛 상태로 판단하지 않는다 */
+        }
+        if (dev[i].kind == HUB_KIND_F06) {
+            boiler_t b = decode_boiler(dev[i].blob, dev[i].n);
+            if (b.ok) {
+                boiler = true;
+                boiler_on = boiler_on || (b.power && b.heat);
+            }
+        } else if (dev[i].kind == HUB_KIND_F09) {
+            for (int z = 0; z < NZONES; z++) {
+                if (zone_present(dev[i].blob, dev[i].n, z) && (dev[i].blob[ZONES[z].stat] & 0x42) == 0x42) {
+                    heating = true;                /* 켜짐(0x02) + 난방 중(0x40) */
+                }
+            }
+        }
+    }
+    return heating && (!boiler || boiler_on);
+}
+
 static void hex(char *out, const uint8_t *b, int n)
 {
     for (int i = 0; i < n; i++) {
@@ -257,8 +283,8 @@ static esp_err_t state_get(httpd_req_t *req)
     } else {
         CHUNK("\"time\":null,");
     }
-    CHUNK("\"hub\":{\"heap\":%lu,\"heap_min\":%lu,\"rssi\":%d,\"plugins\":%u},", (unsigned long)esp_get_free_heap_size(),
-          (unsigned long)esp_get_minimum_free_heap_size(), rssi(), hub_plugins_mask());
+    CHUNK("\"hub\":{\"heap\":%lu,\"heap_min\":%lu,\"rssi\":%d,\"plugins\":%u,\"sensor_faults\":%u},", (unsigned long)esp_get_free_heap_size(),
+          (unsigned long)esp_get_minimum_free_heap_size(), rssi(), hub_plugins_mask(), hub_sensors_faults());
     CHUNK("\"links\":{\"boiler\":%s,\"rooms\":%s},", links & 1 ? "true" : "false", links & 2 ? "true" : "false");
 
     boiler_t bo = decode_boiler(f06, n06);
@@ -413,6 +439,13 @@ static esp_err_t metrics_get(httpd_req_t *req)
         }
     }
 #undef MACSTR3
+    CHUNK("# TYPE lynnai_sensor_fault gauge\n");
+    if (hub_plugin_enabled("room")) {
+        CHUNK("lynnai_sensor_fault{sensor=\"room\"} %d\n", (hub_sensors_faults() & PLUG_ROOM) != 0);
+    }
+    if (hub_plugin_enabled("gas")) {
+        CHUNK("lynnai_sensor_fault{sensor=\"gas\"} %d\n", (hub_sensors_faults() & PLUG_GAS) != 0);
+    }
     float tc, rh;
     int age;
     if (hub_sensors_room(&tc, &rh, &age) && age < 600) {
