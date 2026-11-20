@@ -40,6 +40,7 @@ local SWITCH = {
 -- 보일러의 '외출' = 그 보일러에 붙은 방이 모두 외출(update_outing), 외출 명령은 방마다 보낸다(outing_cmds).
 local SWITCH_COMPONENT = { power = "main", hotwater = "hotwater", preheat = "preheat" }
 local HEAT_STATES = { "난방", "외출", "끄기" }
+local HEAT_STATES_NO_OUT = { "난방", "끄기" }     -- 붙은 방이 없는 보일러: 외출을 걸 방이 없다(f06 b3 는 안 먹힘)
 local HEAT_MODES = { [0] = "온돌", [1] = "실내" }
 local ONDOL_TEMPS = { 35, 40, 45 }
 for t = 46, 60 do ONDOL_TEMPS[#ONDOL_TEMPS + 1] = t end
@@ -183,8 +184,9 @@ end
 local function thermos_of(parent, kind, mac)
   if kind == "vboiler" then return { mac } end
   local out = {}
-  for tmac in pairs(hub_state(parent).thermos) do
-    if the_boiler(parent, tmac) == mac then out[#out + 1] = tmac end
+  local s = hub_state(parent)
+  for tmac in pairs(s.thermos) do                 -- 연결 목록을 받은 뒤엔 지금 연결된 조절기만(끊긴 것의 옛 상태는 빼고)
+    if the_boiler(parent, tmac) == mac and (not s.linked or s.linked["9:" .. tmac]) then out[#out + 1] = tmac end
   end
   return out
 end
@@ -208,11 +210,16 @@ end
 
 -- 재시작 직후 판단 막기: 연결 목록을 받았고, 목록의 기기가 모두 한 번씩 상태를 보냈나
 -- (그 전엔 자동화·가상 보일러 만들기/지우기를 하지 않는다 — 일부만 보고 '전부 꺼짐'·'단독'으로 오판하지 않게)
+-- 단, 목록에는 있는데 REPORT_WAIT_S 가 지나도록 상태를 못 보내는 기기는 더 기다리지 않는다(그 하나가 전체를 막지 않게).
+local REPORT_WAIT_S = 120
 local function all_reported(parent)
   local s = hub_state(parent)
   if not s.linked then return false end
+  local now = os.time()
   for key in pairs(s.linked) do
-    if not (s.seen and s.seen[key]) then return false end
+    if not (s.seen and s.seen[key]) and now - ((s.link_since and s.link_since[key]) or now) < REPORT_WAIT_S then
+      return false
+    end
   end
   return true
 end
@@ -305,9 +312,23 @@ local function emit_text(device, text, is_zone)
   device:emit_component_event(device.profile.components.main, ev)
 end
 
-local function go_offline(device, is_zone)
-  emit_text(device, "연결 끊김", is_zone)
-  driver:call_with_delay(3, function() device:offline() end)
+-- 오프라인은 3초 뒤에(글자가 먼저 보이게). 그 사이 돌아오면(mark_online) 예약을 무른다.
+local pending_off, off_seq = {}, 0
+local function mark_online(device)
+  pending_off[device.id] = nil
+  device:online()
+end
+local function go_offline(device, is_zone, no_text)
+  if not no_text then emit_text(device, "연결 끊김", is_zone) end
+  off_seq = off_seq + 1
+  local my = off_seq
+  pending_off[device.id] = my
+  driver:call_with_delay(3, function()
+    if pending_off[device.id] == my then
+      pending_off[device.id] = nil
+      device:offline()
+    end
+  end)
 end
 
 -- 자동화(상태 기반, 양방향): 보일러에 붙은 방들의 on/off 집계가 바뀌는 '순간'에 보일러를 맞춘다.
@@ -317,20 +338,31 @@ end
 -- 재시작(첫 관찰 씨딩)·사용자가 수동으로 보일러를 켜거나 끈 경우엔 되돌리지 않는다(안 싸움).
 -- (ST 앱에서 방 켤 때 즉시 깨우는 건 on_switch 에 그대로 두고, 여기선 보조/비-ST 경로를 커버.)
 local prev_all_off = {}        -- bmac -> 직전 '전부 꺼짐' 여부
+local prev_set = {}            -- bmac -> 직전에 집계한 조절기 목록(바뀌면 기준을 다시 잡는다)
 local function auto_boiler(parent, bmac)
   local s = hub_state(parent)
   local m = s.boilers[bmac]
   if not m or not all_reported(parent) then return end                  -- 재시작 직후 일부 상태로는 판단 안 함
-  local has_thermo, all_off = false, true
+  local has_thermo, all_off, set = false, true, {}
   for tmac, zones in pairs(s.thermos) do
-    if the_boiler(parent, tmac) == bmac then
+    -- 지금 연결된 조절기만 센다(끊긴 조절기의 옛 '켜짐'으로 보일러를 깨우지 않게)
+    if the_boiler(parent, tmac) == bmac and (not s.linked or s.linked["9:" .. tmac]) then
       if next(zones) == nil then return end                              -- 방 정보 없음 = 모름(꺼짐으로 치지 않음)
+      for _, id in ipairs(ZONE_ORDER) do                                 -- 있던 방이 방금 안 보임(1~2번) = 모름: 판단 보류
+        local a = s.absent and s.absent[zkey(tmac, id)]
+        if a and a < 3 and s.had and s.had[zkey(tmac, id)] then return end
+      end
       has_thermo = true
+      set[#set + 1] = tmac
       for _, z in pairs(zones) do if z.on then all_off = false end end   -- z.on = 방 자신의 on/off
     end
   end
-  if not has_thermo then prev_all_off[bmac] = nil; return end            -- 붙은 방 없음 → 건드리지 않음
+  if not has_thermo then prev_all_off[bmac] = nil; prev_set[bmac] = nil; return end   -- 붙은 방 없음 → 건드리지 않음
+  table.sort(set)
+  local sig = table.concat(set, ",")
   local was = prev_all_off[bmac]
+  if prev_set[bmac] ~= sig then was = nil end                            -- 집계 대상이 바뀜(조절기가 붙거나 끊김) → 다시 씨딩
+  prev_set[bmac] = sig
   prev_all_off[bmac] = all_off
   if was == nil then return end                                          -- 첫 관찰은 씨딩만(재시작 안전)
   if all_off and not was then                                            -- 전부 꺼짐
@@ -356,12 +388,13 @@ local function refresh_boiler(parent, mac)
   if not s.online["6:" .. mac] then return go_offline(child) end
   local m = s.boilers[mac]
   if not m then return end
-  child:online()
+  mark_online(child)
   for key, comp in pairs(SWITCH_COMPONENT) do
     emit(child, comp, m[key] and capabilities.switch.switch.on() or capabilities.switch.switch.off())
   end
-  emit(child, "heat", capabilities.mode.supportedModes(HEAT_STATES, { visibility = { displayed = false } }))
-  emit(child, "heat", capabilities.mode.supportedArguments(HEAT_STATES, { visibility = { displayed = false } }))
+  local modes = #thermos_of(parent, "boiler", mac) > 0 and HEAT_STATES or HEAT_STATES_NO_OUT
+  emit(child, "heat", capabilities.mode.supportedModes(modes, { visibility = { displayed = false } }))
+  emit(child, "heat", capabilities.mode.supportedArguments(modes, { visibility = { displayed = false } }))
   emit(child, "heat", capabilities.mode.mode(m.outing and "외출" or m.heat and "난방" or "끄기"))
   emit(child, "heat", ht_cap.heatType(m.heat_mode))
   emit(child, "heat", sp_range(RANGE[m.heat_mode]))
@@ -377,7 +410,7 @@ local function refresh_zone(parent, mac, id)
   if not s.online["9:" .. mac] then return go_offline(child, true) end
   local z = s.thermos[mac] and s.thermos[mac][id]
   if not z then return end
-  child:online()
+  mark_online(child)
   local _, m = the_boiler(parent, mac)   -- 짝 보일러(지정 or 암묵)
   local heating = z.on and (not m or (m.power and m.heat))
   emit(child, "main", heating and capabilities.switch.switch.on() or capabilities.switch.switch.off())
@@ -448,7 +481,7 @@ function refresh_vboiler(parent, mac)
   local s = hub_state(parent)
   if not s.online["9:" .. mac] then return go_offline(child) end
   local vb = s.vboilers and s.vboilers[mac]
-  child:online()
+  mark_online(child)
   if vb and vb.hw_set and vb.hw_set > 0 then
     emit(child, "hotwater", hw_cap.setpoint({ value = vb.hw_set, unit = "C" }))
   end
@@ -511,17 +544,20 @@ local function on_state(parent, b)
   local mac = mac_of(b)
   local blob = b:sub(5)
   local s = hub_state(parent)
-  s.online[kind .. ":" .. mac] = true
+  -- 연결 목록을 받은 뒤엔 목록에 있는 기기만 온라인으로(허브가 끊긴 기기의 옛 상태를 보내도 온라인으로 되돌리지 않게)
+  if not s.linked or s.linked[kind .. ":" .. mac] then s.online[kind .. ":" .. mac] = true end
   s.seen = s.seen or {}
   s.seen[kind .. ":" .. mac] = true
   if kind == KIND_F06 then
     s.boilers[mac] = decode_boiler(blob)
+    update_outing(parent)                                             -- 새로 만든 상태에 외출 집계를 먼저(화면 갱신 전에)
     if shown(parent, KIND_F06, mac, 0) then create_boiler(parent, mac) end
     refresh_boiler(parent, mac)
   elseif kind == KIND_F09 then
     s.thermos[mac] = decode_rooms(blob)
     s.vboilers = s.vboilers or {}
     s.vboilers[mac] = decode_vboiler(blob, s.thermos[mac])
+    update_outing(parent)                                             -- 방 상태가 바뀌었으니 외출 집계부터
     s.absent = s.absent or {}
     for _, id in ipairs(ZONE_ORDER) do
       local zk = zkey(mac, id)
@@ -531,9 +567,12 @@ local function on_state(parent, b)
         if c then delete_child(c) end
       elseif s.thermos[mac][id] then                                  -- 기기가 리포트한 방만 생성
         s.absent[zk] = nil
+        s.had = s.had or {}
+        s.had[zk] = true
         create_zone(parent, mac, id)
       else                                                            -- 안 보이는 방: 3번 연속일 때만 정리(기기 ID 유지)
         s.absent[zk] = (s.absent[zk] or 0) + 1
+        if s.absent[zk] >= 3 and s.had then s.had[zk] = nil end
         if c and s.absent[zk] >= 3 then delete_child(c) end
       end
       refresh_zone(parent, mac, id)
@@ -567,14 +606,17 @@ local function on_links(parent, b)
   local s = hub_state(parent)
   s.online = {}
   s.linked = {}
+  local since = {}                                   -- 목록에 들어온 시각(all_reported 의 기한)
   for i = 1, #b - 3, 4 do
     local kind = b:byte(i)
     if kind == KIND_F06 or kind == KIND_F09 then
       local key = kind .. ":" .. string.format("%02x%02x%02x", b:byte(i + 1), b:byte(i + 2), b:byte(i + 3))
       s.online[key] = true
       s.linked[key] = true
+      since[key] = (s.link_since and s.link_since[key]) or os.time()
     end
   end
+  s.link_since = since
   update_outing(parent)
   refresh_all(parent)
 end
@@ -584,7 +626,7 @@ local function show_room(parent)
   local child = parent:get_child_by_parent_assigned_key(ROOM_KEY)
   local v = hub_state(parent).room
   if not child or not v then return end
-  child:online()
+  mark_online(child)
   emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = math.floor(v[1] / 10 + 0.5) / 10, unit = "C" }))
   emit(child, "main", capabilities.relativeHumidityMeasurement.humidity({ value = math.floor(v[2] / 100 + 0.5) }))
 end
@@ -601,7 +643,7 @@ local function show_gas(parent)
   local v = hub_state(parent).gas
   if not child or not v then return end
   local count, reading, hour, day, flow = table.unpack(v)
-  child:online()
+  mark_online(child)
   local m3 = (reading ~= 0xFFFFFFFF) and reading / 1000 or count * 0.01
   local function f(l) return string.format("%.2f㎥", l / 1000) end
   emit(child, "main", capabilities.gasMeter.gasMeterVolume({ value = m3, unit = "m^3" }))
@@ -809,6 +851,7 @@ local function set_mode(_, device, cmd)
   end
   -- 외출 = 붙은 방마다 f09 a0,b3. 방마다 따로 보낸다(한 메시지가 길어지지 않게)
   local list = outing_cmds(parent, kind, mac, want == "외출", {})
+  if want == "외출" and #list == 0 then log.warn("외출을 걸 방이 없음(붙은 조절기 없음 또는 이미 모두 외출) — 보낸 명령 없음") end
   if want ~= "외출" then list[#list + 1] = pre .. " b1=" .. (want == "난방" and "1" or "0") end
   for _, c in ipairs(list) do send_text(parent, c) end
 end
@@ -908,7 +951,17 @@ end
 
 function M.hub_lost(parent)
   hub_state(parent).online = {}
-  refresh_all(parent)
+  refresh_all(parent)                    -- 상태를 아는 보일러·방: "연결 끊김" 표시
+  -- 그 밖의 자식도 모두 오프라인으로: 센서(온습도·가스), 그리고 드라이버가 재시작해 상태를 모르는 보일러·방
+  for _, d in ipairs(driver:get_devices()) do
+    if is_child(d) then
+      local p = d:get_parent_device()
+      if p and p.id == parent.id then
+        pending_off[d.id] = nil
+        d:offline()
+      end
+    end
+  end
 end
 
 function M.request_refresh(parent) send_text(parent, "refresh") end

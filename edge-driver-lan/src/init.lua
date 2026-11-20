@@ -113,6 +113,14 @@ end
 local function run(device)
   local id = device.device_network_id:sub(#DNI_PREFIX + 1)
   local backoff = 5
+  -- 허브와 끊겼으면(처음부터 못 붙은 경우 포함) 허브 기기와 자식 기기를 한 번 오프라인으로. 다시 붙으면 online()
+  local is_lost = false
+  local function mark_lost()
+    if is_lost then return end
+    is_lost = true
+    core.hub_lost(device)
+    device:offline()
+  end
   while conns[device.id] and conns[device.id].alive do
     local ip, port = device:get_field("ip"), device:get_field("port")
     if not ip then
@@ -140,10 +148,15 @@ local function run(device)
         device:set_field("ip", nil, { persist = true })
         seen[id] = nil
         show(device, "허브 못 찾음")
+        mark_lost()
+      elseif got and not conns[device.id] then
+        c:close()                                 -- 인사하는 사이 허브 기기가 지워짐
+        return
       elseif got then
         log.info(string.format("허브 연결됨 %s:%d", ip, port))
         conns[device.id].sock = c
         backoff = 5
+        is_lost = false
         device:online()
         show(device, "연결됨")
         c:settimeout(90)                          -- 허브가 30초마다 ping
@@ -157,17 +170,23 @@ local function run(device)
             if not ok then log.error("허브 메시지 처리 실패: " .. tostring(err)) end
           end
         end
-        if conns[device.id] then conns[device.id].sock = nil end   -- 그 사이 허브 기기가 지워졌으면 없음
+        if not conns[device.id] then               -- 그 사이 허브 기기가 지워짐: 지워진 기기는 더 건드리지 않는다
+          c:close()
+          return
+        end
+        conns[device.id].sock = nil
         log.warn("허브 연결 끊김")
-        core.hub_lost(device)
         show(device, "연결 끊김")
+        mark_lost()
       elseif first == "busy" then
         log.warn("허브에 이미 드라이버 2개가 붙어 있음")
         show(device, "허브 연결 가득")
+        mark_lost()
         backoff = 30
       elseif first == "denied" then
         log.warn("허브가 거절함: 허브 버튼을 짧게 눌러 페어링 창을 연 뒤 새로고침")
         show(device, "페어링 필요: 허브 버튼 짧게")
+        mark_lost()
         backoff = 30
       end
       c:close()
@@ -177,6 +196,7 @@ local function run(device)
       device:set_field("ip", nil, { persist = true })
       seen[id] = nil
       show(device, "허브 못 찾음")
+      mark_lost()
     end
     socket.sleep(backoff)
     backoff = math.min(backoff * 2, 60)

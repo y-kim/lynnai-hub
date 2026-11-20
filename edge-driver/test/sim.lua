@@ -64,6 +64,8 @@ package.loaded["log"] = { info = function() end, warn = function() end, error = 
 
 ----------------------------------------------------------------- 기기/드라이버 모의
 local driver
+defer_timers, timers = false, {}
+function run_timers() local t = timers; timers = {}; for _, fn in ipairs(t) do fn() end end
 local function mk_device(key, label, profile, parent)
   local d = {
     id = key or "hub",
@@ -73,8 +75,8 @@ local function mk_device(key, label, profile, parent)
     _fields = {},
     _caps = {},     -- 켜진 능력(comp -> set). nil 이면 전부 지원으로 간주(초기)
   }
-  function d:online() end
-  function d:offline() end
+  function d:online() self._online = true end
+  function d:offline() self._online = false end
   function d:emit_component_event(comp, ev)
     emitted[#emitted + 1] = { key = self.parent_assigned_child_key or "hub", comp = comp.id,
       cap = ev.capability.ID, attr = ev.attribute.NAME, value = ev.value }
@@ -111,13 +113,16 @@ driver = {
   try_delete_device = function(_, id)
     for k, c in pairs(driver._children) do if c.id == id then deleted[k] = true; driver._children[k] = nil end end
   end,
-  call_with_delay = function(_, _s, fn) fn() end,    -- 즉시 실행(시뮬)
+  call_with_delay = function(_, _s, fn)              -- 보통은 즉시 실행(시뮬). defer_timers 면 모아 뒀다 run_timers() 로
+    if defer_timers then timers[#timers + 1] = fn else fn() end
+  end,
 }
 function hub:get_child_by_parent_assigned_key(k) return driver._children[k] end
 
 ----------------------------------------------------------------- core 로드
 local core = dofile(HERE .. "../src/core.lua")
-core.setup(driver, { send = function(_, text) sent_cmds[#sent_cmds + 1] = text end,
+local all_cmds = {}            -- 시험 전체에서 드라이버가 보낸 명령(펌웨어 허용 목록 대조용)
+core.setup(driver, { send = function(_, text) sent_cmds[#sent_cmds + 1] = text; all_cmds[#all_cmds + 1] = text end,
                      on_hub_init = function() end })
 
 ----------------------------------------------------------------- 메시지 빌더
@@ -457,6 +462,8 @@ for i = 1, #allout, 2 do t2[#t2 + 1] = allout:sub(i, i + 1) end
 t2[8] = "93"; t2[43] = "93"
 state(9, "d4e5f6", table.concat(t2))
 check(lastv("ba1b2c3", "heat", "mode") == "외출", "모든 방 외출 → 보일러 모드 '외출'")
+state(6, "a1b2c3", F06)                                        -- 보일러가 같은 상태를 다시 보고해도
+check(lastv("ba1b2c3", "heat", "mode") == "외출", "보일러 보고가 와도 '외출' 표시 유지")
 sent_cmds = {}
 core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "난방" } })
 local jn = table.concat(sent_cmds, " | ")
@@ -474,6 +481,105 @@ end
 local n1 = count_range()
 core.on_message(hub, CMD.LINKS, string.char(6) .. mac3("a1b2c3") .. string.char(9) .. mac3("c0ffee"))
 check(n1 >= 1 and count_range() == n1, "같은 설정 범위는 다시 안 보냄")
+
+print("[20] 드라이버가 보내는 코드는 모두 펌웨어 허용 목록에 있다")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, true))
+for _, comp in ipairs({ "main", "hotwater", "preheat" }) do
+  for _, onoff in ipairs({ "on", "off" }) do
+    core.capability_handlers["switch"][onoff](nil, driver._children["ba1b2c3"], { component = comp })
+  end
+end
+local jsw = table.concat(sent_cmds, " | ")
+check(jsw:find("f06@a1b2c3 d7=", 1, true) and jsw:find("f06@a1b2c3 b6=", 1, true), "온수(d7)·예열(b6) 스위치 명령을 보냄")
+local allowed, src = {}, nil
+do
+  local dir = (arg and arg[0] or "sim.lua"):match("^(.*)[/\\]") or "."
+  local f = io.open(dir .. "/../../firmware/esp32/main/hub_rinnai.c")
+  if f then src = f:read("a"); f:close() end
+end
+local okline = src and src:match("code_allowed.-OK%[%]%s*=%s*(%b{})")
+for c in (okline or ""):gmatch('"(%x%x)"') do allowed[c] = true end
+check(okline ~= nil and allowed["80"], "펌웨어 허용 목록을 읽음(hub_rinnai.c code_allowed)")
+local bad = {}
+for _, text in ipairs(all_cmds) do
+  for one in text:gmatch("[^;]+") do
+    local body = one:match("^%s*f0[69]@?%x*%s+(.+)$")
+    for code in (body or ""):gmatch("(%x%x)=") do
+      if not allowed[code] then bad[code] = true end
+    end
+  end
+end
+local badlist = {}
+for c in pairs(bad) do badlist[#badlist + 1] = c end
+check(#all_cmds > 20 and #badlist == 0, "보낸 명령 " .. #all_cmds .. "개의 코드가 모두 허용됨" ..
+  (#badlist > 0 and (" — 빠진 코드: " .. table.concat(badlist, ",")) or ""))
+
+print("[21] 끊긴 조절기의 옛 상태로 판단하지 않는다")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })                       -- 연결: 보일러 + 조절기1. 조절기2(e7e8e9)는 끊겨 있음
+pairs_msg({ { "d4e5f6", "a1b2c3" }, { "e7e8e9", "a1b2c3" } })
+local F06_OFF = F06:gsub("^(..)", "00")                           -- 보일러 전원 꺼짐(byte0=0)
+state(6, "a1b2c3", F06_OFF); state(9, "d4e5f6", f09_rooms(false, false, false))
+sent_cmds = {}
+state(9, "e7e8e9", f09_rooms(true, true, true))                   -- 끊긴 조절기의 옛 상태(방 켜짐)가 뒤늦게 옴
+check(#sent_cmds == 0, "끊긴 조절기의 '켜짐'으로 보일러를 깨우지 않음")
+check(driver._children["te7e8e9_z1"] == nil or driver._children["te7e8e9_z1"]._online ~= true, "끊긴 조절기의 방은 온라인으로 되돌리지 않음")
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" }, { 9, "e7e8e9" } })      -- 조절기2 가 실제로 붙음: 기준만 다시 잡는다
+state(9, "e7e8e9", f09_rooms(true, true, true))
+check(#sent_cmds == 0, "조절기가 새로 붙은 순간은 씨딩만(명령 없음)")
+state(9, "e7e8e9", f09_rooms(false, false, false)); state(9, "e7e8e9", f09_rooms(true, false, false))
+check(last_cmd_has("f06@a1b2c3 80=1"), "그 뒤 방이 켜지면 보일러 깨움")
+
+print("[22] 3초 안에 돌아온 기기는 오프라인으로 남지 않는다 / 허브가 사라지면 자식 모두 오프라인")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, true))
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
+defer_timers = true
+links({ { 9, "d4e5f6" } })                                         -- 보일러 끊김 → 3초 뒤 오프라인 예약
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } }); state(6, "a1b2c3", F06)   -- 3초 안에 돌아옴
+run_timers()
+defer_timers = false
+check(driver._children["ba1b2c3"]._online == true, "예약된 오프라인이 무름 → 온라인 유지")
+local sensor
+for k, c in pairs(driver._children) do if not k:match("^[btv]%x") then sensor = c end end
+check(sensor ~= nil and sensor._online == true, "센서 자식 온라인")
+core.hub_lost(hub)
+local alloff = true
+for _, c in pairs(driver._children) do if c._online ~= false then alloff = false end end
+check(alloff and sensor._online == false, "허브 사라짐 → 보일러·방·센서 모두 오프라인")
+
+print("[23] 붙은 방이 없는 보일러는 '외출'을 내놓지 않는다 / 상태를 못 보내는 기기는 2분 뒤 기다리지 않는다")
+reset()
+links({ { 6, "a1b2c3" } })
+state(6, "a1b2c3", F06)
+local sm = lastv("ba1b2c3", "heat", "supportedModes")
+check(type(sm) == "table" and #sm == 2, "조절기 없는 보일러: 모드 2개(난방·끄기)")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" }, { 9, "e7e8e9" } })      -- e7e8e9 는 목록에만 있고 상태를 안 보냄
+pairs_msg({ { "d4e5f6", "a1b2c3" }, { "e7e8e9", "a1b2c3" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, true)); state(9, "d4e5f6", f09_rooms(false, false, false))
+check(not last_cmd_has("f06@a1b2c3 b1=0"), "다 보고하기 전(2분 안)엔 판단 안 함")
+local real_time = os.time
+os.time = function() return real_time() + 200 end
+state(9, "d4e5f6", f09_rooms(true, true, true)); state(9, "d4e5f6", f09_rooms(false, false, false))
+os.time = real_time
+check(last_cmd_has("f06@a1b2c3 b1=0"), "2분이 지나면 그 기기를 빼고 자동화 동작")
+
+print("[24] 유일하게 켜진 방이 한 번 안 보여도(슬롯 0) 난방을 끄지 않는다")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, false, false)); state(9, "d4e5f6", f09_rooms(true, false, false))
+sent_cmds = {}
+local nz1 = string.rep("00", 7) .. f09_rooms(true, false, false):sub(15)   -- 방1 슬롯(7바이트)만 0
+state(9, "d4e5f6", nz1)
+check(not last_cmd_has("b1=0"), "방1 이 한 번 안 보임 → 판단 보류(난방 유지)")
+state(9, "d4e5f6", f09_rooms(true, false, false))
+check(#sent_cmds == 0, "방1 이 다시 보임 → 명령 없음")
+state(9, "d4e5f6", f09_rooms(false, false, false))
+check(last_cmd_has("f06@a1b2c3 b1=0"), "방1 을 실제로 끄면 난방 끔")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)
