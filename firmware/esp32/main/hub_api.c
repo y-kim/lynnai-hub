@@ -32,6 +32,7 @@
 #include "hub_proxy.h"
 #include "hub_diag.h"
 #include "hub_dbgkey.h"
+#include "hub_trace.h"
 #include "hub_ota.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
@@ -293,7 +294,8 @@ static esp_err_t state_get(httpd_req_t *req)
     long t = now_epoch();
     httpd_resp_set_type(req, "application/json");
 
-    CHUNK("{\"v\":1,\"id\":\"%s\",\"up_s\":%lld,", s_id, (long long)(esp_timer_get_time() / 1000000));
+    CHUNK("{\"v\":1,\"id\":\"%s\",\"up_s\":%lld,\"up_ms\":%llu,", s_id, (long long)(esp_timer_get_time() / 1000000),
+          (unsigned long long)hub_trace_now_ms());
     if (t) {
         CHUNK("\"time\":%ld,", t);
     } else {
@@ -360,8 +362,10 @@ static esp_err_t state_get(httpd_req_t *req)
               nb++ ? "," : "", dev[i].mac3[0], dev[i].mac3[1], dev[i].mac3[2], dev[i].linked ? "true" : "false",
               b.power ? "true" : "false", b.heat ? "true" : "false", b.outing ? "true" : "false",
               b.hotwater ? "true" : "false", b.preheat ? "true" : "false");
-        CHUNK("\"heat_mode\":\"%s\",\"heat_set\":%d,\"hw_set\":%d,\"raw\":\"%s\"}", b.indoor ? "indoor" : "ondol",
+        CHUNK("\"heat_mode\":\"%s\",\"heat_set\":%d,\"hw_set\":%d,\"raw\":\"%s\",", b.indoor ? "indoor" : "ondol",
               b.indoor ? b.room_set : b.ondol_set, b.hw_set, raw);
+        CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu}", (unsigned long)dev[i].seq, (unsigned long)dev[i].chg_seq,
+              (unsigned long long)dev[i].chg_ms);
     }
     CHUNK("],\"thermostats\":[");
     int nt = 0;
@@ -370,8 +374,10 @@ static esp_err_t state_get(httpd_req_t *req)
             continue;
         }
         hex(raw, dev[i].blob, dev[i].n);
-        CHUNK("%s{\"mac\":\"%02x%02x%02x\",\"linked\":%s,\"raw\":\"%s\",\"zones\":[", nt++ ? "," : "",
+        CHUNK("%s{\"mac\":\"%02x%02x%02x\",\"linked\":%s,\"raw\":\"%s\",", nt++ ? "," : "",
               dev[i].mac3[0], dev[i].mac3[1], dev[i].mac3[2], dev[i].linked ? "true" : "false", raw);
+        CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu,\"zones\":[", (unsigned long)dev[i].seq,
+              (unsigned long)dev[i].chg_seq, (unsigned long long)dev[i].chg_ms);
         for (int z = 0, k = 0; z < NZONES; z++) {
             if (zone_present(dev[i].blob, dev[i].n, z)) {
                 CHUNK("%s" ZONE_JSON, k++ ? "," : "", ZONE_ARGS(dev[i].blob, z));
@@ -565,8 +571,19 @@ static esp_err_t metrics_get(httpd_req_t *req)
 
 /* ---------------------------------------------------------------- 시작 */
 
+/* GET /api/v1/trace?since=<seq>&max=<n> — 기기↔허브↔클라우드 메시지 기록(hub_trace). 읽기 API 와 같은 인증 */
+static esp_err_t trace_get(httpd_req_t *req)
+{
+    if (!api_or_dbg(req)) {
+        return ESP_OK;
+    }
+    return hub_trace_http(req);
+}
+
 void hub_api_register(httpd_handle_t srv)
 {
+    const httpd_uri_t tr = { .uri = "/api/v1/trace", .method = HTTP_GET, .handler = trace_get };
+    httpd_register_uri_handler(srv, &tr);
     const httpd_uri_t st = { .uri = "/api/v1/state", .method = HTTP_GET, .handler = state_get };
     const httpd_uri_t me = { .uri = "/metrics", .method = HTTP_GET, .handler = metrics_get };
     httpd_register_uri_handler(srv, &st);

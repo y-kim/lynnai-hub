@@ -42,6 +42,7 @@ static ev_t s_ring[RING];
 static uint32_t s_next;                 /* 다음에 쓸 seq (0 부터) */
 static uint32_t s_count[EV__COUNT];
 static uint32_t s_boot_id;
+uint32_t hub_events_boot_id(void) { return s_boot_id; }
 static SemaphoreHandle_t s_lock;
 
 static const char *const NAMES[EV__COUNT] = {

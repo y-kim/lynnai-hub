@@ -24,11 +24,13 @@
 #include "hub_pairs.h"
 #include "hub_expose.h"
 #include "hub_devs.h"
+#include "hub_trace.h"
 
 static const char *TAG = "HUB_RINNAI";
 
 #define CAP_DOWN    768             /* 기기→클라우드 패킷 하나 (f09 res ~300바이트) */
 #define CMD_MAX     320
+#define CAP_UP      512             /* 클라우드→기기 패킷 하나(명령·상태 요청은 작다). 넘는 패킷은 기록만 건너뜀 */
 #define HEARTBEAT_S 300             /* 바뀐 게 없어도 이 간격으로 다시 보낸다(드라이버가 끊김 판단) */
 #define ALIVE_S     20              /* 생존 신호 간격(아래 루프가 10초마다 깨므로 실제 20~30초). 드라이버는 90초 침묵이면 끊김으로 본다 */
 #define POLL_S      30              /* 이 간격으로 보일러/각방에 상태 요청(fa) → 외출 등 변경 빨리 반영 */
@@ -48,6 +50,7 @@ typedef struct {
 
 typedef struct {
     int len;
+    uint8_t src;                    /* 누가 만든 패킷인가(HUB_TR_SRC_*) — 메시지 기록용 */
     uint8_t pkt[CMD_MAX];
 } cmd_t;
 
@@ -76,6 +79,8 @@ typedef struct {
     uint8_t blob[HUB_BLOB_MAX];
     int n;
     bool dirty;
+    uint32_t seq, chg_seq;   /* 상태(70)를 실어 온 마지막 메시지 / 값이 바뀐 마지막 메시지의 기록 순번(hub_trace) */
+    uint64_t chg_ms;         /* 값이 마지막으로 바뀐 때(부팅 후 ms) */
     uint8_t burn;       /* f06: 마지막 연소 상태(비트 1 난방 2 온수) — 바뀔 때만 이벤트 */
     uint8_t out_mask;   /* f09: 마지막 존별 외출 비트 — 바뀐 존만 이벤트 */
 } rk_dev_t;
@@ -212,7 +217,7 @@ static void framer_feed(hub_link_tap_t *t, framer_t *f, const uint8_t *d, int n,
 static bool framer_at_boundary(const framer_t *f) { return !f->in_body && f->hlen == 0; }
 
 /* 기기가 보낸 PUBLISH 에서 토픽·상태 블롭을 뽑는다 */
-static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j);
+static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j, uint8_t src);
 
 /* base 토픽 끝의 MAC 6바이트 */
 static bool parse_mac6(const char *base, int len, uint8_t out[6])
@@ -294,7 +299,7 @@ static void answer_time(hub_link_tap_t *t)
     int j = snprintf(json, sizeof(json),
         "{\"ptn\":\"J07\",\"code\":\"null\",\"id\":\"f0%d\",\"no\":\"1\",\"sum\":1,"
         "\"rpc\":[{\"id\":\"72\",\"data\":\"%s\"}],\"lt\":\"null\"}", t->kind, ts);
-    if (tl > 0 && tl < (int)sizeof(topic) && j > 0 && j < (int)sizeof(json) && enqueue_pub(t, topic, tl, json, j)) {
+    if (tl > 0 && tl < (int)sizeof(topic) && j > 0 && j < (int)sizeof(json) && enqueue_pub(t, topic, tl, json, j, HUB_TR_SRC_TIME)) {
         ESP_LOGI(TAG, "단독: f0%d 시간 알려 줌 %s", t->kind, ts);
     }
 }
@@ -321,6 +326,8 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
     if ((p[0] >> 4) != 3 || n < h + 2) {
         return;
     }
+    /* 기기가 올린 PUBLISH 를 시각·순번과 함께 기록(GET /api/v1/trace). 첫 패킷은 아직 종류를 모를 수 있다(토픽에 있음) */
+    uint32_t tseq = hub_trace_add(HUB_TR_DEV2CLOUD, HUB_TR_SRC_DEVICE, t->kind, t->mac3, p, n, h);
     int qos = (p[0] >> 1) & 3;
     int tl = (p[h] << 8) | p[h + 1];
     int off = h + 2 + tl + (qos ? 2 : 0);
@@ -367,6 +374,13 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
         lock();
         rk_dev_t *d = dev_get(kind, t->mac3);
         bool changed = d && (d->n != bn || memcmp(d->blob, blob, bn));
+        if (d) {
+            d->seq = tseq;
+            if (changed) {
+                d->chg_seq = tseq;
+                d->chg_ms = hub_trace_now_ms();
+            }
+        }
         bool burn_ch = false;
         uint8_t burn_v = 0;
         int out_ev[RK_NZ], nout = 0;             /* 항목: 존<<1 | (외출?1:0) */
@@ -429,6 +443,8 @@ hub_link_tap_t *hub_rinnai_link_open(uint32_t peer_ip)
         memset(&t->up, 0, sizeof(t->up));
         t->down.pkt = malloc(CAP_DOWN);
         t->down.cap = t->down.pkt ? CAP_DOWN : 0;
+        t->up.pkt = malloc(CAP_UP);                  /* 클라우드→기기 패킷도 모아 기록한다(없으면 경계만 추적) */
+        t->up.cap = t->up.pkt ? CAP_UP : 0;
         t->kind = 0;
         t->base[0] = 0;
         memset(t->mac3, 0, 3);
@@ -455,12 +471,21 @@ void hub_rinnai_link_close(hub_link_tap_t *t)
     s_links_dirty = true;
     free(t->down.pkt);
     t->down.pkt = NULL;
+    free(t->up.pkt);
+    t->up.pkt = NULL;
+    t->up.cap = 0;
     cmd_t *c;
     while (t->cmds && xQueueReceive(t->cmds, &c, 0) == pdTRUE) {
         free(c);
     }
     unlock();
     kick();
+}
+
+/* 클라우드가 기기로 보낸 PUBLISH(린나이 앱 조작·클라우드의 상태 요청 등)를 기록 */
+static void on_up_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
+{
+    hub_trace_add(HUB_TR_CLOUD2DEV, HUB_TR_SRC_CLOUD, t->kind, t->mac3, p, n, h);
 }
 
 void hub_rinnai_tap_down(hub_link_tap_t *t, const uint8_t *data, int n)
@@ -473,7 +498,7 @@ void hub_rinnai_tap_down(hub_link_tap_t *t, const uint8_t *data, int n)
 void hub_rinnai_tap_up(hub_link_tap_t *t, const uint8_t *data, int n)
 {
     if (t) {
-        framer_feed(t, &t->up, data, n, NULL);
+        framer_feed(t, &t->up, data, n, on_up_packet);
     }
 }
 
@@ -485,6 +510,9 @@ int hub_rinnai_take_cmd(hub_link_tap_t *t, uint8_t *out, int cap)
     }
     int n = c->len <= cap ? c->len : 0;
     memcpy(out, c->pkt, n);
+    if (n > 2) {                                     /* 지금 기기 쪽 소켓에 써 넣는다 — 이 순간을 기록 */
+        hub_trace_add(HUB_TR_HUB2DEV, c->src, t->kind, t->mac3, c->pkt, n, (c->pkt[1] & 0x80) ? 3 : 2);
+    }
     free(c);
     return n;
 }
@@ -552,9 +580,12 @@ static hub_link_tap_t *find_tap(uint8_t kind, const uint8_t *mac3)
 }
 
 /* PUBLISH 패킷을 만들어 tap 의 주입 큐에 넣는다(QoS0). 성공 true. 호출자가 lock 보유. */
-static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j)
+static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j, uint8_t src)
 {
     cmd_t *c = malloc(sizeof(cmd_t));
+    if (c) {
+        c->src = src;
+    }
     int rl = 2 + tl + j;
     if (!c || rl > 16383 || 3 + rl > CMD_MAX) {
         free(c);
@@ -599,7 +630,7 @@ static void poll_status(bool all)
             "{\"ptn\":\"J07\",\"code\":\"null\",\"id\":\"f0%d\",\"no\":\"1\",\"sum\":1,\"rpc\":[{\"id\":\"fa\"}],\"lt\":\"null\"}",
             s_taps[i].kind);
         if (tl > 0 && tl < (int)sizeof(topic) && j > 0 && j < (int)sizeof(json)) {
-            enqueue_pub(&s_taps[i], topic, tl, json, j);
+            enqueue_pub(&s_taps[i], topic, tl, json, j, HUB_TR_SRC_POLL);
         }
     }
     unlock();
@@ -701,7 +732,7 @@ static void command_one(const char *text, int len)
     }
     char topic[80];
     int tl = snprintf(topic, sizeof(topic), "%s/set", t->base);
-    bool ok = enqueue_pub(t, topic, tl, json, j);
+    bool ok = enqueue_pub(t, topic, tl, json, j, HUB_TR_SRC_PLATFORM);
     unlock();
     if (ok) {
         ESP_LOGI(TAG, "명령 → %s %s", topic, json);
@@ -816,6 +847,9 @@ int hub_rinnai_snapshot(hub_dev_t *out, int max)
         out[n].n = s_dev[i].n;
         memcpy(out[n].blob, s_dev[i].blob, s_dev[i].n);
         out[n].linked = find_tap(s_dev[i].kind, s_dev[i].mac3) != NULL;
+        out[n].seq = s_dev[i].seq;
+        out[n].chg_seq = s_dev[i].chg_seq;
+        out[n].chg_ms = s_dev[i].chg_ms;
         n++;
     }
     unlock();

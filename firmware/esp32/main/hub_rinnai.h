@@ -22,6 +22,8 @@ typedef struct {
     uint8_t blob[HUB_BLOB_MAX];
     int n;
     bool linked;        /* 지금 중계 링크가 살아 있나 */
+    uint32_t seq, chg_seq;   /* 상태를 실어 온 마지막 메시지 / 값이 바뀐 마지막 메시지의 기록 순번(/api/v1/trace) */
+    uint64_t chg_ms;         /* 값이 마지막으로 바뀐 때(부팅 후 ms) */
 } hub_dev_t;
 
 typedef struct hub_link_tap hub_link_tap_t;
