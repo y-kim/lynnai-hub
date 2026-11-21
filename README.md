@@ -9,11 +9,13 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 > 후원·보증받지 않았습니다. `lynnai` 는 상표 회피를 위한 임시 명칭입니다.
 > 본인 소유 기기에 대해 본인 책임으로 사용하세요.
 
-```
-보일러 조절기 ─┐ Wi-Fi(허브 AP)          ┌─ 린나이 클라우드 (프록시 모드)
-온도 조절기  ─┴→ [ESP32-C6 허브] ──집 Wi-Fi─┘
-                       └─ Zigbee ─→ SmartThings 허브/Station ─→ SmartThings 앱
-```
+**ESP32 허브** — [설치·운영 안내](docs/esp32-hub.md)
+
+![구성도: 보일러 조절기(WF-S6000 등)·온도 조절기(RICH-WCR(N) 등) → Wi-Fi(허브 AP) → LYNNAI 허브(ESP32-C6) → 집 Wi-Fi → 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 허브 → Zigbee → SmartThings 허브 → SmartThings 앱](docs/overview.svg)
+
+**NAS 허브** (ESP32 없이 NAS 도커로) — [설치·운영 안내](docs/nas-hub.md)
+
+![NAS 허브 구성도: 보일러 조절기(WF-S6000 등)·온도 조절기(RICH-WCR(N) 등) → 집 Wi-Fi → 공유기(DHCP 의 DNS 서버 = NAS) ↔ 유선 LAN ↔ NAS(Docker: DNS 서버 + LYNNAI 허브), 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 공유기 → LAN → SmartThings 허브 → SmartThings 앱](docs/overview-nas.svg)
 
 ## 빠른 시작
 
