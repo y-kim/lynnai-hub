@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 458" width="360" role="img" aria-label="가스 계량기의 SmartThings 화면 그림: 사용량 카드에 24시간·1시간·이번달 사용량. 계량기 지침, 유량, 그리고 요금 카드에 이번달 예상 금액과 지난 24시간 요금">
+  <title>가스 계량기의 SmartThings 화면 그림: 사용량 카드에 24시간·1시간·이번달 사용량. 계량기 지침, 유량, 그리고 요금 카드에 이번달 예상 금액과 지난 24시간 요금</title>
+  <style>
+    .screen { fill: #f1f1f4; stroke: #d5d8de; }
+    .card   { fill: #fcfcfd; }
+    .idle   { fill: #e4e4e7; }
+    .on     { fill: #3f83f1; }
+    .btn    { fill: #f4f4f6; }
+    .btn-on { fill: #ffffff; }
+    .rule   { stroke: #e3e5ea; stroke-width: 1; }
+    .track  { stroke: #e2e3e7; stroke-width: 6; stroke-linecap: round; }
+    .heat   { stroke: #dc3b36; stroke-width: 6; stroke-linecap: round; }
+    .cool   { stroke: #3f83f1; stroke-width: 6; stroke-linecap: round; }
+    .knob-h { fill: #dc3b36; }
+    .knob-c { fill: #3f83f1; }
+    .dim    { opacity: .35; }
+    .ink    { fill: #14161a; }
+    .muted  { fill: #6b7078; }
+    .icon   { fill: none; stroke: #14161a; stroke-width: 2; stroke-linecap: round; }
+    .icon-m { fill: #6b7078; }
+    text    { font-family: system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif; fill: #14161a; }
+    .t-title { font-size: 17px; font-weight: 700; }
+    .t-sub   { font-size: 12.5px; fill: #6b7078; }
+    .t-sec   { font-size: 13px; fill: #6b7078; }
+    .t-name  { font-size: 14.5px; }
+    .t-val   { font-size: 22px; font-weight: 700; }
+    .t-unit  { font-size: 14px; font-weight: 600; }
+    .t-pill  { font-size: 21px; font-weight: 700; }
+    .t-on    { fill: #ffffff; }
+    .t-pm    { font-size: 15px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+    .t-col   { font-size: 11.5px; text-anchor: middle; }
+    .t-cval  { font-size: 19px; font-weight: 700; text-anchor: middle; }
+    .t-cunit { font-size: 12px; font-weight: 600; }
+    .g1 { stop-color: #ebe8fb; } .g2 { stop-color: #cfe1f8; } .g3 { stop-color: #dcdbee; }
+    .edge    { fill: none; stroke: #d5d8de; }
+    .ic-box  { fill: #3d4046; }
+    .ic-yel  { fill: #f5c518; }
+    .ic-off  { fill: #b9bdc6; }
+    .ic-grn  { fill: none; stroke: #86d993; stroke-width: 1.800; stroke-linecap: round; }
+    .t-dev   { font-size: 14px; font-weight: 700; }
+    .t-st    { font-size: 12.5px; fill: #6b7078; }
+    .t-tab   { font-size: 14.5px; fill: #6b7078; }
+    .t-tab-on { font-size: 14.5px; font-weight: 700; }
+    .off-card { opacity: .55; }
+    @media (prefers-color-scheme: dark) {
+      .screen { fill: #000000; stroke: #33363c; }
+      .card   { fill: #1c1d21; }
+      .idle   { fill: #2a2b30; }
+      .on     { fill: #3a78dc; }
+      .btn    { fill: #3a3c42; }
+      .rule   { stroke: #2c2e33; }
+      .track  { stroke: #3a3d44; }
+      .heat   { stroke: #e0524d; }
+      .cool   { stroke: #3a78dc; }
+      .knob-h { fill: #e0524d; }
+      .knob-c { fill: #3a78dc; }
+      .icon   { stroke: #f2f3f5; }
+      .icon-m { fill: #9aa0a8; }
+      text    { fill: #f2f3f5; }
+      .t-sub, .t-sec, .t-st, .t-tab { fill: #9aa0a8; }
+      .g1 { stop-color: #1b1a2b; } .g2 { stop-color: #14202e; } .g3 { stop-color: #1a1a24; }
+      .edge   { stroke: #33363c; }
+      .ic-box { fill: #4a4d55; }
+    }
+  </style>
+  <rect class="screen" x="0.5" y="0.5" width="359" height="457" rx="26"/>
+  <text class="t-title" x="48" y="34">가스 계량기</text>
+  <text class="t-sub" x="48" y="52">집</text>
+  <path class="icon" d="M28 30 l-7 8 l7 8"/>
+  <rect class="on" x="14" y="78" width="332" height="100" rx="22"/>
+  <text class="t-name t-on" x="34" y="105">사용량</text>
+  <text class="t-col t-on" x="83" y="130">24시간 사용량</text>
+  <text class="t-cval t-on" x="83" y="158">1.54<tspan class="t-cunit" dx="3">m³</tspan></text>
+  <text class="t-col t-on" x="180" y="130">1시간 사용량</text>
+  <text class="t-cval t-on" x="180" y="158">1.13<tspan class="t-cunit" dx="3">m³</tspan></text>
+  <text class="t-col t-on" x="277" y="130">이번달 사용량</text>
+  <text class="t-cval t-on" x="277" y="158">5.19<tspan class="t-cunit" dx="3">m³</tspan></text>
+  <rect class="card" x="14" y="188" width="332" height="248" rx="22"/>
+  <text class="t-name" x="34" y="215">계량기 지침</text>
+  <text class="t-val" x="34" y="245">1523.4</text><text class="t-unit" x="108" y="245">m³</text>
+  <g class="icon-m" transform="translate(308 202)"><rect x="0" y="6" width="3" height="9" rx="1"/><rect x="5" y="0" width="3" height="15" rx="1"/><rect x="10" y="4" width="3" height="11" rx="1"/><rect x="15" y="7" width="3" height="8" rx="1"/></g>
+  <path class="icon-m" fill-rule="evenodd" d="M280.61 203.41 L280.88 201.48 L283.12 201.48 L283.39 203.41 L284.97 204.06 L286.52 202.89 L288.11 204.48 L286.94 206.03 L287.59 207.61 L289.52 207.88 L289.52 210.12 L287.59 210.39 L286.94 211.97 L288.11 213.52 L286.52 215.11 L284.97 213.94 L283.39 214.59 L283.12 216.52 L280.88 216.52 L280.61 214.59 L279.03 213.94 L277.48 215.11 L275.89 213.52 L277.06 211.97 L276.41 210.39 L274.48 210.12 L274.48 207.88 L276.41 207.61 L277.06 206.03 L275.89 204.48 L277.48 202.89 L279.03 204.06Z M284.64 209.00 a2.64 2.64 0 1 0 -5.28 0 a2.64 2.64 0 1 0 5.28 0Z"/>
+  <path class="rule" d="M34 262H326"/>
+  <text class="t-name" x="34" y="289">유량</text>
+  <text class="t-val" x="34" y="319">0.6</text><text class="t-unit" x="71" y="319">m³/h</text>
+  <path class="rule" d="M34 336H326"/>
+  <text class="t-name" x="34" y="363">요금</text>
+  <text class="t-col" x="107" y="388">이번달 예상 금액</text>
+  <text class="t-cval" x="107" y="416">6840<tspan class="t-cunit" dx="3">원</tspan></text>
+  <text class="t-col" x="253" y="388">지난 24시간 요금</text>
+  <text class="t-cval" x="253" y="416">1622<tspan class="t-cunit" dx="3">원</tspan></text>
+</svg>

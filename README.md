@@ -49,6 +49,28 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 - **서버 연동**: `/api/v1/state`(JSON)·`/metrics`(Prometheus)·`/api/events`·`/api/stats`, NAS 기록기 `server/lynnai-hub-watch`.
 - **고장 진단**: LED 오류 코드(빨강 N번 깜빡), USB 시리얼 `diag`, PC 진단 스크립트 `tools/hub_doctor.py`.
 
+## 스크린샷
+
+SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 그림).
+
+<table>
+  <tr>
+    <td valign="top" width="33%">
+      <img src="docs/screen-devices.svg" alt="기기 목록 화면: 방마다 각방 온도조절기(현재 온도와 난방·예약·꺼짐 상태), 다용도실에 LYNNAI Hub·보일러 컨트롤러·가스 계량기·온습도계 카드">
+      <br><br>
+      <img src="docs/screen-gas.svg" alt="가스 계량기 화면: 24시간·1시간·이번달 사용량, 계량기 지침, 유량, 이번달 예상 금액·지난 24시간 요금">
+    </td>
+    <td valign="top" width="33%">
+      <img src="docs/screen-boiler.svg" alt="보일러 컨트롤러 화면: 전원·난방·외출·온수·온수 예열 구역마다 켜짐/꺼짐 스위치, 난방 구역에 온도조절 모드(온돌)와 난방 온도 설정, 온수 구역에 수온 설정">
+    </td>
+    <td valign="top" width="33%">
+      <img src="docs/screen-thermostat.svg" alt="각방 온도조절기 화면: 난방 스위치와 실내 온도, 난방 온도 설정, 외출 스위치, 예약 스위치와 예약 시간(1~24시간)">
+    </td>
+  </tr>
+</table>
+
+왼쪽 위부터 기기 목록, 그 아래 가스 계량기, 가운데 보일러 컨트롤러, 오른쪽 각방 온도조절기(방마다 하나)입니다.
+
 ## 동작 모드
 
 - **프록시** (기본) — 기기 ↔ 허브 ↔ 린나이 클라우드를 이어 준다. 린나이 앱을 그대로 쓰면서 SmartThings 로도 제어.
