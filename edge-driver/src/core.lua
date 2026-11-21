@@ -40,8 +40,8 @@ local SWITCH = {
 -- 외출은 보일러(f06 b3) 가 아니라 각방 조절기의 방마다(f09 a0=<방>,b3=1) — f06 b3 는 실측으로 안 먹힘.
 -- 보일러의 '외출' = 그 보일러에 붙은 방이 모두 외출(update_outing), 외출 명령은 방마다 보낸다(outing_cmds).
 local SWITCH_COMPONENT = { power = "main", hotwater = "hotwater", preheat = "preheat" }
-local HEAT_STATES = { "난방", "외출", "끄기" }
-local HEAT_STATES_NO_OUT = { "난방", "끄기" }     -- 붙은 방이 없는 보일러: 외출을 걸 방이 없다(f06 b3 는 안 먹힘)
+-- 화면에는 '난방' 스위치와 '외출' 스위치로 나온다(둘 중 하나만 켜짐). 붙은 방이 없는 보일러는 외출 스위치를 내놓지 않는다
+-- (외출을 걸 방이 없다 — f06 b3 는 안 먹힘).
 local HEAT_MODES = { [0] = "온돌", [1] = "실내" }
 local ONDOL_TEMPS = { 35, 40, 45 }
 for t = 46, 60 do ONDOL_TEMPS[#ONDOL_TEMPS + 1] = t end
@@ -55,14 +55,17 @@ local RANGE = { ["온돌"] = { 35, 85 }, ["실내"] = { 5, 40 } }
 
 local status_cap = capabilities["connectbook02461.boilerStatus"]
 local room_cap = capabilities["connectbook02461.roomStatus"]
-local hw_cap = capabilities["connectbook02461.hotWaterSetpoint"]
-local ht_cap = capabilities["connectbook02461.heatType"]
+-- 보일러의 조작 항목은 표준 capability 를 쓴다(앱이 표준 항목 전용 모양으로 그린다 — 린나이 공식 연동과 같은 구성):
+--   난방 방식 = thermostatMode("ondol" 온돌 / "heat" 실내), 수온 설정 = thermostatWaterHeatingSetpoint
+local tm_cap = capabilities.thermostatMode
+local hw_cap = capabilities.thermostatWaterHeatingSetpoint
+local TM_OF = { ["온돌"] = "ondol", ["실내"] = "heat" }
 local cost_cap = capabilities["connectbook02461.gasCost"]
+local usage_cap = capabilities["connectbook02461.gasUse"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
+local flow_cap = capabilities["connectbook02461.gasFlow"]     -- 지금 유량
 
 local driver
 
-local usage_cap = capabilities["connectbook02461.gasUse"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
-local flow_cap = capabilities["connectbook02461.gasFlow"]     -- 지금 유량
 -- 허브(부모)별 상태. boilers[mac]=해독값, thermos[mac]={z1=..}, online={["6:mac"]=true}
 local hubs = {}
 local function hub_state(parent)
@@ -289,20 +292,21 @@ local function main_text(m)
   return res(heat)
 end
 
--- 반복예약 간격(97): 0 = 30분, n = n시간(1~24). 값은 다른 명령처럼 16진 2자리로 보낸다(12시간 = 0c).
-local RESV_MODES = { "30분" }
-for h = 1, 24 do RESV_MODES[#RESV_MODES + 1] = h .. "시간" end
-local function resv_label(n) return (n or 0) == 0 and "30분" or (n .. "시간") end
-local function resv_code(label)
-  if label == "30분" then return 0 end
-  local h = tonumber((label or ""):match("^(%d+)시간$"))
-  return (h and h >= 1 and h <= 24) and h or nil
+-- 예약(각방, f09): 96 = 예약 켜기/끄기, 97 = 예약 시간(1~24시간, 16진 2자리 — 12시간 = 0c). 0시간 예약은 없다
+-- (97=00 을 보내면 예약이 풀리고 바로 난방한다 — 2026-11-22 린나이 앱 명령 캡처).
+-- 예약을 걸면 기기가 그 방을 켜짐으로 바꾼다(켜는 명령을 따로 보내지 않는다 — 앱도 96·97 만 보낸다).
+-- 예약 시간 슬라이더(1~24시간). 앱은 우리가 만든 슬라이더를 한 줄짜리(숫자 옆 슬라이더)로 그린다 — 표준
+-- thermostatHeatingSetpoint 와 똑같은 구조로 만들어도 두 줄짜리(−/+ 버튼)가 되지 않았다(2026-11-22 시험).
+local rh_cap = capabilities["connectbook02461.reserveHours"]
+local function resv_hours(n)                                   -- 기억해 둔 값 → 1~24(없거나 0 이면 1)
+  n = math.floor((tonumber(n) or 0) + 0.5)
+  return n < 1 and 1 or n > 24 and 24 or n
 end
 
 local function zone_text(m, z)
   local what
   if z.outing then what = "외출"                                    -- 존별 외출(f09)
-  elseif z.reserve then what = "예약 " .. resv_label(z.resv)       -- 존별 반복예약(f09 96, 간격 97)
+  elseif z.reserve then what = "예약 " .. resv_hours(z.resv) .. "시간"   -- 존별 예약(f09 96, 시간 97)
   elseif (m and (not m.power or not m.heat)) or not z.on then what = "꺼짐"
   else what = "난방 " .. deg(z.target) end
   return deg(z.current) .. " · " .. what
@@ -385,6 +389,8 @@ local function auto_boiler(parent, bmac)
   end
 end
 
+local apply_caps                       -- 전방 선언(아래 '보이는 컨트롤' 절에서 정의)
+
 local function refresh_boiler(parent, mac)
   local child = parent:get_child_by_parent_assigned_key(bkey(mac))
   if not child then return end
@@ -393,17 +399,20 @@ local function refresh_boiler(parent, mac)
   local m = s.boilers[mac]
   if not m then return end
   mark_online(child)
+  apply_caps(parent, child)            -- 붙은 방이 생기거나 없어지면 외출 스위치를 내놓거나 거둔다(바뀔 때만 실제로 적용)
   for key, comp in pairs(SWITCH_COMPONENT) do
     emit(child, comp, m[key] and capabilities.switch.switch.on() or capabilities.switch.switch.off())
   end
-  local modes = #thermos_of(parent, "boiler", mac) > 0 and HEAT_STATES or HEAT_STATES_NO_OUT
-  emit(child, "heat", capabilities.mode.supportedModes(modes, { visibility = { displayed = false } }))
-  emit(child, "heat", capabilities.mode.supportedArguments(modes, { visibility = { displayed = false } }))
-  emit(child, "heat", capabilities.mode.mode(m.outing and "외출" or m.heat and "난방" or "끄기"))
-  emit(child, "heat", ht_cap.heatType(m.heat_mode))
+  -- 난방·외출은 스위치 둘로 보인다. 외출 중이면 난방 스위치는 꺼짐으로(보일러의 난방 비트는 그대로라 외출을 풀면 돌아온다)
+  local on, off = capabilities.switch.switch.on, capabilities.switch.switch.off
+  emit(child, "heat", (m.heat and not m.outing) and on() or off())
+  emit(child, "outing", m.outing and on() or off())
+  emit(child, "heat", tm_cap.supportedThermostatModes({ "ondol", "heat" }, { visibility = { displayed = false } }))
+  emit(child, "heat", tm_cap.thermostatMode(TM_OF[m.heat_mode] or "ondol"))
   emit(child, "heat", sp_range(RANGE[m.heat_mode]))
   if m.heat_temp then emit(child, "heat", setpoint(m.heat_temp)) end
-  if m.hw_set then emit(child, "hotwater", hw_cap.setpoint({ value = m.hw_set, unit = "C" })) end
+  emit(child, "hotwater", hw_cap.heatingSetpointRange({ value = { minimum = 35, maximum = 60, step = 1 }, unit = "C" }))
+  if m.hw_set then emit(child, "hotwater", hw_cap.heatingSetpoint({ value = m.hw_set, unit = "C" })) end
   emit_text(child, main_text(m))
 end
 
@@ -423,11 +432,9 @@ local function refresh_zone(parent, mac, id)
   emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = z.current, unit = "C" }))
   emit(child, "outing", z.outing and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 외출(f09 stat bit 0x10)
   emit(child, "reserve", z.reserve and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 예약(stat 0x08)
-  -- 예약 간격: 예약 중이면 기기 값(다음 바이트)을 기억해 두고, 꺼져 있으면 기억한 값(없으면 1시간)을 보여 준다
-  if z.reserve then child:set_field("resv_iv", z.resv, { persist = true }) end
-  emit(child, "reserve", capabilities.mode.supportedModes(RESV_MODES, { visibility = { displayed = false } }))
-  emit(child, "reserve", capabilities.mode.supportedArguments(RESV_MODES, { visibility = { displayed = false } }))
-  emit(child, "reserve", capabilities.mode.mode(resv_label(child:get_field("resv_iv") or 1)))
+  -- 예약 시간: 예약 중이면 기기 값(다음 바이트)을 기억해 두고, 꺼져 있으면 기억한 값(없으면 1시간)을 보여 준다
+  if z.reserve and (z.resv or 0) >= 1 then child:set_field("resv_iv", z.resv, { persist = true }) end
+  emit(child, "reserve", rh_cap.hours({ value = resv_hours(child:get_field("resv_iv")), unit = "시간" }))
   emit_text(child, zone_text(m, z), true)
 end
 
@@ -487,7 +494,8 @@ function refresh_vboiler(parent, mac)
   local vb = s.vboilers and s.vboilers[mac]
   mark_online(child)
   if vb and vb.hw_set and vb.hw_set > 0 then
-    emit(child, "hotwater", hw_cap.setpoint({ value = vb.hw_set, unit = "C" }))
+    emit(child, "hotwater", hw_cap.heatingSetpointRange({ value = { minimum = 35, maximum = 60, step = 1 }, unit = "C" }))
+    emit(child, "hotwater", hw_cap.heatingSetpoint({ value = vb.hw_set, unit = "C" }))
   end
   emit_text(child, vb and vb.heating and "난방 중" or "대기")
 end
@@ -499,13 +507,15 @@ local function wanted_caps(parent, key)
     for _, e in ipairs(list) do if visible(parent, e[1]) then out[#out + 1] = e[2] end end
     return out
   end
-  local kind, _, id = parse_key(key)
+  local kind, mac, id = parse_key(key)
   if kind == "boiler" or kind == "vboiler" then
     local comps = {
       { "main", { { BIT.power, "switch" } } },
-      { "heat", { { BIT.heat_mode, "mode" }, { BIT.heat_type, "connectbook02461.heatType" },
+      { "heat", { { BIT.heat_mode, "switch" }, { BIT.heat_type, "thermostatMode" },
         { BIT.heat_temp, "thermostatHeatingSetpoint" } } },
-      { "hotwater", { { BIT.hw, "switch" }, { BIT.hw_temp, "connectbook02461.hotWaterSetpoint" } } },
+      -- 외출 스위치는 외출을 걸 방이 붙어 있을 때만
+      { "outing", #thermos_of(parent, kind, mac) > 0 and { { BIT.heat_mode, "switch" } } or {} },
+      { "hotwater", { { BIT.hw, "switch" }, { BIT.hw_temp, "thermostatWaterHeatingSetpoint" } } },
       { "preheat", { { BIT.preheat, "switch" } } },
     }
     local out = {}
@@ -518,19 +528,19 @@ local function wanted_caps(parent, key)
     local out = { { "main", pick({ { BIT.room_on, "switch" }, { BIT.room_set, "thermostatHeatingSetpoint" } }) } }
     local outing = pick({ { BIT.room_out, "switch" } })
     if #outing > 0 then out[#out + 1] = { "outing", outing } end
-    local reserve = pick({ { BIT.room_resv, "switch" }, { BIT.room_resv, "mode" } })
+    local reserve = pick({ { BIT.room_resv, "switch" }, { BIT.room_resv, "connectbook02461.reserveHours" } })
     if #reserve > 0 then out[#out + 1] = { "reserve", reserve } end
     return "lynnai-zone", out
   end
 end
 
 local applied = {}
-local function apply_caps(parent, child)
+function apply_caps(parent, child)
   local profile, list = wanted_caps(parent, child.parent_assigned_child_key)
   if not profile then return end
   local parts = {}
   for _, c in ipairs(list) do parts[#parts + 1] = c[1] .. ":" .. table.concat(c[2], ",") end
-  local sig = table.concat(parts, ";")
+  local sig = profile .. "|" .. table.concat(parts, ";")
   if applied[child.id] == sig then return end
   applied[child.id] = sig
   log.info("보이는 컨트롤: " .. child.parent_assigned_child_key .. " → " .. sig)
@@ -895,6 +905,20 @@ local function on_switch(on)
     local parent = parent_of(device)
     local kind, mac, id = parse_key(device.parent_assigned_child_key)
     if kind == "boiler" or kind == "vboiler" then
+      if cmd.component == "heat" or cmd.component == "outing" then
+        local pre, list = boiler_prefix(kind, mac), {}
+        if cmd.component == "heat" then
+          -- 난방 켜기 = 방들의 외출을 풀고 난방 켬(외출 스위치는 저절로 꺼짐으로 보인다). 끄기 = 난방만 끔
+          if on then outing_cmds(parent, kind, mac, false, list) end
+          list[#list + 1] = pre .. " b1=" .. (on and "1" or "0")
+        else
+          -- 외출 = 붙은 방마다 f09 a0,b3(방마다 따로 — 한 메시지가 길어지지 않게). 켜면 난방 스위치는 꺼짐으로 보인다
+          outing_cmds(parent, kind, mac, on, list)
+          if on and #list == 0 then log.warn("외출을 걸 방이 없음(붙은 조절기 없음 또는 이미 모두 외출) — 보낸 명령 없음") end
+        end
+        for _, c in ipairs(list) do send_text(parent, c) end
+        return
+      end
       for key, c in pairs(SWITCH_COMPONENT) do
         if c == cmd.component then
           return boiler_cmds(parent, { string.format("%s %s=%s", boiler_prefix(kind, mac), SWITCH[key].code, on and "1" or "0") })
@@ -904,14 +928,13 @@ local function on_switch(on)
     end
     if kind ~= "zone" then return end
     if cmd.component == "reserve" then
-      -- 반복예약은 f09 에 a0(존)+96(켜기/끄기). 켤 때는 앱처럼 97(예약 값)도 같이 — 지금 저장된 값, 없으면 01.
-      -- 예약은 켜진 방에서만 걸리므로(방을 끄면 풀림, 실기기 확인) 꺼진 방이면 먼저 켠다.
+      -- 예약은 f09 에 a0(존)+96(켜기/끄기). 켤 때는 앱처럼 97(예약 시간)도 같이 — 기억해 둔 시간, 없으면 1시간.
+      -- 꺼진 방이어도 켜는 명령은 따로 보내지 않는다(예약을 걸면 기기가 켜짐으로 바꾼다).
       local z = ZONES[id]
       local zs = (hub_state(parent).thermos[mac] or {})[id] or {}
-      local v = device:get_field("resv_iv") or (zs.reserve and zs.resv) or 1
+      local v = resv_hours(device:get_field("resv_iv") or (zs.reserve and zs.resv))
       local list = {}
       if on then
-        if zs.on == false then list[#list + 1] = string.format("f09@%s a0=%d,b1=1", mac, z.a0) end
         list[#list + 1] = string.format("f09@%s a0=%d,96=1,97=%02x", mac, z.a0, v)
       else
         list[#list + 1] = string.format("f09@%s a0=%d,96=0", mac, z.a0)
@@ -963,42 +986,25 @@ local function set_heating_setpoint(_, device, cmd)
   end
 end
 
-local function set_mode(_, device, cmd)
-  if cmd.component == "reserve" then
-    -- 예약 간격 고르기 = 그 간격으로 예약 켜기(꺼진 방이면 먼저 켬)
-    local parent = parent_of(device)
-    local kind, mac, id = parse_key(device.parent_assigned_child_key)
-    local v = resv_code(cmd.args.mode)
-    if kind ~= "zone" or not v then return end
-    device:set_field("resv_iv", v, { persist = true })
-    local z = ZONES[id]
-    local zs = (hub_state(parent).thermos[mac] or {})[id] or {}
-    local list = {}
-    if zs.on == false then list[#list + 1] = string.format("f09@%s a0=%d,b1=1", mac, z.a0) end
-    list[#list + 1] = string.format("f09@%s a0=%d,96=1,97=%02x", mac, z.a0, v)
-    return boiler_cmds(parent, list)
-  end
-  if cmd.component ~= "heat" then return end
+-- 예약 시간 슬라이더: 고른 시간으로 예약을 건다(앱과 같다 — 시간만 바꾸고 예약은 안 거는 명령은 없다)
+local function set_reserve_hours(_, device, cmd)
   local parent = parent_of(device)
-  local kind, mac = parse_key(device.parent_assigned_child_key)
-  if kind ~= "boiler" and kind ~= "vboiler" then return end
-  local pre = boiler_prefix(kind, mac)
-  local want = cmd.args.mode
-  if want ~= "외출" and want ~= "난방" and want ~= "끄기" then        -- 모르는 값은 무시(난방을 끄지 않게)
-    log.warn("모르는 난방 모드 무시: " .. tostring(want))
-    return
-  end
-  -- 외출 = 붙은 방마다 f09 a0,b3. 방마다 따로 보낸다(한 메시지가 길어지지 않게)
-  local list = outing_cmds(parent, kind, mac, want == "외출", {})
-  if want == "외출" and #list == 0 then log.warn("외출을 걸 방이 없음(붙은 조절기 없음 또는 이미 모두 외출) — 보낸 명령 없음") end
-  if want ~= "외출" then list[#list + 1] = pre .. " b1=" .. (want == "난방" and "1" or "0") end
-  for _, c in ipairs(list) do send_text(parent, c) end
+  local kind, mac, id = parse_key(device.parent_assigned_child_key)
+  if kind ~= "zone" then return end
+  local v = resv_hours(cmd.args.hours)
+  device:set_field("resv_iv", v, { persist = true })
+  return boiler_cmds(parent, { string.format("f09@%s a0=%d,96=1,97=%02x", mac, ZONES[id].a0, v) })
 end
 
 local function set_heat_type(_, device, cmd)
   local kind, mac = parse_key(device.parent_assigned_child_key)
   if kind ~= "boiler" and kind ~= "vboiler" then return end
-  boiler_cmds(parent_of(device), { string.format("%s b4=%s", boiler_prefix(kind, mac), cmd.args.heatType == "실내" and "1" or "0") })
+  local want = cmd.args.mode
+  if want ~= "ondol" and want ~= "heat" then                    -- 표준 목록의 다른 값은 무시(난방 방식을 바꾸지 않게)
+    log.warn("모르는 난방 방식 무시: " .. tostring(want))
+    return
+  end
+  boiler_cmds(parent_of(device), { string.format("%s b4=%s", boiler_prefix(kind, mac), want == "heat" and "1" or "0") })
 end
 
 local function set_hw_setpoint(_, device, cmd)
@@ -1131,14 +1137,14 @@ M.capability_handlers = {
   [capabilities.thermostatHeatingSetpoint.ID] = {
     [capabilities.thermostatHeatingSetpoint.commands.setHeatingSetpoint.NAME] = set_heating_setpoint,
   },
-  [capabilities.mode.ID] = {
-    [capabilities.mode.commands.setMode.NAME] = set_mode,
+  [rh_cap.ID] = {
+    [rh_cap.commands.setHours.NAME] = set_reserve_hours,
   },
-  [ht_cap.ID] = {
-    [ht_cap.commands.setHeatType.NAME] = set_heat_type,
+  [tm_cap.ID] = {
+    [tm_cap.commands.setThermostatMode.NAME] = set_heat_type,
   },
   [hw_cap.ID] = {
-    [hw_cap.commands.setSetpoint.NAME] = set_hw_setpoint,
+    [hw_cap.commands.setHeatingSetpoint.NAME] = set_hw_setpoint,
   },
   [capabilities.refresh.ID] = {
     [capabilities.refresh.commands.refresh.NAME] = do_refresh,

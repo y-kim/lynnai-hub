@@ -48,6 +48,7 @@ end
 local ths = cap("thermostatHeatingSetpoint", { "heatingSetpoint", "heatingSetpointRange" }, { "setHeatingSetpoint" })
 -- mode: mode(x), supportedModes(list,opts), supportedArguments(list,opts), commands.setMode
 local md = cap("mode", { "mode", "supportedModes", "supportedArguments" }, { "setMode" })
+cap("connectbook02461.reserveHours", { "hours" }, { "setHours" })
 -- temperature / humidity / gas
 cap("temperatureMeasurement", { "temperature" }, {})
 cap("relativeHumidityMeasurement", { "humidity" }, {})
@@ -56,12 +57,12 @@ cap("refresh", {}, { "refresh" })
 -- 커스텀
 cap("connectbook02461.boilerStatus", { "status" }, {})
 cap("connectbook02461.roomStatus", { "roomStatus" }, {})
-cap("connectbook02461.hotWaterSetpoint", { "setpoint" }, { "setSetpoint" })
-local htc = cap("connectbook02461.heatType", { "heatType" }, { "setHeatType" })
+cap("thermostatWaterHeatingSetpoint", { "heatingSetpoint", "heatingSetpointRange" }, { "setHeatingSetpoint" })
+local htc = cap("thermostatMode", { "thermostatMode", "supportedThermostatModes" }, { "setThermostatMode" })
 cap("connectbook02461.gasCost", { "month", "today", "usage" }, {})
-
 cap("connectbook02461.gasUse", { "day", "hour", "period" }, {})
 cap("connectbook02461.gasFlow", { "flow" }, {})
+
 package.loaded["st.capabilities"] = capabilities
 package.loaded["log"] = { info = function() end, warn = function() end, error = function() end }
 
@@ -85,6 +86,10 @@ local function mk_device(key, label, profile, parent)
       cap = ev.capability.ID, attr = ev.attribute.NAME, value = ev.value }
   end
   function d:supports_capability_by_id(id, comp)
+    -- 프로필에서 optional 이 아닌 것(상태 글자·상태 카드·온도·새로고침 등)은 늘 지원 — 실제 라이브러리와 같게
+    local OPTIONAL = { switch = true, mode = true, thermostatHeatingSetpoint = true, ["connectbook02461.reserveHours"] = true,
+      thermostatMode = true, thermostatWaterHeatingSetpoint = true }
+    if not OPTIONAL[id] then return true end
     local cc = self._caps[comp]
     if cc == nil then return true end     -- 메타데이터 적용 전엔 전부 지원
     return cc[id] == true
@@ -218,7 +223,7 @@ sent_cmds = {}
 core.capability_handlers["switch"]["off"](nil, driver._children["vd4e5f6"], { component = "main" })  -- 전원 끄기
 check(last_cmd_has("f09@d4e5f6 80=0"), "가상 보일러 전원끄기 → f09@d4e5f6 80=0")
 sent_cmds = {}
-core.capability_handlers["connectbook02461.hotWaterSetpoint"]["setSetpoint"](nil, driver._children["vd4e5f6"], { args = { setpoint = 55 } })
+core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children["vd4e5f6"], { args = { setpoint = 55 } })
 check(last_cmd_has("f09@d4e5f6 d1="), "가상 보일러 온수설정 → f09@d4e5f6 d1=")
 
 print("[5] 단독→짝 지정으로 실보일러 연결되면 가상 보일러 제거")
@@ -236,7 +241,7 @@ check(not created["vd4e5f6"], "자동(기본)일 땐 가상 보일러 없음")
 pairs_msg({ { "d4e5f6", "000000" } })      -- 단독 지정
 check(created["vd4e5f6"], "단독 지정 → 가상 보일러 vd4e5f6 생성")
 sent_cmds = {}
-core.capability_handlers["connectbook02461.hotWaterSetpoint"]["setSetpoint"](nil, driver._children["vd4e5f6"], { args = { setpoint = 50 } })
+core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children["vd4e5f6"], { args = { setpoint = 50 } })
 check(last_cmd_has("f09@d4e5f6 d1="), "가상 보일러 온수 → f09@d4e5f6")
 
 print("[7] 모든 방 꺼짐 → 보일러 난방 off (자동, 보일러가 안 해주는 방향)")
@@ -345,8 +350,8 @@ local vb = driver._children["vd4e5f6"]
 check(vb ~= nil, "단독 써머스탯 → 가상 보일러 있음")
 expose(0x7FFFFFFF & ~(1 << 1) & ~(1 << 7), {})       -- 전원(1)·예열(7) 숨김
 local vcaps = vb._caps or {}
-check(vcaps.main == nil and vcaps.preheat == nil and vcaps.heat and vcaps.heat["mode"],
-  "가상 보일러: 전원·예열 숨김, 난방 모드는 보임")
+check(vcaps.main == nil and vcaps.preheat == nil and vcaps.heat and vcaps.heat["switch"],
+  "가상 보일러: 전원·예열 숨김, 난방 스위치는 보임")
 
 print("[13] 노출: 허브 칩 온도(비트 11) 끄고 켜기")
 reset()
@@ -388,13 +393,13 @@ check(last_emit("td4e5f6_z2", "reserve", "switch") == "off", "0x08 꺼지면(값
 sent_cmds = {}
 core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z1"], { component = "reserve" })
 local joined = table.concat(sent_cmds, " | ")
-check(joined:find("a0=1,b1=1", 1, true) and joined:find("a0=1,b1=1", 1, true) < joined:find("a0=1,96=1", 1, true),
-  "꺼진 방1 예약 켬 → 먼저 켜고(b1=1) 예약 (" .. joined .. ")")
+check(joined:find("a0=1,96=1,97=01", 1, true) and not joined:find("b1=", 1, true),
+  "꺼진 방1 예약 켬 → 켜는 명령 없이 예약만(기기가 알아서 켠다) (" .. joined .. ")")
 expose(0x7FFFFFFF & ~(1 << 12), {})
 local zc = driver._children["td4e5f6_z1"]._caps or {}
 check(zc.reserve == nil and zc.outing ~= nil, "노출 비트 12 끔 → 예약만 숨김(외출은 보임)")
 
-print("[15] 예약 간격(97: 0=30분, n=n시간, 16진)")
+print("[15] 예약 시간(97: 1~24시간, 16진 — 0시간 예약은 없다)")
 reset()
 links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
 state(6, "a1b2c3", F06); state(9, "d4e5f6", F09:sub(1, 14) .. "0b02" .. F09:sub(19))   -- 방2 예약 2시간
@@ -403,20 +408,23 @@ local function lastv(key, comp, attr)
     if e.key == key and e.comp == comp and e.attr == attr then return e.value end end
 end
 check((lastv("td4e5f6_z2", "main", "roomStatus") or ""):find("예약 2시간", 1, true), "상태 글 '예약 2시간'")
-check(lastv("td4e5f6_z2", "reserve", "mode") == "2시간", "간격 모드 = 2시간")
+check(lastv("td4e5f6_z2", "reserve", "hours").value == 2 and lastv("td4e5f6_z2", "reserve", "hours").unit == "시간", "예약 시간 슬라이더 = 2 시간")
 sent_cmds = {}
-core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { mode = "12시간" } })
-check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=0c"), "12시간 → 97=0c(16진)")
+core.capability_handlers["connectbook02461.reserveHours"]["setHours"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { hours = 12 } })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=0c"), "12시간 → 96=1,97=0c(16진)")
 sent_cmds = {}
-core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { mode = "30분" } })
-check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=00"), "30분 → 97=00")
+core.capability_handlers["connectbook02461.reserveHours"]["setHours"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { hours = 0 } })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=01"), "0 은 없는 값 → 1시간으로 보냄(97=00 은 보내지 않는다)")
+sent_cmds = {}
+core.capability_handlers["connectbook02461.reserveHours"]["setHours"](nil, driver._children["td4e5f6_z2"], { component = "reserve", args = { hours = 30 } })
+check(last_cmd_has("f09@d4e5f6 a0=2,96=1,97=18"), "24 넘는 값 → 24시간(97=18)")
 sent_cmds = {}
 core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z2"], { component = "reserve" })
-check(last_cmd_has("a0=2,96=1,97=00"), "스위치 켬 → 마지막으로 고른 간격(30분) 사용")
+check(last_cmd_has("a0=2,96=1,97=18"), "스위치 켬 → 마지막으로 고른 시간(24시간) 사용")
 sent_cmds = {}
-core.capability_handlers["mode"]["setMode"](nil, driver._children["td4e5f6_z1"], { component = "reserve", args = { mode = "3시간" } })
+core.capability_handlers["connectbook02461.reserveHours"]["setHours"](nil, driver._children["td4e5f6_z1"], { component = "reserve", args = { hours = 3 } })
 local j1 = table.concat(sent_cmds, " | ")
-check(j1:find("a0=1,b1=1", 1, true) and j1:find("a0=1,96=1,97=03", 1, true), "꺼진 방1 에 3시간 → 켜고 97=03")
+check(j1:find("a0=1,96=1,97=03", 1, true) and not j1:find("b1=", 1, true), "꺼진 방1 에 3시간 → 켜는 명령 없이 97=03")
 
 print("[16] 재시작 직후: 연결된 조절기가 다 보고하기 전엔 자동화 판단 안 함")
 reset()
@@ -450,27 +458,34 @@ reset()
 links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
 state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, true))
 sent_cmds = {}
-core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "외출" } })
+core.capability_handlers["switch"]["on"](nil, driver._children["ba1b2c3"], { component = "outing" })
 local jo = table.concat(sent_cmds, " | ")
 check(jo:find("f09@d4e5f6 a0=1,b3=1", 1, true) and jo:find("f09@d4e5f6 a0=2,b3=1", 1, true)
   and jo:find("f09@d4e5f6 a0=7,b3=1", 1, true), "외출 → 방1·방2·거실 각각 b3=1")
 check(not jo:find("f06@a1b2c3 b3", 1, true), "f06 b3 는 안 보냄")
-sent_cmds = {}
-core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "이상한값" } })
-check(#sent_cmds == 0, "모르는 모드 → 무시(난방 끄지 않음)")
+check(not jo:find("b1=", 1, true), "외출 켜기는 보일러의 난방 비트를 건드리지 않음(풀면 난방으로 돌아오게)")
+check(lastv("ba1b2c3", "heat", "switch") == "on" and lastv("ba1b2c3", "outing", "switch") == "off", "평소: 난방 스위치 켜짐 · 외출 꺼짐")
 -- 모든 방이 외출이면 보일러 모드도 '외출'로 보임
 local allout = f09_rooms(true, true, true):gsub("^(..)", "93")   -- 방1 stat 0x93(켜짐+외출)
 local t2 = {}
 for i = 1, #allout, 2 do t2[#t2 + 1] = allout:sub(i, i + 1) end
 t2[8] = "93"; t2[43] = "93"
 state(9, "d4e5f6", table.concat(t2))
-check(lastv("ba1b2c3", "heat", "mode") == "외출", "모든 방 외출 → 보일러 모드 '외출'")
+check(lastv("ba1b2c3", "outing", "switch") == "on" and lastv("ba1b2c3", "heat", "switch") == "off", "모든 방 외출 → 외출 스위치 켜짐 · 난방 스위치는 꺼짐으로")
 state(6, "a1b2c3", F06)                                        -- 보일러가 같은 상태를 다시 보고해도
-check(lastv("ba1b2c3", "heat", "mode") == "외출", "보일러 보고가 와도 '외출' 표시 유지")
+check(lastv("ba1b2c3", "outing", "switch") == "on", "보일러 보고가 와도 '외출' 표시 유지")
 sent_cmds = {}
-core.capability_handlers["mode"]["setMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "난방" } })
+core.capability_handlers["switch"]["on"](nil, driver._children["ba1b2c3"], { component = "heat" })
 local jn = table.concat(sent_cmds, " | ")
-check(jn:find("a0=1,b3=0", 1, true) and jn:find("f06@a1b2c3 b1=1", 1, true), "난방 → 방 외출 풀고 b1=1")
+check(jn:find("a0=1,b3=0", 1, true) and jn:find("f06@a1b2c3 b1=1", 1, true), "난방 켜기 → 방 외출 풀고 b1=1")
+sent_cmds = {}
+core.capability_handlers["switch"]["off"](nil, driver._children["ba1b2c3"], { component = "outing" })
+local jf = table.concat(sent_cmds, " | ")
+check(jf:find("a0=1,b3=0", 1, true) and not jf:find("b1=", 1, true), "외출 끄기 → 방 외출만 풂(난방 비트는 그대로)")
+sent_cmds = {}
+core.capability_handlers["switch"]["off"](nil, driver._children["ba1b2c3"], { component = "heat" })
+local jh = table.concat(sent_cmds, " | ")
+check(jh:find("f06@a1b2c3 b1=0", 1, true) and not jh:find("b3=", 1, true), "난방 끄기 → b1=0 만(외출은 안 건드림)")
 
 print("[19] 표 값 이벤트(설정 범위)도 중복 억제")
 reset()
@@ -558,8 +573,9 @@ print("[23] 붙은 방이 없는 보일러는 '외출'을 내놓지 않는다 / 
 reset()
 links({ { 6, "a1b2c3" } })
 state(6, "a1b2c3", F06)
-local sm = lastv("ba1b2c3", "heat", "supportedModes")
-check(type(sm) == "table" and #sm == 2, "조절기 없는 보일러: 모드 2개(난방·끄기)")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["ba1b2c3"], { component = "outing" })
+check(#sent_cmds == 0, "조절기 없는 보일러: 외출을 걸 방이 없어 보내는 명령 없음")
 reset()
 links({ { 6, "a1b2c3" }, { 9, "d4e5f6" }, { 9, "e7e8e9" } })      -- e7e8e9 는 목록에만 있고 상태를 안 보냄
 pairs_msg({ { "d4e5f6", "a1b2c3" }, { "e7e8e9", "a1b2c3" } })
@@ -653,6 +669,23 @@ core.info_changed(nil, driver._children["gas"])     -- 중복 캐시 비우고 �
 check(lastv("gas", "main", "month") == won2(0, true), "중계값으로 이번 달 = 기본료 " .. won2(0, true) .. "원(수동 1375 아님)")
 check(lastv("gas", "main", "today") == won2(10, false), "중계값으로 지난 하루(10㎥) = " .. won2(10, false) .. "원")
 check(driver._children["gas"]._fields["api_heat"] == 43.0, "열량 중계값 캐시됨(42.576 수동 아님)")
+
+print("[28] 보일러의 난방 방식·수온 설정은 표준 항목(thermostatMode · thermostatWaterHeatingSetpoint)")
+reset()
+links({ { 6, "a1b2c3" } })
+state(6, "a1b2c3", F06)
+state(6, "a1b2c3", F06:sub(1, 7) .. "1" .. F06:sub(9))          -- 난방 방식 = 실내(8번째 16진 글자)
+check(lastv("ba1b2c3", "heat", "thermostatMode") == "heat", "난방 방식 실내 = 표준 thermostatMode 'heat'")
+state(6, "a1b2c3", F06)
+check(lastv("ba1b2c3", "heat", "thermostatMode") == "ondol", "난방 방식 온돌 = 표준 thermostatMode 'ondol'")
+check(type(lastv("ba1b2c3", "hotwater", "heatingSetpoint")) == "table" and lastv("ba1b2c3", "hotwater", "heatingSetpoint").unit == "C",
+  "수온 설정 = 표준 thermostatWaterHeatingSetpoint")
+sent_cmds = {}
+core.capability_handlers["thermostatMode"]["setThermostatMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "heat" } })
+check(table.concat(sent_cmds, " | "):find("f06@a1b2c3 b4=1", 1, true), "난방 방식을 실내로 → b4=1")
+sent_cmds = {}
+core.capability_handlers["thermostatMode"]["setThermostatMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "cool" } })
+check(#sent_cmds == 0, "표준 목록의 다른 값(cool 등)은 무시")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)
