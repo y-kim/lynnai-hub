@@ -37,6 +37,8 @@ void hub_uplink_load(void);                    /* NVS 에서 고른 통로 읽�
 uint8_t hub_uplink_mask(void);
 esp_err_t hub_uplink_set_mask(uint8_t mask);   /* 저장(성공해야 바꿈). 바뀌면 관리 화면이 재시작해 적용 */
 
+/* 관리 화면 맨 위 경고: Zigbee 가입 정보를 잃었을 때만 내용이 생긴다(out 뒤에 덧붙임). */
+void hub_uplink_alert_html(char *out, size_t cap);
 void hub_uplink_render(char *out, size_t cap);              /* 관리 화면: 연결 방식 고르기 */
 bool hub_uplink_apply(const char *form, char *msg, size_t len);  /* POST /admin/transport */
 

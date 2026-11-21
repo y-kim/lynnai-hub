@@ -34,6 +34,7 @@
 #include "hub_events.h"
 #include "hub_uplink.h"
 #include "hub_zb_rinnai.h"
+#include "hub_zigbee.h"
 #include "hub_proxy.h"
 #include "hub_crypt.h"
 #include "hub_devs.h"
@@ -51,6 +52,97 @@ static const hub_state_t *s_st;
 
 static int64_t s_sta_down_since, s_link_down_since;
 static hub_dev_t s_dev[MAX_DEV];   /* evaluate·dump 공용(같은 태스크) — 부팅 직후 힙이 빠듯해 하나만 */
+
+/* ---------------------------------------------------------------- Zigbee 상태 (WiFi 로 들여다보게) */
+/* USB 콘솔로만 보이던 Zigbee 가입/채널/부모신호를 /api·관리화면으로 내보낸다. 선 없이 진단하려고. */
+void hub_diag_zb_get(hub_zb_diag_t *o)
+{
+    extern bool g_zb_nvs_was_reset;
+    memset(o, 0, sizeof(*o));
+    o->ready = hub_zigbee_is_ready();
+    o->nvs_reset = g_zb_nvs_was_reset;
+    o->parent_rssi = 127;              /* 127 = 모름 */
+    if (!o->ready) {
+        return;
+    }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    o->joined = ezb_bdb_dev_joined();
+    o->factory_new = ezb_bdb_is_factory_new();
+    o->pan = ezb_nwk_get_panid();
+    o->channel = ezb_nwk_get_current_channel();
+    o->short_addr = ezb_nwk_get_short_address();
+    ezb_extaddr_t ea;
+    ezb_nwk_get_extended_address(&ea);
+    for (int i = 0; i < 8; i++) {
+        o->eui[i] = ea.u8[7 - i];      /* 사람이 읽는 순서(상위부터) */
+    }
+    /* 부모(코디네이터 0x0000) 신호 세기 — 끊김 원인(약한 링크) 판단용. 없으면 가장 센 이웃. */
+    ezb_nwk_info_iterator_t it = EZB_NWK_INFO_ITERATOR_INIT;
+    ezb_nwk_neighbor_info_t nb;
+    int best = -127;
+    for (int i = 0; i < 16 && ezb_nwk_get_next_neighbor(&it, &nb) == EZB_ERR_NONE; i++) {
+        o->nbr_count++;
+        if (nb.short_addr == 0x0000) {
+            o->parent_rssi = nb.rssi;
+            o->parent_lqi = nb.lqi;
+        } else if (nb.rssi > best) {
+            best = nb.rssi;
+            if (o->parent_rssi == 127) {
+                o->parent_lqi = nb.lqi;
+            }
+        }
+    }
+    if (o->parent_rssi == 127 && best > -127) {
+        o->parent_rssi = best;
+    }
+    esp_zigbee_lock_release();
+}
+
+void hub_diag_zb_json(char *out, size_t cap)
+{
+    hub_zb_diag_t z;
+    hub_diag_zb_get(&z);
+    char eui[20] = "";
+    if (z.ready) {
+        for (int i = 0; i < 8; i++) {
+            snprintf(eui + 2 * i, 3, "%02x", z.eui[i]);
+        }
+    }
+    int rssi_known = z.ready && z.parent_rssi != 127;
+    char rssi[16] = "null", lqi[16] = "null";
+    if (rssi_known) {
+        snprintf(rssi, sizeof(rssi), "%d", z.parent_rssi);
+        snprintf(lqi, sizeof(lqi), "%d", z.parent_lqi);
+    }
+    uint8_t fs = 0, lt = 0xff;
+    uint32_t fc = 0;
+    long fage = -1, lage = -1;
+    hub_zigbee_last_fail(&fs, &fc, &fage, &lt, &lage);
+    int lkind = 0;
+    unsigned lcnt = 0;
+    long lep = 0;
+    if (!hub_zigbee_last_loss(&lkind, &lcnt, &lep, NULL)) {
+        lkind = 0; lcnt = 0; lep = 0;
+    }
+    int rtries = 0;
+    long rin = -1;
+    hub_zigbee_restore_state(&rtries, NULL, &rin);
+    snprintf(out, cap,
+             "{\"ready\":%s,\"joined\":%s,\"factory_new\":%s,\"nvs_reset\":%s,"
+             "\"pan\":%u,\"channel\":%u,\"short\":%u,\"eui\":\"%s\","
+             "\"parent_rssi\":%s,\"parent_lqi\":%s,\"neighbors\":%d,"
+             "\"fail_count\":%u,\"fail_status\":%d,\"fail_age_s\":%ld,\"fail_reason\":\"%s\","
+             "\"leave_type\":%d,\"leave_age_s\":%ld,"
+             "\"auto_stopped\":%s,\"loss_kind\":%d,\"loss_count\":%u,\"loss_epoch\":%ld,"
+             "\"restore_tries\":%d,\"restore_reboot_in_s\":%ld,\"snapshot_joined\":%s}",
+             z.ready ? "true" : "false", z.joined ? "true" : "false",
+             z.factory_new ? "true" : "false", z.nvs_reset ? "true" : "false",
+             z.pan, z.channel, z.short_addr, eui, rssi, lqi, z.nbr_count,
+             (unsigned)fc, fc ? fs : -1, fage, fc ? hub_zigbee_fail_text(fs) : "",
+             lt == 0xff ? -1 : lt, lage,
+             hub_zigbee_auto_stopped() ? "true" : "false", lkind, lcnt, lep, rtries, rin,
+             hub_crypt_zb_snapshot_joined() ? "true" : "false");
+}
 
 static bool sta_connected(wifi_ap_record_t *ap)
 {

@@ -36,8 +36,10 @@ static esp_timer_handle_t s_retry_timer;
 /* 부팅 직후엔 Wi-Fi(허브 AP 와 집 Wi-Fi 접속 모두)를 켜지 않고 Zigbee 재가입에 라디오를 먼저 내준다. 라디오가 하나라
  * Wi-Fi 가 켜져 있으면(AP 는 늘 듣고 있어야 한다) Zigbee 재가입 시도가 셋 중 하나꼴로 실패하고(실측: 재가입이 1.5초 →
  * 4.2초 → 6.9초로 밀림), 네 번 연달아 실패하면 그 부팅은 Zigbee 없이 뜬다. 재가입 결과가 나올 때(hub_wifi_sta_release)
- * 또는 STA_HOLD_MS(재가입 한 바퀴 ≈ 12초)가 지나면 Wi-Fi 를 켠다. */
-#define STA_HOLD_MS 13000
+ * 에 Wi-Fi 를 켠다. STA_HOLD_MS 는 결과 신호가 끝내 안 올 때만 쓰는 안전 상한이다.
+ * 상한은 재가입 전체(실측 최악 ≈ 17초, 실패 통지 ≈ 24초)보다 길어야 한다: 13초였을 때 마지막 재가입 시도 도중
+ * Wi-Fi 가 켜졌고, 그 부팅에서 재가입이 실패해 스택이 망을 떠나며 가입 정보가 지워졌다(2026-11-21). */
+#define STA_HOLD_MS 25000
 static bool s_radio_paused;            /* Zigbee 가입 세션 동안 Wi-Fi 를 멈춰 둔 상태 */
 static volatile bool s_sta_hold;
 static esp_timer_handle_t s_hold_timer;

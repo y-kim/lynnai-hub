@@ -30,6 +30,7 @@
 #include "hub_sensors.h"
 #include "hub_tariff.h"
 #include "hub_proxy.h"
+#include "hub_diag.h"
 #include "hub_plugins.h"
 
 static const char *TAG = "HUB_API";
@@ -404,6 +405,12 @@ static esp_err_t state_get(httpd_req_t *req)
         }
         CHUNK("]}");
     }
+    {
+        char zb[800];
+        hub_diag_zb_json(zb, sizeof(zb));
+        httpd_resp_sendstr_chunk(req, ",\"zigbee\":");
+        httpd_resp_sendstr_chunk(req, zb);
+    }
     httpd_resp_sendstr_chunk(req, "}");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -520,6 +527,18 @@ static esp_err_t metrics_get(httpd_req_t *req)
                 CHUNK("lynnai_gas_month_cubic_meters{month=\"%04d-%02d\"} %.2f\n", y, mo, m3);
             }
         }
+    }
+    {
+        hub_zb_diag_t z;
+        hub_diag_zb_get(&z);
+        CHUNK("# TYPE lynnai_zigbee_up gauge\nlynnai_zigbee_up %d\n", z.ready && z.joined ? 1 : 0);
+        CHUNK("# TYPE lynnai_zigbee_ready gauge\nlynnai_zigbee_ready %d\n", z.ready ? 1 : 0);
+        CHUNK("# TYPE lynnai_zigbee_channel gauge\nlynnai_zigbee_channel %u\n", z.channel);
+        if (z.ready && z.parent_rssi != 127) {
+            CHUNK("# TYPE lynnai_zigbee_parent_rssi_dbm gauge\nlynnai_zigbee_parent_rssi_dbm %d\n", z.parent_rssi);
+            CHUNK("# TYPE lynnai_zigbee_parent_lqi gauge\nlynnai_zigbee_parent_lqi %d\n", z.parent_lqi);
+        }
+        CHUNK("# TYPE lynnai_zigbee_neighbors gauge\nlynnai_zigbee_neighbors %d\n", z.nbr_count);
     }
     return httpd_resp_sendstr_chunk(req, NULL);
 }

@@ -461,6 +461,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
             httpd_resp_sendstr_chunk(req, w);
         }
     }
+    hub_uplink_alert_html(b, cap); FLUSH();   /* Zigbee 가입 정보 분실 안내(있을 때만) */
     hub_proxy_render(b, cap); FLUSH();     /* 동작 모드(프록시/단독) */
     hub_uplink_render(b, cap); FLUSH();    /* 연결 방식(통로) */
     hub_pairs_render(b, cap); FLUSH();     /* 연결된 기기 */

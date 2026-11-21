@@ -20,6 +20,7 @@
 #include "nvs_sec_provider.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include <stddef.h>
 #include "esp_partition.h"
@@ -261,6 +262,94 @@ static esp_err_t restore(const char *part, const ent_t *l)
         }
     }
     return ESP_OK;
+}
+
+/* ---------------------------------------------------------------- Zigbee 가입 데이터 스냅샷(RAM)
+ * esp-zigbee-lib 2.1.0 은 재가입이 실패하면 가입 데이터를 지운다(espressif/esp-zigbee-sdk#939, 수정 전).
+ * 지워지기 전의 zb_nvs 항목을 RAM 에 복사해 두었다가, 지워진 항목만 되써서 다시 시도할 수 있게 한다.
+ * 형식을 해석하지 않고 NVS 항목을 그대로 옮긴다. 플래시에는 따로 쓰지 않는다(쓰는 건 되살릴 때뿐). */
+static ent_t *s_zb_snap;
+static SemaphoreHandle_t s_zb_snap_mx;
+
+static void snap_lock(void)
+{
+    if (!s_zb_snap_mx) {
+        s_zb_snap_mx = xSemaphoreCreateMutex();      /* 첫 호출은 Zigbee 시작 전 app_main 에서(경합 없음) */
+    }
+    if (s_zb_snap_mx) {
+        xSemaphoreTake(s_zb_snap_mx, portMAX_DELAY);
+    }
+}
+
+static void snap_unlock(void)
+{
+    if (s_zb_snap_mx) {
+        xSemaphoreGive(s_zb_snap_mx);
+    }
+}
+
+int hub_crypt_zb_snapshot(void)
+{
+    ent_t *l = NULL;
+    int n = 0;
+    size_t total = 0;
+    if (collect(PART_ZB, NULL, &l, &n, &total) != ESP_OK) {
+        return -1;                                   /* 예전 스냅샷은 그대로 둔다 */
+    }
+    snap_lock();
+    free_list(s_zb_snap);
+    s_zb_snap = l;
+    snap_unlock();
+    return n;
+}
+
+/* 스냅샷이 '가입된 상태'의 것인가: 가입 공통 데이터(키 0x0001 → NVS "ZB01..")가 들어 있나 */
+bool hub_crypt_zb_snapshot_joined(void)
+{
+    bool yes = false;
+    snap_lock();
+    for (const ent_t *e = s_zb_snap; e; e = e->next) {
+        if (!strncmp(e->key, "ZB01", 4)) {
+            yes = true;
+            break;
+        }
+    }
+    snap_unlock();
+    return yes;
+}
+
+/* 스냅샷에 있는데 지금 zb_nvs 에 없는 항목만 되쓴다. 남아 있는 항목(스택이 지우지 않는 프레임 카운터 등)은
+ * 건드리지 않는다 — 카운터를 옛 값으로 되돌리면 망이 프레임을 재전송 공격으로 보고 버린다.
+ * 되쓴 개수(0 = 지워진 게 없음), 실패하면 -1. */
+int hub_crypt_zb_restore_missing(void)
+{
+    int done = 0;
+    snap_lock();
+    for (const ent_t *e = s_zb_snap; e; e = e->next) {
+        nvs_handle_t h;
+        esp_err_t r = nvs_open_from_partition(PART_ZB, e->ns, NVS_READWRITE, &h);
+        if (r == ESP_OK) {
+            nvs_type_t t;
+            r = nvs_find_key(h, e->key, &t);
+            if (r == ESP_ERR_NVS_NOT_FOUND) {
+                r = set_any(h, e);
+                if (r == ESP_OK) {
+                    r = nvs_commit(h);
+                }
+                if (r == ESP_OK) {
+                    done++;
+                }
+            }
+            nvs_close(h);
+        }
+        if (r != ESP_OK) {
+            ESP_LOGE(TAG, "zb_nvs %s:%s 되살리기 실패(%s)", e->ns, e->key, esp_err_to_name(r));
+            done = -1;
+            break;
+        }
+    }
+    snap_unlock();
+    return done;
 }
 
 /* 파티션을 지우고 cfg(NULL=평문)로 다시 열어 목록을 되쓴다 */

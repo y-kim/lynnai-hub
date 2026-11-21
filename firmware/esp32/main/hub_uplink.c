@@ -3,6 +3,7 @@
  */
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -13,6 +14,8 @@
 
 #include "hub_uplink.h"
 #include "hub_zb_rinnai.h"
+#include "hub_zigbee.h"
+#include "hub_diag.h"
 #include "hub_lan.h"
 #include "hub_rinnai.h"
 #include "hub_sensors.h"
@@ -59,6 +62,43 @@ static void restart_task(void *arg)
     esp_restart();
 }
 
+void hub_uplink_alert_html(char *o, size_t cap)
+{
+    if (!hub_zigbee_lost()) {
+        return;
+    }
+    int tries = 0, max = 0;
+    long in_s = -1;
+    hub_zigbee_restore_state(&tries, &max, &in_s);
+    if (in_s >= 0) {                                  /* 되살려 놓고 재시작을 기다리는 중 — 사용자가 할 일 없음 */
+        char t2[320];
+        snprintf(t2, sizeof(t2),
+                 "<div class=card><p class=warn><b>Zigbee 재가입에 실패해 다시 시도합니다</b> (%d/%d)<br><small>"
+                 "가입 정보는 되살려 두었습니다. 약 %ld초 뒤 허브가 스스로 다시 시작해 재가입합니다. "
+                 "SmartThings 에서 따로 할 일은 없습니다.</small></p></div>", tries, max, in_s);
+        strlcat(o, t2, cap);
+        return;
+    }
+    char when[112] = "";
+    int kind = 0;
+    long ep = 0;
+    if (hub_zigbee_last_loss(&kind, NULL, &ep, NULL) && kind == 1 && ep) {
+        time_t tt = (time_t)ep;
+        struct tm tm;
+        localtime_r(&tt, &tm);
+        snprintf(when, sizeof(when), "%d월 %d일 %02d:%02d 부팅 때 재가입에 실패했습니다. ", tm.tm_mon + 1, tm.tm_mday,
+                 tm.tm_hour, tm.tm_min);
+    }
+    strlcat(o, "<div class=card><p class=warn><b>Zigbee 가입 정보가 사라졌습니다</b> — SmartThings 에서 허브가 "
+               "오프라인으로 보입니다.<br><small>", cap);
+    strlcat(o, when, cap);
+    if (tries >= max) {
+        strlcat(o, "가입 정보를 되살려 여러 번 다시 시도했지만 붙지 못했습니다. ", cap);
+    }
+    strlcat(o, "SmartThings 앱에서 '기기 추가 → 주변 기기 검색'을 연 다음, 아래 '연결 방식'의 "
+               "<b>Zigbee 가입 시도</b>를 누르세요. 같은 기기로 다시 붙습니다.</small></p></div>", cap);
+}
+
 /* 관리 화면: 어떤 연결 방식(통로)을 쓸지 고르기. 고른 방식만 노출 설정에 나온다. Matter 는 준비 중. */
 void hub_uplink_render(char *o, size_t cap)
 {
@@ -79,6 +119,50 @@ void hub_uplink_render(char *o, size_t cap)
     }
     strlcat(o, "<button class=sv>연결 방식 저장</button></form>", cap);
     if (s_mask & HUB_UPLINK_ZIGBEE) {                 /* 허브 버튼 짧게와 같음 — Wi-Fi 가 최대 3분 멈춘다 */
+        hub_zb_diag_t z;
+        hub_diag_zb_get(&z);
+        if (z.ready && z.joined) {
+            char rssi[24] = "";
+            if (z.parent_rssi != 127) {
+                snprintf(rssi, sizeof(rssi), " · 부모신호 %ddBm", z.parent_rssi);
+            }
+            snprintf(t, sizeof(t), "<p class=ok>Zigbee 가입됨 · 채널 %u · PAN 0x%04x%s</p>", z.channel, z.pan, rssi);
+            strlcat(o, t, cap);
+        } else {
+            strlcat(o, "<p class=warn>Zigbee 미가입 — SmartThings 에서 오프라인으로 보입니다.</p>", cap);
+            uint8_t fs = 0, lt = 0xff;
+            uint32_t fc = 0;
+            long fage = -1, lage = -1;
+            hub_zigbee_last_fail(&fs, &fc, &fage, &lt, &lage);
+            if (fc) {
+                snprintf(t, sizeof(t), "<p class=muted>마지막 가입 실패: <b>0x%02x</b> — %s<br>(%ld초 전 · 누적 %u회)</p>",
+                         fs, hub_zigbee_fail_text(fs), fage, (unsigned)fc);
+                strlcat(o, t, cap);
+            }
+            if (hub_zigbee_auto_stopped()) {
+                strlcat(o, "<p class=muted>자동 가입 시도는 멈췄습니다(시도할 때마다 Wi-Fi 가 끊기기 때문). "
+                           "SmartThings 앱에서 '기기 추가'를 연 뒤 아래 버튼을 누르세요.</p>", cap);
+            }
+        }
+        {
+            int kind = 0;
+            unsigned cnt = 0;
+            long ep = 0, up = 0;
+            if (hub_zigbee_last_loss(&kind, &cnt, &ep, &up)) {     /* 플래시에 남은 기록 — 재부팅해도 보인다 */
+                char when[40];
+                if (ep) {
+                    time_t tt = (time_t)ep;
+                    struct tm tm;
+                    localtime_r(&tt, &tm);
+                    strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tm);
+                } else {
+                    snprintf(when, sizeof(when), "시각 모름(부팅 %ld초째)", up);
+                }
+                snprintf(t, sizeof(t), "<p class=muted>마지막 가입 정보 삭제: %s — %s (누적 %u회)</p>", when,
+                         kind == 1 ? "부팅 재가입 실패로 분실" : "가동 중 탈퇴(SmartThings 에서 삭제 추정)", cnt);
+                strlcat(o, t, cap);
+            }
+        }
         strlcat(o, "<form method=post action=/api/zigbee/join><p class=muted>SmartThings 앱에서 '기기 추가 → 주변 기기 "
                    "검색'을 누른 뒤: 가입 시도 중엔 허브 Wi-Fi 가 최대 3분 멈춰 이 화면이 잠시 끊깁니다.</p>"
                    "<button class=lnk>Zigbee 가입 시도</button></form>", cap);

@@ -30,6 +30,10 @@
 /* app_main 맨 앞: 두 NVS 파티션을 연다(필요하면 암호화 켜기 처리 후 재시작). zb_reset = zb_nvs 를 지우고 새로 만들었나 */
 esp_err_t hub_crypt_boot(bool *zb_reset);
 
+/* Zigbee 가입 데이터(zb_nvs) 스냅샷 — 재가입 실패로 스택이 지운 항목을 되살리는 데 쓴다(hub_main). */
+int  hub_crypt_zb_snapshot(void);            /* 지금 내용을 RAM 에 복사. 항목 수, 실패 -1(예전 것 유지) */
+bool hub_crypt_zb_snapshot_joined(void);     /* 스냅샷에 가입 데이터가 들어 있나 */
+int  hub_crypt_zb_restore_missing(void);     /* 지워진 항목만 되씀. 되쓴 개수, 실패 -1 */
 bool hub_crypt_on(void);                 /* 이번 부팅에 암호화된 저장소를 쓰나 */
 int hub_crypt_key_block(void);           /* 쓰는 키 블록 0~5, 없으면 -1 */
 

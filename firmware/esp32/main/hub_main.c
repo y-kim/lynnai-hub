@@ -55,6 +55,8 @@
 #include "hub_radio.h"
 #include "esp_mac.h"
 #include "nvs.h"
+#include <string.h>
+#include <time.h>
 
 /* Zigbee 가입 표식(앱 NVS, 검사값 포함). 스택의 가입 정보(zb_nvs)는 스택이 직접 써서 감쌀 수 없으므로,
  * '가입했었다'를 따로 남겨 두고 부팅 때 스택이 초기 상태면 "가입 정보 사라짐"으로 보고한다. */
@@ -87,6 +89,100 @@ static bool zb_mark_get(void)
         nvs_close(h);
     }
     return v == 1;
+}
+
+/* 가입 정보 분실 기록(앱 NVS "zbmark"/"loss") — 재부팅해도 남는다. 이벤트 기록은 RAM 이라 재부팅하면 사라져서
+ * '언제·왜 가입 정보가 없어졌는지'를 나중에 알 수 없었다. 관리 화면과 /api 로 보여 준다. */
+typedef struct {
+    uint8_t  kind;        /* 1 = 부팅 재가입 도중 탈퇴(분실), 2 = 가동 중 탈퇴(SmartThings 에서 삭제한 것으로 추정) */
+    uint8_t  leave_type;
+    uint16_t count;       /* 누적 횟수 */
+    uint32_t epoch;       /* 벽시계(0 = 시계가 맞기 전에 일어남) */
+    uint32_t up_s;        /* 그 부팅에서 몇 초째였나 */
+} zb_loss_t;
+static bool s_loss_this_boot;
+
+static bool zb_loss_load(zb_loss_t *r)
+{
+    nvs_handle_t h;
+    size_t sz = sizeof(*r);
+    bool ok = false;
+    if (nvs_open("zbmark", NVS_READONLY, &h) == ESP_OK) {
+        ok = nvs_get_blob(h, "loss", r, &sz) == ESP_OK && sz == sizeof(*r);
+        nvs_close(h);
+    }
+    return ok;
+}
+
+static void zb_loss_save(const zb_loss_t *r)
+{
+    nvs_handle_t h;
+    if (nvs_open("zbmark", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "loss", r, sizeof(*r));
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+static void zb_loss_note(uint8_t kind, uint8_t leave_type)
+{
+    zb_loss_t r;
+    if (!zb_loss_load(&r)) {
+        memset(&r, 0, sizeof(r));
+    }
+    r.kind = kind;
+    r.leave_type = leave_type;
+    if (r.count < 0xffff) {
+        r.count++;
+    }
+    time_t t = time(NULL);
+    r.epoch = t > 1700000000 ? (uint32_t)t : 0;
+    r.up_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    zb_loss_save(&r);
+    s_loss_this_boot = true;
+}
+
+bool hub_zigbee_last_loss(int *kind, unsigned *count, long *epoch, long *up_s)
+{
+    zb_loss_t r;
+    if (!zb_loss_load(&r) || !r.count) {
+        return false;
+    }
+    if (s_loss_this_boot && !r.epoch) {          /* 부팅 직후(시계 전)에 일어난 일 — 시계가 맞으면 시각을 채운다 */
+        time_t t = time(NULL);
+        if (t > 1700000000) {
+            r.epoch = (uint32_t)(t - (time_t)(esp_timer_get_time() / 1000000 - r.up_s));
+            zb_loss_save(&r);
+        }
+    }
+    if (kind) *kind = r.kind;
+    if (count) *count = r.count;
+    if (epoch) *epoch = (long)r.epoch;
+    if (up_s) *up_s = (long)r.up_s;
+    return true;
+}
+
+/* 가입 데이터를 되살려 재부팅한 횟수(앱 NVS "zbmark"/"rjtry"). 망에 다시 붙으면 0. 재부팅을 넘겨 세야
+ * 끝없이 재시작하지 않는다(코디네이터가 꺼져 있거나 SmartThings 에서 정말 지운 경우). */
+static uint8_t rjtry_get(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 0;
+    if (nvs_open("zbmark", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, "rjtry", &v);
+        nvs_close(h);
+    }
+    return v;
+}
+
+static void rjtry_set(uint8_t v)
+{
+    nvs_handle_t h;
+    if (nvs_open("zbmark", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "rjtry", v);
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 static const char *TAG = "TEMPERATURE_SENSOR";
@@ -192,7 +288,139 @@ static volatile bool s_join_session;        /* Wi-Fi 를 멈추고 Zigbee 가입
 static uint32_t s_backoff_ms = 10000;       /* 가입 실패 시 재시도 간격(점점 늘림) */
 static int64_t s_fast_until_us;             /* 이 시각까지는 빠르게 재시도(기기 추가 창) */
 
+/* 마지막 가입 실패 기록 — 관리화면·/api 로 '왜 못 붙었는지' 보여 주려고(선 없이 진단) */
+static volatile uint8_t  s_zbf_status;
+static volatile uint32_t s_zbf_count;
+static volatile int64_t  s_zbf_us;
+static volatile uint8_t  s_zbl_type = 0xff; /* 마지막 LEAVE(망에서 나감) 종류, 0xff=없음 */
+static volatile int64_t  s_zbl_us;
+
+/* 이번 부팅에 실제로 망에 붙은 적이 있나. 붙기 전(부팅 재가입 도중)의 탈퇴는 "삭제"가 아니라 "분실"이다. */
+static volatile bool s_zb_up;
+/* 가입 정보가 없을 때(공장 초기) 자동 가입 시도 횟수 한도. SmartThings 에서 '기기 추가'를 열기 전에는 성공할 수 없고
+ * 시도할 때마다 Wi-Fi 가 5초쯤 멈춰 린나이 기기가 허브 AP 에서 떨어진다 — 부팅 뒤 10분쯤(6번)만 하고 멈춘다.
+ * 그 뒤엔 허브 버튼 짧게 / 관리 화면 'Zigbee 가입 시도'로만(3분 창). */
+#define ZB_AUTO_STEER_MAX 6
+static volatile uint8_t s_auto_left = ZB_AUTO_STEER_MAX;
+static volatile bool s_auto_stopped;
+bool hub_zigbee_auto_stopped(void) { return s_auto_stopped; }
+
+/* ---- 재가입 실패로 지워진 가입 데이터 되살리기(espressif/esp-zigbee-sdk#939 우회) ----
+ * esp-zigbee-lib 2.1.0 은 재가입이 안 되면(응답을 못 받아 비보안 재가입으로 넘어가고, 키를 못 받으면) 스스로
+ * 완전 탈퇴하며 가입 데이터를 지운다. 시판 기기처럼 "가입 정보를 쥔 채 다시 시도"하도록: 지워진 항목을 스냅샷에서
+ * 되쓰고 재시작해 재가입을 다시 한다. 스택의 RAM 상태는 이미 초기화돼 있어 재시작이 필요하다.
+ * 최대 ZB_RESTORE_MAX 번(간격을 늘려 가며). 그래도 안 되면 그대로 두고 '기기 추가' 안내를 띄운다.
+ * 붙어서 돌던 중의 탈퇴(SmartThings 에서 삭제)는 되살리지 않는다. */
+#define ZB_RESTORE_MAX 3
+static const uint32_t ZB_RESTORE_WAIT_MS[ZB_RESTORE_MAX] = { 5000, 60000, 300000 };
+static volatile bool s_restore_pending;
+static volatile int64_t s_restore_at_us;
+
+static void zb_restore_task(void *arg)
+{
+    uint32_t wait_ms = (uint32_t)(uintptr_t)arg;
+    int n = hub_crypt_zb_restore_missing();
+    ESP_LOGW(TAG, "Zigbee 가입 데이터 %d개 되살림 — %lu초 뒤 재시작해 재가입을 다시 시도", n, (unsigned long)(wait_ms / 1000));
+    vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    hub_crypt_zb_restore_missing();                 /* 기다리는 사이 더 지워진 게 있으면 마저 */
+    esp_restart();
+}
+
+/* 망에 붙은 뒤 조금 있다가 스냅샷을 새로 뜬다(스택이 저장을 끝낸 뒤). 다음 재가입 실패에 쓸 최신본. */
+static void zb_snap_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    int n = hub_crypt_zb_snapshot();
+    ESP_LOGI(TAG, "Zigbee 가입 데이터 스냅샷 %d개", n);
+    vTaskDelete(NULL);
+}
+
+static void zb_up_mark(void)                        /* 망에 붙음(부팅 재가입 성공 / 새 가입 성공) */
+{
+    s_zb_up = true;
+    s_auto_stopped = false;
+    if (rjtry_get()) {
+        rjtry_set(0);
+    }
+    xTaskCreate(zb_snap_task, "zb_snap", 4096, NULL, 3, NULL);
+}
+
+/* 되살리기 상태: 지금까지 재시도 횟수, 한도, 재시작까지 남은 초(-1 = 예정 없음). 안 쓰는 값은 NULL. */
+void hub_zigbee_restore_state(int *tries, int *max, long *reboot_in_s)
+{
+    if (tries) *tries = rjtry_get();
+    if (max) *max = ZB_RESTORE_MAX;
+    if (reboot_in_s) {
+        int64_t left = s_restore_at_us - esp_timer_get_time();
+        *reboot_in_s = s_restore_pending ? (long)(left > 0 ? left / 1000000 : 0) : -1;
+    }
+}
+
+/* 가입했던 허브가 지금 가입 정보 없이 떠 있나(누가 지운 게 아닌 분실). 저장 데이터 오류가 아니라 '다시 붙이기'가
+ * 필요한 상태라, 관리 화면에 따로 안내한다(USB 점검 안내가 아니라 SmartThings 에서 기기 추가). */
+bool hub_zigbee_lost(void)
+{
+    if (!(hub_uplink_mask() & HUB_UPLINK_ZIGBEE) || !hub_zigbee_is_ready()) {
+        return false;
+    }
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    bool lost = !ezb_bdb_dev_joined() && ezb_bdb_is_factory_new();
+    esp_zigbee_lock_release();
+    return lost && zb_mark_get();
+}
+
+static void zb_note_fail(uint8_t status)
+{
+    s_zbf_status = status;
+    s_zbf_us = esp_timer_get_time();
+    s_zbf_count++;
+}
+
+void hub_zigbee_last_fail(uint8_t *status, uint32_t *count, long *age_s,
+                          uint8_t *leave_type, long *leave_age_s)
+{
+    int64_t now = esp_timer_get_time();
+    if (status) *status = s_zbf_status;
+    if (count) *count = s_zbf_count;
+    if (age_s) *age_s = s_zbf_count ? (long)((now - s_zbf_us) / 1000000) : -1;
+    if (leave_type) *leave_type = s_zbl_type;
+    if (leave_age_s) *leave_age_s = s_zbl_type != 0xff ? (long)((now - s_zbl_us) / 1000000) : -1;
+}
+
+const char *hub_zigbee_fail_text(uint8_t status)
+{
+    switch (status) {
+    case EZB_BDB_STATUS_SUCCESS:                  return "성공";
+    case EZB_BDB_STATUS_IN_PROGRESS:              return "진행 중";
+    case EZB_BDB_STATUS_NO_NETWORK:               return "받아 주는 망을 못 찾음 (SmartThings 에서 '기기 추가'가 안 열렸거나 신호 약함)";
+    case EZB_BDB_STATUS_TARGET_FAILURE:           return "가입 요청에 응답 없음 (허브 신호 약함/거리)";
+    case EZB_BDB_STATUS_FORMATION_FAILURE:        return "망 구성 실패";
+    case EZB_BDB_STATUS_NO_SCAN_RESPONSE:         return "스캔 응답 없음";
+    case EZB_BDB_STATUS_NOT_PERMITTED:            return "허용되지 않음";
+    case EZB_BDB_STATUS_TCLK_EX_FAILURE:          return "보안키 교환 실패 (Trust Center) — 기존 등록을 지우고 다시 추가 필요할 수 있음";
+    case EZB_BDB_STATUS_NOT_ON_A_NETWORK:         return "망에 올라가 있지 않음";
+    case EZB_BDB_STATUS_ON_A_NETWORK:             return "이미 망에 가입됨";
+    case EZB_BDB_STATUS_CANCELLED:                return "취소됨 (Wi-Fi/온보딩에 라디오 양보)";
+    case EZB_BDB_STATUS_DEV_ANNCE_SEND_FAILURE:   return "부모 라우터가 응답(ACK) 없음 — 링크 끊김/신호 약함";
+    default:                                      return "알 수 없는 사유";
+    }
+}
+
 static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg);
+
+/* 재시도 타이머는 종류별로 하나만 걸어 둔다. alarm_timer_schedule 은 부를 때마다 새 타이머를 만들어서,
+ * 여러 곳에서 예약하면 같은 일이 겹쳐 돌았다(가입·재가입 시도가 동시에 시작됨). 콜백이 들어오면서 푼다. */
+static volatile bool s_arm_steer, s_arm_rejoin, s_arm_reinit;
+static void arm_once(volatile bool *armed, alarm_timer_callback_t cb, uint32_t ms)
+{
+    if (*armed) {
+        return;
+    }
+    if (alarm_timer_schedule(cb, 0, ms) == ESP_OK) {
+        *armed = true;
+    }
+}
 
 /* 2.4GHz 라디오는 Wi-Fi 와 Zigbee 가 공유한다. steering(망 찾기)은 채널 16개를 훑어 라디오를
  * 오래 잡으므로, 그동안 Wi-Fi 를 멈춰 라디오를 Zigbee 에 내준다(가입 세션). 반대로 허브 AP 에
@@ -200,10 +428,13 @@ static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg);
  * 모든 가입 경로가 이 함수로 모인다. 타이머/일반 태스크 컨텍스트에서만 호출(stack lock 잡음). */
 static void zb_try_steer(void)
 {
+    if (s_restore_pending) {                         /* 가입 데이터를 되살려 재시작을 기다리는 중 */
+        return;
+    }
     if (!s_steer_allowed || s_ap_busy) {
         ESP_LOGI(TAG, "Zigbee 가입 보류(%s) — 5초 뒤 다시",
                  s_ap_busy ? "AP 온보딩 중, 라디오 양보" : "Wi-Fi 설정 전");
-        alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 5000);
+        arm_once(&s_arm_steer, esp_zigbee_alarm_steer_gate, 5000);
         return;
     }
     esp_zigbee_lock_acquire(portMAX_DELAY);
@@ -218,7 +449,14 @@ static void zb_try_steer(void)
         hub_wifi_radio_pause();                     /* 가입하는 동안 Wi-Fi 중단 */
     }
     esp_zigbee_lock_acquire(portMAX_DELAY);
-    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+    /* 가입 정보가 남아 있으면 '새 망 찾기'가 아니라 '기존 망 재가입'이다. 새 망 찾기는 SmartThings 가 기기 추가를
+     * 열어야만 되고, 가입 정보가 있는 기기에 쓸 절차가 아니다. 결과는 DEVICE_REBOOT 신호로 온다(실패하면 간격을
+     * 늘려 다시 — esp_zigbee_alarm_reinit). */
+    bool fresh = ezb_bdb_is_factory_new();
+    if (!fresh) {
+        s_zb_up = false;                             /* 망에서 떨어진 상태 — 이 뒤의 탈퇴는 '삭제'가 아니라 '분실' */
+    }
+    (void)ezb_bdb_start_top_level_commissioning(fresh ? EZB_BDB_MODE_NETWORK_STEERING : EZB_BDB_MODE_INITIALIZATION);
     esp_zigbee_lock_release();
 }
 
@@ -241,8 +479,12 @@ static uint32_t s_init_backoff_ms = 30000;
 static void esp_zigbee_alarm_reinit(alarm_timer_arg_t arg)
 {
     (void)arg;
+    s_arm_reinit = false;
+    if (s_restore_pending) {                         /* 가입 데이터를 되살려 재시작을 기다리는 중 — 스택을 건드리지 않는다 */
+        return;
+    }
     if (s_ap_busy) {                                 /* AP 기기 등록 중이면 양보 */
-        alarm_timer_schedule(esp_zigbee_alarm_reinit, 0, 5000);
+        arm_once(&s_arm_reinit, esp_zigbee_alarm_reinit, 5000);
         return;
     }
     if (!s_join_session) {
@@ -285,6 +527,8 @@ bool hub_zigbee_join_now(void)
     }
     s_fast_until_us = esp_timer_get_time() + 180LL * 1000000;
     s_backoff_ms = 10000;
+    s_auto_left = 0;                    /* 사람이 연 3분 창이 끝나면 다시 자동으로 돌지 않는다 */
+    s_auto_stopped = false;
     ESP_LOGI(TAG, "Zigbee 가입 시도 시작(3분간, 그동안 Wi-Fi 잠깐 중단)");
     zb_try_steer();
     return true;
@@ -310,15 +554,17 @@ void hub_zigbee_ap_onboarding(bool busy)
  * 붙어 있으면 아무 스캔도 안 하고 5분 뒤 다시 확인. */
 static void esp_zigbee_alarm_rejoin_check(alarm_timer_arg_t arg)
 {
+    s_arm_rejoin = false;
     if (!s_steer_allowed) {
-        alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 300000);
+        arm_once(&s_arm_rejoin, esp_zigbee_alarm_rejoin_check, 300000);
         return;
     }
     esp_zigbee_lock_acquire(portMAX_DELAY);
     bool joined = ezb_bdb_dev_joined();
     esp_zigbee_lock_release();
     if (joined) {
-        alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 300000);
+        s_zb_up = true;
+        arm_once(&s_arm_rejoin, esp_zigbee_alarm_rejoin_check, 300000);
     } else {
         ESP_LOGW(TAG, "Zigbee 미가입 감지 — 재가입(rejoin) 시도");
         zb_try_steer();
@@ -328,6 +574,7 @@ static void esp_zigbee_alarm_rejoin_check(alarm_timer_arg_t arg)
 static void esp_zigbee_alarm_steer_gate(alarm_timer_arg_t arg)
 {
     (void)arg;
+    s_arm_steer = false;
     zb_try_steer();
 }
 
@@ -349,15 +596,16 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             s_init_backoff_ms = 30000;
             ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
-            if (ezb_bdb_is_factory_new() && zb_mark_get()) {
-                hub_store_report("zigbee", "가입정보", "사라짐 — 재페어링 필요");   /* 가입했었는데 초기 상태 */
+            if (ezb_bdb_is_factory_new() && zb_mark_get()) {      /* 가입했었는데 초기 상태 — 관리 화면 맨 위 경고(hub_zigbee_lost) */
+                ESP_LOGE(TAG, "Zigbee 가입 정보가 사라져 있음 — SmartThings 에서 '기기 추가' 필요");
             }
             if (ezb_bdb_is_factory_new()) {
                 /* 가입은 타이머 컨텍스트에서(Wi-Fi 중단·AP 온보딩 양보·stack lock 포함) */
-                alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, 100);
+                arm_once(&s_arm_steer, esp_zigbee_alarm_steer_gate, 100);
             } else {
                 ESP_LOGI(TAG, "Device reboot");
-                alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 20000);   /* 고아면 자동 재가입 */
+                zb_up_mark();                    /* 저장된 가입 정보로 망에 다시 붙음 */
+                arm_once(&s_arm_rejoin, esp_zigbee_alarm_rejoin_check, 20000);   /* 고아면 자동 재가입 */
             }
         } else {
             /* 망을 못 찾음(0x03 등). 예제처럼 1초마다 다시 초기화하면 재가입 스캔(~11초)이 라디오를 쉬지 않고 잡아
@@ -365,7 +613,8 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
              * 재시도는 Wi-Fi 를 잠깐 멈춘 세션 안에서. 그 사이엔 Wi-Fi 가 붙어 보일러 중계·관리 화면이 산다. */
             ESP_LOGW(TAG, "%s failed with status(0x%02x) — %lu초 뒤 다시(그동안 Wi-Fi 우선)",
                      ezb_app_signal_to_string(signal_type), status, (unsigned long)(s_init_backoff_ms / 1000));
-            alarm_timer_schedule(esp_zigbee_alarm_reinit, 0, s_init_backoff_ms);
+            zb_note_fail(status);               /* 부팅/재초기화 가입 실패도 사유 기록 */
+            arm_once(&s_arm_reinit, esp_zigbee_alarm_reinit, s_init_backoff_ms);
             if (s_init_backoff_ms < 600000) {
                 s_init_backoff_ms *= 2;
             }
@@ -377,6 +626,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ezb_extpanid_t extended_pan_id;
             ezb_nwk_get_extended_panid(&extended_pan_id);
             zb_mark_set();                  /* 다음 부팅에 가입 정보가 사라졌는지 알 수 있게 */
+            zb_up_mark();
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
             hub_event(EV_ZB_JOINED, NULL, ezb_nwk_get_panid(), ezb_nwk_get_current_channel());
@@ -384,10 +634,11 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             s_fast_until_us = 0;
             zb_join_session_end();              /* 붙었으니 Wi-Fi 다시 켠다 */
             hub_led_set(HUB_LED_GREEN);
-            alarm_timer_schedule(esp_zigbee_alarm_rejoin_check, 0, 300000);
+            arm_once(&s_arm_rejoin, esp_zigbee_alarm_rejoin_check, 300000);
         } else {
             bool fast = esp_timer_get_time() < s_fast_until_us;
             hub_event(EV_ZB_JOIN_FAIL, NULL, status, 0);
+            zb_note_fail(status);               /* 관리화면·/api 에 사유 표시 */
             if (fast) {
                 /* 가입 창: Wi-Fi 는 계속 멈춰 둔 채(라디오 전부 Zigbee) 바로 다시 시도 */
                 ESP_LOGW(TAG, "Failed to join (0x%02x) — Wi-Fi 멈춘 채 8초 뒤 재시도", status);
@@ -395,11 +646,21 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             } else {
                 /* 배경 자가복구: Wi-Fi 다시 켜고 점점 긴 간격으로 재시도(그때 또 잠깐 멈춤) */
                 zb_join_session_end();
-                ESP_LOGW(TAG, "Failed to join (0x%02x) — Wi-Fi 복귀, %lu초 뒤 재가입", status,
-                         (unsigned long)(s_backoff_ms / 1000));
-                alarm_timer_schedule(esp_zigbee_alarm_steer_gate, 0, s_backoff_ms);
-                if (s_backoff_ms < 600000) {
-                    s_backoff_ms *= 2;
+                if (ezb_bdb_is_factory_new() && s_auto_left == 0) {
+                    /* 가입 정보가 없으면 '기기 추가'가 열려야만 붙는다 — 끝없이 시도하며 Wi-Fi 를 끊지 않는다 */
+                    s_auto_stopped = true;
+                    ESP_LOGW(TAG, "Failed to join (0x%02x) — 자동 가입 시도 중단. 허브 버튼 짧게 또는 관리 화면 "
+                                  "'Zigbee 가입 시도'로 다시 시작", status);
+                } else {
+                    if (s_auto_left) {
+                        s_auto_left--;
+                    }
+                    ESP_LOGW(TAG, "Failed to join (0x%02x) — Wi-Fi 복귀, %lu초 뒤 재가입", status,
+                             (unsigned long)(s_backoff_ms / 1000));
+                    arm_once(&s_arm_steer, esp_zigbee_alarm_steer_gate, s_backoff_ms);
+                    if (s_backoff_ms < 600000) {
+                        s_backoff_ms *= 2;
+                    }
                 }
             }
         }
@@ -412,8 +673,39 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         const ezb_zdo_signal_leave_params_t *leave_params = ezb_app_signal_get_params(app_signal);
         ESP_LOGI(TAG, "Left network successfully with type(0x%02x)", leave_params->leave_type);
         hub_event(EV_ZB_LEAVE, NULL, leave_params->leave_type, 0);
-        zb_mark_clear();                        /* 스스로(또는 SmartThings 에서 지워져) 나갔음 — 사라짐 경보 아님 */
+        s_zbl_type = leave_params->leave_type;
+        s_zbl_us = esp_timer_get_time();
+        if (leave_params->leave_type == EZB_ZDO_LEAVE_TYPE_RESET) {     /* 가입 정보가 지워지는 탈퇴 */
+            if (!s_zb_up) {
+                /* 이번 부팅에 망에 붙기도 전에 탈퇴 = 부팅 재가입이 실패해 가입 정보를 잃은 것. 누가 지운 게 아니므로
+                 * 표식을 남겨 경보가 뜨게 하고(다음 부팅에도), 언제 일어났는지 플래시에 적는다. */
+                zb_loss_note(1, leave_params->leave_type);
+                uint8_t tries = rjtry_get();
+                if (hub_crypt_zb_snapshot_joined() && tries < ZB_RESTORE_MAX && !s_restore_pending) {
+                    uint32_t wait = ZB_RESTORE_WAIT_MS[tries];
+                    rjtry_set(tries + 1);
+                    s_restore_at_us = esp_timer_get_time() + (int64_t)wait * 1000;
+                    s_restore_pending = true;
+                    ESP_LOGE(TAG, "재가입 실패로 스택이 가입 정보를 지움 — 되살려 다시 시도 (%d/%d)", tries + 1, ZB_RESTORE_MAX);
+                    if (xTaskCreate(zb_restore_task, "zb_restore", 4096, (void *)(uintptr_t)wait, 5, NULL) != pdPASS) {
+                        s_restore_pending = false;
+                    }
+                } else {
+                    ESP_LOGE(TAG, "재가입 실패로 Zigbee 가입 정보가 사라짐 — SmartThings 에서 '기기 추가' 필요");
+                }
+            } else {
+                /* 붙어서 돌던 중의 탈퇴 = SmartThings 에서 기기를 지운 경우(정상). 사라짐 경보는 내지 않는다 */
+                zb_loss_note(2, leave_params->leave_type);
+                zb_mark_clear();
+            }
+            s_zb_up = false;
+        }
     } break;
+    case EZB_ZDO_SIGNAL_PARENT_LOST:
+        /* 부모와 연락이 끊김. 이 뒤에 오는 탈퇴는 누가 지운 게 아니라 재가입 실패로 본다(위 LEAVE 처리) */
+        ESP_LOGW(TAG, "Zigbee 부모와 연결이 끊김");
+        s_zb_up = false;
+        break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t duration = *(uint8_t *)ezb_app_signal_get_params(app_signal);
         if (duration) {
@@ -533,6 +825,11 @@ void app_main(void)
             g_zb_nvs_was_reset = true;
             hub_store_report("zb_nvs", "partition", "초기화 실패 → 지움");
         }
+    }
+    {
+        /* 스택이 손대기 전의 가입 데이터를 RAM 에 떠 둔다 — 부팅 재가입이 실패해 지워지면 되살린다 */
+        int n = hub_crypt_zb_snapshot();
+        ESP_LOGI(TAG, "Zigbee 가입 데이터 스냅샷 %d개%s", n, hub_crypt_zb_snapshot_joined() ? " (가입 상태)" : "");
     }
     hub_radio_boot();        /* 외부 Zigbee 라디오가 붙어 있나 보고, 맞는 펌웨어 칸이 아니면 넘어가 재시작(고정 설정은 nvs 에서 읽는다) */
 

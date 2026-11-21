@@ -21,10 +21,29 @@ static char s_err[MAXR][RLEN];
 static int s_nerr;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* 칸 길이에서 잘릴 때 한글(UTF-8 여러 바이트) 한 글자가 중간에 끊기면 화면에 깨진 글자가 나온다 — 끊긴 글자는 버린다 */
+static void utf8_trim(char *s)
+{
+    size_t n = strlen(s), i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) {
+        i--;                                       /* 이어지는 바이트들을 거슬러 첫 바이트로 */
+    }
+    if (i == 0) {
+        s[0] = 0;
+        return;
+    }
+    unsigned char c = (unsigned char)s[i - 1];
+    size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+    if (n - (i - 1) < need) {
+        s[i - 1] = 0;
+    }
+}
+
 void hub_store_report(const char *ns, const char *key, const char *what)
 {
     char line[RLEN];
     snprintf(line, sizeof(line), "%s/%s %s", ns ? ns : "?", key ? key : "?", what);
+    utf8_trim(line);
     ESP_LOGE(TAG, "저장 데이터 오류: %s — USB 연결해 점검", line);
     portENTER_CRITICAL(&s_mux);
     memcpy(s_err[s_nerr % MAXR], line, RLEN);
