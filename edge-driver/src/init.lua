@@ -37,14 +37,17 @@ local function send(parent, text)
   parent:send(messages.ZigbeeMessageTx({ address_header = addr, body = body }))
 end
 
--- 허브 끊김 감시: 허브는 5분마다 연결 목록을 다시 보낸다. 11분 넘게 아무것도 안 오면 허브가 사라진 것으로 보고
--- 자식 기기(보일러·방)를 오프라인으로. 다음 메시지가 오면 상태 처리에서 다시 온라인이 된다.
-local LOST_S = 660
-local last_rx, lost = {}, {}
+-- 허브 끊김 감시. 허브는 20~30초마다 생존 신호(0x0A)를 보낸다 — 90초 동안 아무것도 안 오면 사라진 것으로 본다.
+-- 생존 신호가 없는 옛 펌웨어는 5분마다 연결 목록만 다시 보내므로 11분을 기다린다(한 번이라도 0x0A 를 받으면 빠른 쪽).
+-- 끊기면 보일러·방에 "연결 끊김" 글자를 쓴다. 온라인/오프라인 배지는 SmartThings 가 Zigbee 무선 단에서 직접
+-- 정하고(약 30분) 드라이버의 offline() 요청은 무시되므로(2026-11-21 실측), 배지는 그 판단을 기다린다.
+local LOST_S, LOST_FAST_S = 660, 90
+local last_rx, lost, has_alive = {}, {}, {}
 
 local function from_hub(cmd)
   return function(_, parent, zb_rx)
     last_rx[parent.id] = os.time()
+    if cmd == 0x0A then has_alive[parent.id] = true end
     lost[parent.id] = nil
     local ok, err = pcall(core.on_message, parent, cmd, zb_rx.body.zcl_body.body_bytes)
     if not ok then require("log").error("허브 메시지 처리 실패: " .. tostring(err)) end
@@ -57,9 +60,9 @@ local function watch_hubs()
       local t = last_rx[d.id]
       if not t then
         last_rx[d.id] = os.time()                  -- 드라이버 시작 시점부터 잰다
-      elseif not lost[d.id] and os.time() - t > LOST_S then
+      elseif not lost[d.id] and os.time() - t > (has_alive[d.id] and LOST_FAST_S or LOST_S) then
         lost[d.id] = true
-        require("log").warn("허브에서 " .. LOST_S .. "초 넘게 소식 없음 — 기기들을 오프라인으로")
+        require("log").warn("허브에서 " .. (os.time() - t) .. "초 동안 소식 없음 — 기기들에 연결 끊김 표시")
         core.hub_lost(d)
       end
     end
@@ -85,6 +88,7 @@ local driver_template = {
         [0x07] = from_hub(0x07),
         [0x08] = from_hub(0x08),
         [0x09] = from_hub(0x09),
+        [0x0A] = from_hub(0x0A),   -- 생존 신호: 받은 시각만 갱신(처리할 내용 없음)
       },
     },
   },
@@ -104,5 +108,5 @@ core.setup(driver, {
   -- 허브: 지금 상태를 다시 보내 달라고 한다(드라이버 재시작 후 자식 기기 갱신)
   on_hub_init = function(device) driver:call_with_delay(5, function() core.request_refresh(device) end) end,
 })
-driver:call_on_schedule(60, watch_hubs, "lynnai-hub-watch")
+driver:call_on_schedule(15, watch_hubs, "lynnai-hub-watch")
 driver:run()

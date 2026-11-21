@@ -30,6 +30,7 @@ static const char *TAG = "HUB_RINNAI";
 #define CAP_DOWN    768             /* 기기→클라우드 패킷 하나 (f09 res ~300바이트) */
 #define CMD_MAX     320
 #define HEARTBEAT_S 300             /* 바뀐 게 없어도 이 간격으로 다시 보낸다(드라이버가 끊김 판단) */
+#define ALIVE_S     20              /* 생존 신호 간격(아래 루프가 10초마다 깨므로 실제 20~30초). 드라이버는 90초 침묵이면 끊김으로 본다 */
 #define POLL_S      30              /* 이 간격으로 보일러/각방에 상태 요청(fa) → 외출 등 변경 빨리 반영 */
 #define MAX_DEV     6               /* 동시에 다룰 기기 수(보일러 + 써머스탯 합) */
 #define MAX_PAIRS_BYTES 36          /* 짝 6개 * 6바이트 */
@@ -729,8 +730,15 @@ static void zb_task(void *arg)
 {
     TickType_t last_beat = xTaskGetTickCount();
     TickType_t last_poll = xTaskGetTickCount();
+    TickType_t last_alive = xTaskGetTickCount();
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
+        if (xTaskGetTickCount() - last_alive >= pdMS_TO_TICKS(ALIVE_S * 1000)) {
+            /* SmartThings 는 Zigbee 기기가 30분쯤 조용해야 오프라인으로 바꾼다. 드라이버가 먼저 알아채도록 짧게 자주 */
+            static const uint8_t zero = 0;
+            last_alive = xTaskGetTickCount();
+            hub_uplink_send(HUB_RK_CMD_ALIVE, &zero, 1);
+        }
         bool beat = xTaskGetTickCount() - last_beat >= pdMS_TO_TICKS(HEARTBEAT_S * 1000);
         lock();
         bool expose = s_expose_dirty;
