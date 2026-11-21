@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "esp_partition.h"
 
 /*
  * hub_radio -- Zigbee(802.15.4) 라디오 고르기: 칩에 내장된 라디오 / UART 로 붙인 외부 라디오(RCP: ESP32-C6·H2 에 ot_rcp).
@@ -30,6 +31,10 @@ void hub_radio_boot(void);        /* 저장소를 연 직후: 탐지 → 필요�
 bool hub_radio_usable(void);      /* 이 펌웨어의 라디오를 쓸 수 있나(외부용 펌웨어인데 라디오 칩이 없으면 false) */
 bool hub_radio_external(void);    /* 이 펌웨어가 외부 라디오용인가 */
 void hub_radio_print(void);       /* USB diag */
+
+/* OTA 용(hub_ota): 이 펌웨어의 라디오 변종(0=내장/1=외부)과, 한 칸에 담긴 펌웨어의 변종(-1=없음/깨짐). */
+int  hub_radio_this_variant(void);
+int  hub_radio_partition_variant(const esp_partition_t *p);
 
 /* 시험용 고정(USB 명령 radio auto|native|ext): 탐지 결과와 상관없이 한쪽 라디오만 쓴다. 저장되며 다음 부팅부터 적용.
  * ext 로 고정했는데 외부 라디오가 답하지 않으면 내장으로 돌아가지 않고 Zigbee 를 쓰지 않는다(측정이 섞이지 않게). */

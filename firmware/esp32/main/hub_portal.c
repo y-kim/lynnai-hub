@@ -26,6 +26,7 @@
 #include "hub_proxy.h"
 #include "hub_crypt.h"
 #include "hub_tariff.h"
+#include "hub_ota.h"
 #include "hub_dbgkey.h"
 #include "hub_devs.h"
 #include "hub_zigbee.h"
@@ -471,6 +472,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_plugins_render(b, cap); FLUSH();
     hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(자동/수동 + 월별 그래프) */
     hub_crypt_render(b, cap); FLUSH();     /* 저장 데이터 암호화 */
+    hub_ota_render(b, cap); FLUSH();       /* 시스템: 펌웨어 OTA · 재부팅 · Zigbee 상태 */
     hub_dbgkey_render(b, cap); FLUSH();    /* 원격 디버그 키 */
     strlcat(b, "<h2>서버 연동 (장기 기록·그래프)</h2><div class=card><p class=muted>"
                "<code>/api/v1/state</code> (JSON), <code>/metrics</code> (Prometheus), <code>/api/events</code>. ", cap);
@@ -827,6 +829,46 @@ static esp_err_t plugin_action_post(httpd_req_t *req)
     return admin_page(req, msg[0] ? msg : (ok ? "적용했습니다" : "실패"), ok);
 }
 
+/* 펌웨어 올리기(OTA): 몸통이 .bin 원본. 응답은 평문(관리 화면 JS 가 XHR 로 보냄). 관리자 세션만. */
+static esp_err_t ota_post(httpd_req_t *req)
+{
+    log_req(req);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    if (!authed(req) && !hub_dbgkey_check(req)) {    /* 관리자 세션 또는 원격 디버그 키 */
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(req, "로그인 또는 원격 디버그 키가 필요합니다");
+    }
+    char msg[256] = "";
+    bool reboot = false;
+    int ok = hub_ota_write_req(req, msg, sizeof(msg), &reboot);
+    if (!ok) {
+        httpd_resp_set_status(req, "400 Bad Request");
+    }
+    esp_err_t r = httpd_resp_sendstr(req, msg[0] ? msg : (ok ? "완료" : "실패"));
+    if (ok && reboot) {
+        hub_ota_schedule_reboot();         /* 응답을 보낸 뒤 재시작 */
+    }
+    return r;
+}
+
+/* 시스템: 지금은 재부팅(op=reboot)만. Zigbee 유령 가입(joined 인데 오프라인) 복구 레버. */
+static esp_err_t system_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req) && !hub_dbgkey_check(req)) {    /* 관리자 세션 또는 원격 디버그 키 */
+        return login_page(req, "로그인 또는 원격 디버그 키가 필요합니다");
+    }
+    char body[48], op[16] = "";
+    if (read_body(req, body, sizeof(body)) >= 0) {
+        form_get(body, "op", op, sizeof(op));
+    }
+    if (!strcmp(op, "reboot")) {
+        hub_ota_schedule_reboot();         /* 응답(아래 페이지)을 먼저 보낸 뒤 1.5초 있다 재시작 */
+        return admin_page(req, "재부팅합니다 — 10~20초 뒤 관리 화면을 새로고침하세요. Zigbee 가 다시 가입됩니다.", true);
+    }
+    return admin_page(req, "잘못된 요청", false);
+}
+
 /* 가스 요금 '현재값'만 돌려준다(관리 화면이 페이지를 다시 그리지 않고 값만 바꾼다). ?do=refresh 면 다시 받기부터. */
 static esp_err_t gasnow_get(httpd_req_t *req)
 {
@@ -967,6 +1009,10 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &crypt);
     const httpd_uri_t dapp = { .uri = "/admin/dev-approve", .method = HTTP_POST, .handler = dev_approve_post };
     httpd_register_uri_handler(srv, &dapp);
+    const httpd_uri_t ota = { .uri = "/admin/ota", .method = HTTP_POST, .handler = ota_post };
+    httpd_register_uri_handler(srv, &ota);
+    const httpd_uri_t sys = { .uri = "/admin/system", .method = HTTP_POST, .handler = system_post };
+    httpd_register_uri_handler(srv, &sys);
     const httpd_uri_t dbgk = { .uri = "/admin/dbgkey", .method = HTTP_POST, .handler = dbgkey_post };
     httpd_register_uri_handler(srv, &dbgk);
     const httpd_uri_t gnow = { .uri = "/admin/gas-now", .method = HTTP_GET, .handler = gasnow_get };

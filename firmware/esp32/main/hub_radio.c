@@ -166,6 +166,10 @@ static int image_kind(const esp_partition_t *p)
     return d.radio;
 }
 
+/* OTA 용: 이 펌웨어의 라디오 변종(0=내장, 1=외부)과, 어떤 칸에 담긴 펌웨어의 변종(-1=없음/깨짐). */
+int hub_radio_this_variant(void) { return THIS_IMG; }
+int hub_radio_partition_variant(const esp_partition_t *p) { return image_kind(p); }
+
 static const char *force_name(uint8_t f)
 {
     return f == HUB_RADIO_NATIVE ? "native" : f == HUB_RADIO_EXT ? "ext" : "auto";

@@ -53,6 +53,7 @@
 #include "hub_store.h"
 #include "hub_devs.h"
 #include "hub_radio.h"
+#include "hub_ota.h"
 #include "esp_mac.h"
 #include "nvs.h"
 #include <string.h>
@@ -323,6 +324,7 @@ static void zb_restore_task(void *arg)
     ESP_LOGW(TAG, "Zigbee 가입 데이터 %d개 되살림 — %lu초 뒤 재시작해 재가입을 다시 시도", n, (unsigned long)(wait_ms / 1000));
     vTaskDelay(pdMS_TO_TICKS(wait_ms));
     hub_crypt_zb_restore_missing();                 /* 기다리는 사이 더 지워진 게 있으면 마저 */
+    hub_ota_planned_reboot();                       /* 의도한 재시작 — 새 펌웨어 시험 부팅 실패로 세지 않게 */
     esp_restart();
 }
 
@@ -826,6 +828,7 @@ void app_main(void)
             hub_store_report("zb_nvs", "partition", "초기화 실패 → 지움");
         }
     }
+    hub_ota_boot_guard();    /* OTA 로 올린 새 펌웨어의 시험 부팅 — 확정 못 하면 이전 칸으로 되돌린다 */
     {
         /* 스택이 손대기 전의 가입 데이터를 RAM 에 떠 둔다 — 부팅 재가입이 실패해 지워지면 되살린다 */
         int n = hub_crypt_zb_snapshot();

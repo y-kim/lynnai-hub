@@ -32,6 +32,9 @@
 #include "hub_proxy.h"
 #include "hub_diag.h"
 #include "hub_dbgkey.h"
+#include "hub_ota.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
 #include "hub_plugins.h"
 
 static const char *TAG = "HUB_API";
@@ -299,8 +302,18 @@ static esp_err_t state_get(httpd_req_t *req)
     int stk_link = 0, stk_up = 0;
     hub_proxy_stack_free(&stk_link, &stk_up);       /* 연결 태스크 스택 최소 여유 — 스택 크기를 줄여도 되는지 보는 값 */
     CHUNK("\"hub\":{\"heap\":%lu,\"heap_min\":%lu,\"rssi\":%d,\"plugins\":%u,\"sensor_faults\":%u,"
-          "\"stk_link_free\":%d,\"stk_up_free\":%d},", (unsigned long)esp_get_free_heap_size(),
+          "\"stk_link_free\":%d,\"stk_up_free\":%d,", (unsigned long)esp_get_free_heap_size(),
           (unsigned long)esp_get_minimum_free_heap_size(), rssi(), hub_plugins_mask(), hub_sensors_faults(), stk_link, stk_up);
+    {
+        /* 어떤 펌웨어가 어느 칸에서 돌고 있나(OTA 뒤 확인용) + 시험 부팅·되돌림 상태 */
+        const esp_app_desc_t *ad = esp_app_get_description();
+        const esp_partition_t *run = esp_ota_get_running_partition();
+        int trial = 0;
+        bool rb = false;
+        hub_ota_state(&trial, &rb);
+        CHUNK("\"fw_build\":\"%s %s\",\"slot\":\"%s\",\"ota_trial\":%d,\"ota_rolled_back\":%s},", ad->date, ad->time,
+              run ? run->label : "?", trial, rb ? "true" : "false");
+    }
     CHUNK("\"links\":{\"boiler\":%s,\"rooms\":%s},", links & 1 ? "true" : "false", links & 2 ? "true" : "false");
 
     boiler_t bo = decode_boiler(f06, n06);
