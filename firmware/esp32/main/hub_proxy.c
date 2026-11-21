@@ -73,6 +73,49 @@ static SemaphoreHandle_t s_dns_mx;
 static int64_t s_dns_at;                      /* 마지막 조회 성공 시각(0 = 아직) */
 static char s_dns_from[16];                   /* 그때 물어본 DNS 서버 */
 static atomic_int s_links;
+
+/* TLS 핸드셰이크는 한 번에 한 연결씩. 연결 하나가 핸드셰이크하는 동안 스택만 37KB(link 20KB + up 16KB)에 wolfSSL
+ * 세션 둘이 더 든다. 부팅 직후 보일러·각방 모듈이 1~2초 간격으로 같이 붙으면 힙이 바닥나(최저 400~900바이트 실측)
+ * 한쪽 TLS 가 -125(메모리)로 실패하고, 그 순간 다른 할당(Wi-Fi·웹·Zigbee)도 위험해진다.
+ * 뒤에 온 연결은 앞 연결이 끝나길 최대 HS_WAIT_MS 만 기다린다 — 기기는 TLS 가 4.5초쯤 넘으면 포기하므로(실측)
+ * 더 오래 붙잡지 않고, 그때는 예전처럼 같이 진행한다. */
+#define HS_WAIT_MS 2500
+/* 태스크 스택. 예전 20KB/16KB 는 실측(/api/v1/state 의 stk_link_free·stk_up_free)으로 2.2KB/1.7KB 만 쓰였다
+ * (wolfSSL 이 큰 수 연산을 힙에서 한다). 3~4배 여유로 줄여 연결당 22KB 를 돌려받는다. */
+#define LINK_STACK 8192
+#define UP_STACK   6144
+static SemaphoreHandle_t s_hs_mx;
+static atomic_int s_hs_busy;                  /* 핸드셰이크 중인 연결 수(가스 요금 조회가 이때를 피한다) */
+static atomic_int s_stk_link, s_stk_up;       /* 태스크 스택이 가장 적게 남았던 바이트(0 = 아직 모름) — 스택 크기 조정용 */
+
+static void note_stack(atomic_int *slot)
+{
+    int v = (int)uxTaskGetStackHighWaterMark(NULL), cur = atomic_load(slot);
+    if (cur == 0 || v < cur) {
+        atomic_store(slot, v);
+    }
+}
+
+static void hs_end(bool *open, bool *held)
+{
+    if (!*open) {
+        return;
+    }
+    *open = false;
+    atomic_fetch_sub(&s_hs_busy, 1);
+    if (*held) {
+        *held = false;
+        xSemaphoreGive(s_hs_mx);
+    }
+}
+
+bool hub_proxy_handshaking(void) { return atomic_load(&s_hs_busy) > 0; }
+
+void hub_proxy_stack_free(int *link, int *up)
+{
+    if (link) *link = atomic_load(&s_stk_link);
+    if (up) *up = atomic_load(&s_stk_up);
+}
 #define RELAY_READ_SEC 10                    /* 중계 중 한 번 읽기의 최대 대기(레코드 일부만 오고 멈추면 끊음) */
 static volatile uint8_t s_mode = HUB_MODE_PROXY;
 static volatile uint32_t s_mode_gen;          /* 모드가 바뀔 때마다 +1 → 지금 연결들이 알아채고 닫음 */
@@ -739,6 +782,7 @@ static void up_task(void *arg)
             hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, wolfSSL_get_error(j->ssl, -1) < 0 ? wolfSSL_get_error(j->ssl, -1) : -1);
         }
     }
+    note_stack(&s_stk_up);
     xSemaphoreGive(j->done);
     vTaskDelete(NULL);
 }
@@ -755,6 +799,10 @@ static void link_task(void *arg)
     hub_link_tap_t *tap = NULL;
     uint32_t gen = s_mode_gen;
     bool standalone = s_mode == HUB_MODE_STANDALONE;
+    /* 핸드셰이크 차례를 기다린다(위 HS_WAIT_MS 설명). 못 잡아도 진행한다 */
+    bool hs_held = s_hs_mx && xSemaphoreTake(s_hs_mx, pdMS_TO_TICKS(HS_WAIT_MS)) == pdTRUE;
+    bool hs_open = true;
+    atomic_fetch_add(&s_hs_busy, 1);
     if (standalone) {
         free(job);                                  /* 단독: 클라우드 쪽 연결 없음 */
         job = NULL;
@@ -764,7 +812,7 @@ static void link_task(void *arg)
         job->dev = dev;
         job->done = xSemaphoreCreateBinary();
     }
-    if (!standalone && (!job || !job->done || xTaskCreate(up_task, "hub_up", 16384, job, 4, NULL) != pdPASS)) {
+    if (!standalone && (!job || !job->done || xTaskCreate(up_task, "hub_up", UP_STACK, job, 4, NULL) != pdPASS)) {
         ESP_LOGE(TAG, "클라우드 연결 작업 생성 실패");
         if (job && job->done) {
             vSemaphoreDelete(job->done);
@@ -798,6 +846,8 @@ static void link_task(void *arg)
         t_up = esp_timer_get_time();
         tv.tv_sec = RELAY_READ_SEC;
         setsockopt(down_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        note_stack(&s_stk_link);
+        hs_end(&hs_open, &hs_held);
         tap = hub_rinnai_link_open(peer_ip(down_fd));
         closer = broker_loop(down, down_fd, buf, tap, gen);
         goto out;
@@ -805,6 +855,8 @@ static void link_task(void *arg)
 
     xSemaphoreTake(job->done, portMAX_DELAY);       /* 클라우드 쪽은 이미 같이 진행 중 */
     up_waited = true;
+    note_stack(&s_stk_link);
+    hs_end(&hs_open, &hs_held);                     /* 양쪽 핸드셰이크 끝 — 다음 연결 차례 */
     up_fd = job->fd;
     up = job->ssl;
     job->fd = -1;
@@ -889,6 +941,8 @@ done:
         vSemaphoreDelete(job->done);
         free(job);
     }
+    note_stack(&s_stk_link);
+    hs_end(&hs_open, &hs_held);                     /* 실패로 빠져나온 경우(클라우드 작업까지 끝난 뒤) */
     if (up) {
         wolfSSL_free(up);
     }
@@ -995,7 +1049,7 @@ static void listen_task(void *arg)
         ESP_LOGI(TAG, "%s 접속", ip);
         hub_event(EV_LINK_OPEN, NULL, (int)(ntohl(from.sin_addr.s_addr) & 0xff), 0);
         atomic_fetch_add(&s_links, 1);
-        if (xTaskCreate(link_task, "hub_link", 20480, (void *)(intptr_t)c, 5, NULL) != pdPASS) {
+        if (xTaskCreate(link_task, "hub_link", LINK_STACK, (void *)(intptr_t)c, 5, NULL) != pdPASS) {
             atomic_fetch_sub(&s_links, 1);
             close(c);
         }
@@ -1005,6 +1059,7 @@ static void listen_task(void *arg)
 void hub_proxy_start(void)
 {
     s_ctx_mx = xSemaphoreCreateMutex();
+    s_hs_mx = xSemaphoreCreateMutex();
     s_dns_mx = xSemaphoreCreateMutex();
     mode_load();
     ESP_LOGI(TAG, "동작 모드: %s", s_mode == HUB_MODE_STANDALONE ? "단독" : "프록시");

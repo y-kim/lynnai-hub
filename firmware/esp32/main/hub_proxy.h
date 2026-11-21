@@ -19,6 +19,8 @@
 void hub_proxy_start(void);
 void hub_proxy_relink(void);     /* 지금 기기 연결들을 끊어 다시 받게 한다(기기 등록 직후 곧바로 알아보게) */
 uint8_t hub_proxy_mode(void);
+bool hub_proxy_handshaking(void);                 /* 기기 연결이 TLS 핸드셰이크 중인가(메모리가 빠듯한 때) */
+void hub_proxy_stack_free(int *link, int *up);    /* 연결·클라우드 태스크 스택 최소 여유(바이트, 0 = 모름) */
 void hub_proxy_render(char *out, size_t cap);                     /* 관리 화면 '동작 모드' */
 bool hub_proxy_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/mode */
 
