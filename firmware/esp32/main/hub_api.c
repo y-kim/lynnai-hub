@@ -33,6 +33,7 @@
 #include "hub_diag.h"
 #include "hub_dbgkey.h"
 #include "hub_trace.h"
+#include "hub_bbox.h"
 #include "hub_ota.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
@@ -565,6 +566,15 @@ static esp_err_t metrics_get(httpd_req_t *req)
             CHUNK("# TYPE lynnai_zigbee_parent_lqi gauge\nlynnai_zigbee_parent_lqi %d\n", z.parent_lqi);
         }
         CHUNK("# TYPE lynnai_zigbee_neighbors gauge\nlynnai_zigbee_neighbors %d\n", z.nbr_count);
+        uint32_t st = 0, sh = 0;
+        int sr = 0, se = 0;
+        hub_bbox_scan_stats(&st, &sh, &sr, &se);    /* 주기 스캔(비콘 수신률 추적, /api/v1/zbscan?auto=) */
+        if (st) {
+            CHUNK("# TYPE lynnai_zigbee_scan_total counter\nlynnai_zigbee_scan_total %lu\n", (unsigned long)st);
+            CHUNK("# TYPE lynnai_zigbee_scan_hit_total counter\nlynnai_zigbee_scan_hit_total %lu\n", (unsigned long)sh);
+            CHUNK("# TYPE lynnai_zigbee_scan_beacon_rssi_dbm gauge\nlynnai_zigbee_scan_beacon_rssi_dbm %d\n", sr);
+            CHUNK("# TYPE lynnai_zigbee_scan_noise_dbm gauge\nlynnai_zigbee_scan_noise_dbm %d\n", se);
+        }
     }
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -580,8 +590,30 @@ static esp_err_t trace_get(httpd_req_t *req)
     return hub_trace_http(req);
 }
 
+/* GET /api/v1/bootlog — 부팅 기록(이번·직전 부팅 로그, 부팅 이력). 읽기 API 와 같은 인증 */
+static esp_err_t bootlog_get(httpd_req_t *req)
+{
+    if (!api_or_dbg(req)) {
+        return ESP_OK;
+    }
+    return hub_bbox_http(req);
+}
+
+/* GET /api/v1/zbscan — Zigbee 스캔 시험(hub_bbox). 라디오를 잠깐 쓰고 pause=1 이면 Wi-Fi 도 멈추므로 읽기 API 와 같은 인증 */
+static esp_err_t zbscan_get(httpd_req_t *req)
+{
+    if (!api_or_dbg(req)) {
+        return ESP_OK;
+    }
+    return hub_bbox_scan_http(req);
+}
+
 void hub_api_register(httpd_handle_t srv)
 {
+    const httpd_uri_t zs = { .uri = "/api/v1/zbscan", .method = HTTP_GET, .handler = zbscan_get };
+    httpd_register_uri_handler(srv, &zs);
+    const httpd_uri_t bl = { .uri = "/api/v1/bootlog", .method = HTTP_GET, .handler = bootlog_get };
+    httpd_register_uri_handler(srv, &bl);
     const httpd_uri_t tr = { .uri = "/api/v1/trace", .method = HTTP_GET, .handler = trace_get };
     httpd_register_uri_handler(srv, &tr);
     const httpd_uri_t st = { .uri = "/api/v1/state", .method = HTTP_GET, .handler = state_get };

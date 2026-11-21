@@ -55,6 +55,7 @@
 #include "hub_radio.h"
 #include "hub_ota.h"
 #include "hub_trace.h"
+#include "hub_bbox.h"
 #include "esp_mac.h"
 #include "nvs.h"
 #include <string.h>
@@ -341,6 +342,7 @@ static void zb_snap_task(void *arg)
 
 static void zb_up_mark(void)                        /* 망에 붙음(부팅 재가입 성공 / 새 가입 성공) */
 {
+    hub_bbox_zb_joined();
     s_zb_up = true;
     s_auto_stopped = false;
     if (rjtry_get()) {
@@ -375,6 +377,7 @@ bool hub_zigbee_lost(void)
 
 static void zb_note_fail(uint8_t status)
 {
+    hub_bbox_zb_fail(status);
     s_zbf_status = status;
     s_zbf_us = esp_timer_get_time();
     s_zbf_count++;
@@ -585,9 +588,14 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
 {
     ezb_app_signal_type_t signal_type = ezb_app_signal_get_type(app_signal);
 
+    /* 부팅 기록: 신호마다 시각·프레임 카운터를 남긴다(재가입이 어디서 틀어지는지 순서대로 보려고) */
+    hub_bbox_note("sig %s(0x%02x) fc=%lu joined=%d fnew=%d", ezb_app_signal_to_string(signal_type), (unsigned)signal_type,
+                  (unsigned long)ezb_nwk_get_frame_counter(), ezb_bdb_dev_joined(), ezb_bdb_is_factory_new());
+
     switch (signal_type) {
     case EZB_ZDO_SIGNAL_SKIP_STARTUP:
         ESP_LOGI(TAG, "Initialize Zigbee stack");
+        hub_bbox_zb_boot(ezb_nwk_get_frame_counter());
         ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
         break;
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
@@ -678,6 +686,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         hub_event(EV_ZB_LEAVE, NULL, leave_params->leave_type, 0);
         s_zbl_type = leave_params->leave_type;
         s_zbl_us = esp_timer_get_time();
+        hub_bbox_zb_left(leave_params->leave_type, s_zb_up);
         if (leave_params->leave_type == EZB_ZDO_LEAVE_TYPE_RESET) {     /* 가입 정보가 지워지는 탈퇴 */
             if (!s_zb_up) {
                 /* 이번 부팅에 망에 붙기도 전에 탈퇴 = 부팅 재가입이 실패해 가입 정보를 잃은 것. 누가 지운 게 아니므로
@@ -707,6 +716,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     case EZB_ZDO_SIGNAL_PARENT_LOST:
         /* 부모와 연락이 끊김. 이 뒤에 오는 탈퇴는 누가 지운 게 아니라 재가입 실패로 본다(위 LEAVE 처리) */
         ESP_LOGW(TAG, "Zigbee 부모와 연결이 끊김");
+        hub_bbox_radio("parent_lost");
         s_zb_up = false;
         break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
@@ -772,6 +782,9 @@ esp_err_t esp_zigbee_setup_commissioning(void)
     return ESP_OK;
 }
 
+static TaskHandle_t s_zb_task;
+int hub_zigbee_stack_free(void) { return s_zb_task ? (int)uxTaskGetStackHighWaterMark(s_zb_task) : 0; }
+
 static void esp_zigbee_stack_main_task(void *pvParameters)
 {
     esp_zigbee_config_t config = ESP_ZIGBEE_DEFAULT_CONFIG();
@@ -830,6 +843,10 @@ void app_main(void)
         }
     }
     hub_ota_boot_guard();    /* OTA 로 올린 새 펌웨어의 시험 부팅 — 확정 못 하면 이전 칸으로 되돌린다 */
+    /* 부팅 기록(GET /api/v1/bootlog): 이 뒤의 로그를 재시작해도 남는 RAM 에 담고, 부팅 이력(플래시)에 이번 부팅을 올린다.
+     * 시험 부팅 검사 뒤에 둔다 — 여기서 문제가 생겨도 시험 부팅 횟수에 잡혀 이전 펌웨어로 돌아갈 수 있게. */
+    hub_bbox_init();
+    hub_bbox_start();
     {
         /* 스택이 손대기 전의 가입 데이터를 RAM 에 떠 둔다 — 부팅 재가입이 실패해 지워지면 되살린다 */
         int n = hub_crypt_zb_snapshot();
@@ -880,7 +897,8 @@ void app_main(void)
         }
         ESP_LOGI(TAG, "Start ESP Zigbee Stack");
         /* 외부 라디오(Spinel UART)는 라디오 호출이 프레임 인코딩·UART 를 거쳐 스택을 더 쓴다(4096 이면 시작 직후 넘침, 실측) */
-        xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", hub_radio_external() ? 8192 : 4096, NULL, 5, NULL);
+        /* 내장 라디오는 4096 이었다 — 부팅 기록이 스택의 디버그 메시지까지 글자로 만들므로(이 태스크 스택에서) 여유를 둔다 */
+        xTaskCreate(esp_zigbee_stack_main_task, "Zigbee_main", hub_radio_external() ? 8192 : 6144, NULL, 5, &s_zb_task);
     } else {
         ESP_LOGI(TAG, "Zigbee 를 쓰지 않음(연결 방식) — Zigbee 스택 시작 안 함");
         hub_wifi_sta_release();             /* 기다릴 Zigbee 재가입이 없다 */

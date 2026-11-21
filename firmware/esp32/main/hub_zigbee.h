@@ -20,6 +20,7 @@ const char *hub_zigbee_fail_text(uint8_t status);   /* 상태코드 → 한국�
 bool hub_zigbee_auto_stopped(void);
 /* 재가입 실패로 지워진 가입 데이터를 되살려 다시 시도하는 상태: 재시도 횟수, 한도, 재시작까지 남은 초(-1 = 예정 없음). */
 void hub_zigbee_restore_state(int *tries, int *max, long *reboot_in_s);
+int  hub_zigbee_stack_free(void);  /* Zigbee 태스크 스택이 가장 적게 남았던 바이트(0 = 태스크 없음) */
 bool hub_zigbee_lost(void);       /* 가입했던 허브가 가입 정보를 잃은 상태인가(관리 화면 맨 위 경고용) */
 
 /* 마지막 가입 정보 분실 기록(플래시에 남음). 기록이 없으면 false.
