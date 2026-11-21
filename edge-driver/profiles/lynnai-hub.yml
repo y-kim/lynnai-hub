@@ -6,7 +6,7 @@ components:
       - id: refresh
         version: 1
     categories:
-      - name: Bridge
+      - name: Hub
   - id: chip
     label: 허브 내부 온도
     capabilities:

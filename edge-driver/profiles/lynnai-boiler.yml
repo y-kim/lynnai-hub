@@ -12,7 +12,7 @@ components:
       - id: refresh
         version: 1
     categories:
-      - name: Boiler
+      - name: GasMeter
   - id: heat
     label: 난방
     capabilities:
