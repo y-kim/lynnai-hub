@@ -17,6 +17,7 @@
 
 #include "hub_ota.h"
 #include "hub_bbox.h"
+#include "hub_sensors.h"
 #include "hub_radio.h"
 #include "hub_diag.h"
 
@@ -104,6 +105,7 @@ void hub_ota_boot_guard(void)
 void hub_ota_planned_reboot(void)
 {
     hub_bbox_before_restart();          /* 부팅 기록: 재시작 직전의 Zigbee 프레임 카운터를 남긴다 */
+    hub_sensors_flush();                /* 가스 사용량(지난 하루·한 시간)이 재시작을 넘겨 이어지게 */
     if (s_trial) {
         ota_set("trial", s_trial);      /* 이번 부팅은 세지 않는다(Zigbee 재가입 재시도 같은 의도한 재시작) */
     }

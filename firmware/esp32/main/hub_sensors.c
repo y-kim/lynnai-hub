@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -100,6 +101,104 @@ static uint32_t gas_fault_limit_s(void)
 
 static uint32_t now_s(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
 
+/* ---- 재부팅을 넘기는 사용량(지난 하루·한 시간) ----
+ * 펄스 시각(s_ring)은 RAM 에만 있어서, 재부팅하면 '지난 하루'와 '지난 한 시간'이 0 부터 다시 셌다(재부팅 직후엔 둘이
+ * 같은 값). 10분 칸 144개(24시간)에 칸마다 펄스 수를 담아 플래시에 둔다. 칸은 벽시계 기준(epoch/600)이라 시계가 맞은
+ * 뒤에만 쓰고 읽는다.
+ *   s_carry   부팅 때 플래시에서 읽은 것 = 이번 부팅 전의 펄스(그 뒤로 안 바뀜)
+ *   저장      s_carry + 이번 부팅의 펄스(s_ring)를 지금 시각 기준으로 다시 깔아서 쓴다
+ * 저장은 10분 칸이 넘어갈 때와 일부러 재시작하기 직전에만(플래시를 아낀다) — 갑자기 꺼지면 마지막 10분쯤은 빠진다. */
+#define BK_S     600
+#define BK_N     144
+#define BK_MAGIC 0x676b3031u          /* "gk01" */
+typedef struct {
+    uint32_t magic;
+    uint32_t last;                    /* b[0] 이 가리키는 칸 번호(epoch / BK_S). b[k] 는 칸 (last - k) */
+    uint8_t  b[BK_N];
+} gas_bk_t;
+static gas_bk_t s_carry;              /* magic 이 맞을 때만 유효 */
+static uint32_t s_bk_saved_idx;       /* 마지막으로 저장한 때의 칸 번호 */
+static volatile bool s_bk_dirty;      /* 저장한 뒤로 펄스가 있었다 */
+
+static bool wall_now(uint32_t *epoch)
+{
+    time_t t = time(NULL);
+    if (t < 1700000000) {
+        return false;                 /* 시계가 아직 안 맞음 */
+    }
+    *epoch = (uint32_t)t;
+    return true;
+}
+
+/* 이번 부팅 전의 펄스 가운데 지난 하루·한 시간에 드는 수(칸 단위 — 10분까지 어긋날 수 있다). 호출자가 s_lock 보유 */
+static void carry_counts(uint32_t *hour, uint32_t *day)
+{
+    uint32_t now;
+    *hour = *day = 0;
+    if (s_carry.magic != BK_MAGIC || !wall_now(&now)) {
+        return;
+    }
+    for (int k = 0; k < BK_N; k++) {
+        if (!s_carry.b[k] || s_carry.last < (uint32_t)k) {
+            continue;
+        }
+        uint32_t end = (s_carry.last - (uint32_t)k + 1) * BK_S;      /* 그 칸이 끝나는 시각 */
+        if (end > now) {
+            end = now;
+        }
+        if (now - end < 86400) {
+            *day += s_carry.b[k];
+        }
+        if (now - end < 3600) {
+            *hour += s_carry.b[k];
+        }
+    }
+}
+
+/* 지금 시각 기준으로 칸을 다시 깔아 플래시에 쓴다(시계가 안 맞으면 건너뜀) */
+static void bk_save(void)
+{
+    uint32_t now;
+    if (!wall_now(&now)) {
+        return;
+    }
+    gas_bk_t *n = calloc(1, sizeof(*n));
+    if (!n) {
+        return;
+    }
+    n->magic = BK_MAGIC;
+    n->last = now / BK_S;
+    uint32_t up = now_s();
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_carry.magic == BK_MAGIC) {                 /* 이번 부팅 전의 것: 칸 번호만 옮긴다 */
+        for (int k = 0; k < BK_N; k++) {
+            if (s_carry.b[k] && s_carry.last >= (uint32_t)k) {
+                uint32_t idx = s_carry.last - (uint32_t)k;
+                if (idx <= n->last && n->last - idx < BK_N) {
+                    n->b[n->last - idx] = s_carry.b[k];
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; i < s_ring_n; i++) {        /* 이번 부팅의 펄스: 부팅 후 초 → 벽시계 → 칸 */
+        uint32_t ts = s_ring[(s_ring_head + RING - 1 - i) % RING];
+        uint32_t idx = (now - (up - ts)) / BK_S;
+        if (idx <= n->last && n->last - idx < BK_N && n->b[n->last - idx] < 0xff) {
+            n->b[n->last - idx]++;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "bk", n, sizeof(*n));
+        nvs_commit(h);
+        nvs_close(h);
+        s_bk_saved_idx = n->last;
+        s_bk_dirty = false;
+    }
+    free(n);
+}
+
 /* ---------------------------------------------------------------- 저장 */
 
 static void gas_load(void)
@@ -109,6 +208,10 @@ static void gas_load(void)
         hs_get_u32(h, NS, "count", &s_count);
         hs_get_u32(h, NS, "base_l", &s_base_l);
         hs_get_u32(h, NS, "base_cnt", &s_base_count);
+        size_t sz = sizeof(s_carry);
+        if (nvs_get_blob(h, "bk", &s_carry, &sz) != ESP_OK || sz != sizeof(s_carry) || s_carry.magic != BK_MAGIC) {
+            memset(&s_carry, 0, sizeof(s_carry));    /* 없거나 다른 형식 — 이번 부팅부터 센다 */
+        }
         nvs_close(h);
     }
 }
@@ -146,6 +249,12 @@ static gas_view_t gas_view(void)
             day++;
         }
     }
+    {
+        uint32_t ch, cd;                             /* 이번 부팅 전의 펄스(플래시에서 읽은 것) */
+        carry_counts(&ch, &cd);
+        hour += ch;
+        day += cd;
+    }
     if (s_last_s && t - s_last_s <= FLOW_STOP_S) {
         uint32_t since = t - s_last_s;
         uint32_t gap = s_gap_s > since ? s_gap_s : since;
@@ -174,6 +283,7 @@ static void gas_pulse(void)
     }
     xSemaphoreGive(s_lock);
     s_count_unsaved++;        /* NVS 저장은 펄스마다 하지 않고 모아서(아래) — Zigbee 자격증명 있는 플래시 마모·간섭 줄임 */
+    s_bk_dirty = true;
     s_gas_heat_s = 0;
     if (s_gas_fault) {        /* 펄스가 다시 온다: 값 보고보다 먼저 '정상' 을 알린다 */
         s_gas_fault = false;
@@ -186,6 +296,19 @@ static void gas_pulse(void)
 }
 
 static void send_gas(void);
+
+/* 일부러 재시작하기 직전(OTA·재부팅 버튼·Zigbee 되살리기): 아직 안 쓴 누적 펄스와 사용량 칸을 플래시에 쓴다 */
+void hub_sensors_flush(void)
+{
+    if (!s_lock || !s_run_gas_on) {
+        return;
+    }
+    if (s_count_unsaved) {
+        s_count_unsaved = 0;
+        gas_save(false);
+    }
+    bk_save();
+}
 
 /* GAS_WATCH_S 초마다: 난방 중인 시간을 쌓고, 한도를 넘도록 펄스가 없으면 고장으로 본다 */
 static void gas_watch(void)
@@ -216,7 +339,7 @@ static void gas_task(void *arg)
     gpio_config(&io);
     int low_ms = 0, high_ms = 0;
     bool armed = false;
-    int64_t next_gas = 0, next_save = 60LL * 1000000, next_watch = 0;
+    int64_t next_gas = 0, next_save = 60LL * 1000000, next_watch = 0, next_bk = 0;
     for (;;) {
         if (gen != s_gas_gen) {                        /* 가스 설정이 바뀜 — 이 태스크만 종료 */
             s_gas_alive = false;
@@ -252,6 +375,13 @@ static void gas_task(void *arg)
             next_save = t + 60LL * 1000000;
             s_count_unsaved = 0;
             gas_save(false);
+        }
+        if (s_bk_dirty && t >= next_bk) {              /* 10분 칸이 넘어갔으면 사용량 칸도 저장 */
+            uint32_t now;
+            next_bk = t + 30LL * 1000000;
+            if (wall_now(&now) && now / BK_S != s_bk_saved_idx) {
+                bk_save();
+            }
         }
     }
 }
