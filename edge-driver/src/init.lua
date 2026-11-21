@@ -84,6 +84,7 @@ local driver_template = {
         [0x06] = from_hub(0x06),
         [0x07] = from_hub(0x07),
         [0x08] = from_hub(0x08),
+        [0x09] = from_hub(0x09),
       },
     },
   },

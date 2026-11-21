@@ -25,6 +25,7 @@
 #include "hub_sensors.h"
 #include "hub_proxy.h"
 #include "hub_crypt.h"
+#include "hub_tariff.h"
 #include "hub_devs.h"
 #include "hub_zigbee.h"
 #include "hub_plugins.h"
@@ -418,31 +419,56 @@ static const char ADMIN_EXTRA[] =
 
 #define FORM_MAX 6144                    /* 연결된 기기 폼: 기기 6대 × 방 7개 × 통로별 숨김 + 별명(URL 인코딩 3배) */
 
+/* 긴 페이지(관리 화면)는 청크로 보낸다: 큰 연속 블록(본문 36KB + send_page 사본 37KB)을 한 번에 안 잡아,
+ * 프록시 모드로 힙이 조각나도 실패하지 않는다. 빈 문자열을 보내면 청크가 끝나 버리므로 비어 있으면 안 보낸다. */
+static void page_begin(httpd_req_t *req, const char *title)
+{
+    common_headers(req);
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_sendstr_chunk(req, HEAD1);
+    httpd_resp_sendstr_chunk(req, title);
+    httpd_resp_sendstr_chunk(req, HEAD2);
+}
+static esp_err_t page_end(httpd_req_t *req, const char *extra)
+{
+    if (extra && extra[0]) {
+        httpd_resp_sendstr_chunk(req, extra);
+    }
+    httpd_resp_sendstr_chunk(req, TAIL);
+    return httpd_resp_send_chunk(req, NULL, 0);      /* 끝(빈 청크 하나) */
+}
+
 static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
 {
-    const size_t full = 36864, cap = full - 256;   /* 끝 256 바이트는 '잘림' 경고 자리 */
-    char *b = calloc(1, full);
+    const size_t cap = 16384;           /* 섹션별 버퍼 — 섹션 하나씩 만들어 청크로 보낸다(조각화에 강함) */
+    char *b = calloc(1, cap);
     if (!b) {
         return httpd_resp_send_500(req);
     }
+    page_begin(req, "허브 관리");
+#define FLUSH() do { if (b[0]) { httpd_resp_sendstr_chunk(req, b); b[0] = '\0'; } } while (0)
     strlcat(b, "<h1>LYNNAI 허브 관리</h1><p class=muted>기기 ", cap);
     cat_esc(b, cap, s_st->device_id);
     strlcat(b, " · <form method=post action=/logout style='display:inline'><button class=lnk>로그아웃</button></form></p>", cap);
     if (msg) {
         strlcat(b, ok ? "<p class=ok>" : "<p class=warn>", cap); cat_esc(b, cap, msg); strlcat(b, "</p>", cap);
     }
+    FLUSH();
     {
-        char w[400];                    /* 저장 데이터 오류가 있으면 맨 위에 경고(빨간 LED 깜빡임과 같이) */
+        char w[400];                    /* 저장 데이터 오류가 있으면 맨 위에 경고 */
         hub_store_errors_html(w, sizeof(w));
-        strlcat(b, w, cap);
+        if (w[0]) {
+            httpd_resp_sendstr_chunk(req, w);
+        }
     }
-    hub_proxy_render(b, cap);           /* 동작 모드(프록시/단독) 맨 위 */
-    hub_uplink_render(b, cap);          /* 연결 방식(통로) — 아래 노출 체크는 고른 통로만 나옴 */
-    hub_pairs_render(b, cap);           /* 연결된 기기(이름·보일러 연결·기기/방별 노출) */
-    hub_devs_render(b, cap);            /* 등록 대기(허브 AP 에 붙었지만 등록 안 된 단말) */
-    hub_expose_render_types(b, cap);    /* 노출 설정: 종류별 컨트롤 */
-    hub_plugins_render(b, cap);
-    hub_crypt_render(b, cap);           /* 저장 데이터 암호화(eFuse) */
+    hub_proxy_render(b, cap); FLUSH();     /* 동작 모드(프록시/단독) */
+    hub_uplink_render(b, cap); FLUSH();    /* 연결 방식(통로) */
+    hub_pairs_render(b, cap); FLUSH();     /* 연결된 기기 */
+    hub_devs_render(b, cap); FLUSH();      /* 등록 대기 */
+    hub_expose_render_types(b, cap); FLUSH();  /* 노출 설정 */
+    hub_plugins_render(b, cap); FLUSH();
+    hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(자동/수동 + 월별 그래프) */
+    hub_crypt_render(b, cap); FLUSH();     /* 저장 데이터 암호화 */
     strlcat(b, "<h2>서버 연동 (장기 기록·그래프)</h2><div class=card><p class=muted>"
                "<code>/api/v1/state</code> (JSON), <code>/metrics</code> (Prometheus), <code>/api/events</code>. ", cap);
     strlcat(b, hub_api_has_token() ? "API 토큰 <b>켜짐</b>: 요청에 <code>Authorization: Bearer &lt;토큰&gt;</code> 필요.</p>"
@@ -450,13 +476,10 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     strlcat(b, "<form method=post action=/admin/api><button name=op value=new>토큰 새로 만들기</button>"
                "<button name=op value=off class=ghost>토큰 끄기</button></form>"
                "<p class=muted>새로 만들면 이전 토큰은 바로 무효. 토큰은 만들 때 한 번만 보여 줍니다.</p></div>", cap);
-    if (strlen(b) >= cap - 1) {                       /* 화면이 버퍼를 넘침 — 뒤쪽이 잘렸다고 알린다 */
-        strlcat(b, "<p class=warn>화면이 너무 길어 뒤쪽이 잘렸습니다(기기·방이 많음). USB diag 로 확인하세요.</p>", full);
-        ESP_LOGW(TAG, "관리 화면 잘림(%u바이트)", (unsigned)cap);
-    }
-    esp_err_t r = send_page(req, "허브 관리", b, ADMIN_EXTRA);
+    FLUSH();
+#undef FLUSH
     free(b);
-    return r;
+    return page_end(req, ADMIN_EXTRA);
 }
 
 static esp_err_t admin_get(httpd_req_t *req)
@@ -720,6 +743,35 @@ static esp_err_t mode_post(httpd_req_t *req)
     return admin_page(req, msg[0] ? msg : "잘못된 요청", ok);
 }
 
+static esp_err_t gas_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[512], err[96] = "";
+    if (read_body(req, body, sizeof(body)) < 0) {
+        return admin_page(req, "잘못된 요청", false);
+    }
+    char op[12];
+    form_get(body, "op", op, sizeof(op));
+    if (strcmp(op, "refresh") == 0) {
+        hub_tariff_refresh();
+        return admin_page(req, "지금 다시 받는 중입니다", true);
+    }
+    char mode[12], region[16], billday[8], vcf[16], heat[16], rate[16], base[16];
+    form_get(body, "mode", mode, sizeof(mode));
+    form_get(body, "region", region, sizeof(region));
+    form_get(body, "billday", billday, sizeof(billday));
+    form_get(body, "vcf", vcf, sizeof(vcf));
+    form_get(body, "heat", heat, sizeof(heat));
+    form_get(body, "rate", rate, sizeof(rate));
+    form_get(body, "base", base, sizeof(base));
+    bool ok = hub_tariff_apply(strcmp(mode, "manual") == 0 ? 1 : 0, region, atoi(billday),
+                               atof(vcf), atof(heat), atof(rate), atof(base), err, sizeof(err));
+    return admin_page(req, ok ? "가스 요금 설정을 저장했습니다" : (err[0] ? err : "잘못된 요청"), ok);
+}
+
 static esp_err_t transport_post(httpd_req_t *req)
 {
     log_req(req);
@@ -772,6 +824,25 @@ static esp_err_t plugin_action_post(httpd_req_t *req)
     return admin_page(req, msg[0] ? msg : (ok ? "적용했습니다" : "실패"), ok);
 }
 
+/* 가스 요금 '현재값'만 돌려준다(관리 화면이 페이지를 다시 그리지 않고 값만 바꾼다). ?do=refresh 면 다시 받기부터. */
+static esp_err_t gasnow_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (!authed(req)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(req, "로그인이 필요합니다");
+    }
+    char q[32] = "", v[12] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "do", v, sizeof(v)) == ESP_OK && !strcmp(v, "refresh")) {
+        hub_tariff_refresh();
+    }
+    char b[640] = "";
+    hub_tariff_now_html(b, sizeof(b));
+    return httpd_resp_sendstr(req, b);
+}
+
 /* ---------- 캡티브: 모르는 주소는 전부 설정 페이지로 ---------- */
 static esp_err_t captive_get(httpd_req_t *req)
 {
@@ -794,7 +865,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 24;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
+    cfg.max_uri_handlers = 30;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
     cfg.stack_size = 6144;
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
@@ -834,10 +905,14 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &trns);
     const httpd_uri_t mode = { .uri = "/admin/mode", .method = HTTP_POST, .handler = mode_post };
     httpd_register_uri_handler(srv, &mode);
+    const httpd_uri_t gasc = { .uri = "/admin/gas", .method = HTTP_POST, .handler = gas_post };
+    httpd_register_uri_handler(srv, &gasc);
     const httpd_uri_t crypt = { .uri = "/admin/crypt", .method = HTTP_POST, .handler = crypt_post };
     httpd_register_uri_handler(srv, &crypt);
     const httpd_uri_t dapp = { .uri = "/admin/dev-approve", .method = HTTP_POST, .handler = dev_approve_post };
     httpd_register_uri_handler(srv, &dapp);
+    const httpd_uri_t gnow = { .uri = "/admin/gas-now", .method = HTTP_GET, .handler = gasnow_get };
+    httpd_register_uri_handler(srv, &gnow);
     hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */

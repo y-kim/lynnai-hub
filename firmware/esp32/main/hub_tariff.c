@@ -1,0 +1,768 @@
+/*
+ * hub_tariff.c -- 도시가스 요금 요소를 받아(자동) 또는 직접 넣어(수동) 드라이버로 중계하고,
+ *                 허브가 쥔 가스 사용량으로 검침일 기준 월별 청구액을 쌓는다. hub_tariff.h 참고.
+ *
+ *   요금(보정·열량·단가): 자동=gas.yangsu.kim/api/bill(구역별), 수동=직접 입력.
+ *   기본료·검침일: 내 정보(항상 사용자 값).
+ *   구역 목록: /api/regions 를 받아 관리 화면 datalist(검색 선택)로.
+ *   월 마감: 청구월 N = (N-1)월 검침일 ~ N월 (검침일-1). 정확 열량(사용기간 가중평균)이 확정되면 그 청구액으로,
+ *            아니면 검침일+3일 뒤 최신 월 열량 청구액으로 등록(/api/bill 의 청구액 = 청구서 재현).
+ */
+#include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <math.h>
+#include <time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_http_client.h"
+#include "esp_netif.h"
+#include "lwip/dns.h"
+#include "nvs.h"
+#include "esp_system.h"
+#include "hub_uplink.h"
+#include "hub_proxy.h"
+#include "hub_sensors.h"
+#include "hub_tariff.h"
+
+static const char *TAG = "HUB_TARIFF";
+
+extern const char gas_ca_pem_start[] asm("_binary_gas_ca_pem_start");
+extern const char gas_ca_pem_end[]   asm("_binary_gas_ca_pem_end");
+
+#define NS            "gas"
+#define FETCH_OK_S    (12 * 3600)
+#define FETCH_RETRY_S 15
+/* 부팅 직후엔 보일러·각방 연결의 TLS 핸드셰이크가 몰려 힙이 빠듯하다 — 그게 끝난 뒤에 조회를 시작한다 */
+#define FIRST_DELAY_S 40
+#define TLS_MIN_FREE  60000      /* HTTPS 한 번에 40KB 남짓 쓴다. 이만큼 남아 있을 때만 시작 */
+#define WAKE_S        600
+#define FIN_THROTTLE_S 3600          /* 마감 재시도는 한 시간에 한 번 */
+#define FIN_GRACE_D   3              /* 정확 열량이 없으면 검침일+이 일수 뒤 최신 월값으로 마감 */
+#define BUF_MAX       2048
+#define REG_RAW       3400
+#define REG_OPTS      6000
+#define CLOCK_OK(t)   ((t) > 1704067200L)
+
+#define MODE_AUTO 0
+#define MODE_MANUAL 1
+
+#define DEF_VCF_E6  993900u
+#define DEF_HEAT_E6 42576000u
+#define DEF_RATE_E6 22622600u
+#define DEF_BASE    1250u
+
+static char     s_region[12] = "SD07";
+static uint8_t  s_mode     = MODE_AUTO;
+static uint8_t  s_billday  = 8;
+static uint32_t s_man_vcf_e6  = DEF_VCF_E6;
+static uint32_t s_man_heat_e6 = DEF_HEAT_E6;
+static uint32_t s_man_rate_e6 = DEF_RATE_E6;
+static uint32_t s_man_base    = DEF_BASE;        /* 기본료 = 내 정보(항상 이 값 사용) */
+
+static uint32_t s_fet_vcf_e6, s_fet_heat_e6, s_fet_rate_e6;   /* 자동: 마지막 조회값(보정·열량·단가) */
+static bool     s_fet_valid;
+static long     s_fet_epoch;
+static char     s_fet_regname[40];               /* "지역" */
+static char     s_fet_heatbasis[72];             /* "열량기준" (측정 기간/출처) */
+
+static char     s_reg_opts[REG_OPTS];            /* 구역 datalist <option>… (한 번 받아 둠) */
+static bool     s_regs_got;
+
+static TaskHandle_t s_task;
+static char s_buf[BUF_MAX];
+static uint32_t s_relay_sig = 0xFFFFFFFFu;
+static int64_t  s_fin_last_us;
+
+/* ---- 월별 기록 ---- */
+#define MON_MAX 13
+typedef struct {
+    uint16_t ym;        /* 청구월(연*12 + 월-1). 기간 = (월-1) 검침일 ~ 월 (검침일-1) */
+    uint32_t start_l;   /* 기간 시작 때 누적 리터(count*step) */
+    uint32_t use_l;     /* 사용 리터 */
+    uint32_t won;       /* 청구액 원 */
+    uint8_t  closed;    /* 1 = 기간 끝남(마감 대기/완료) */
+    uint8_t  final;     /* 1 = 정확 열량으로 확정 등록됨 */
+} tmon_t;
+typedef struct { uint8_t n; tmon_t m[MON_MAX]; } mon_blob_t;
+static tmon_t s_mon[MON_MAX];
+static int    s_mon_n;
+static SemaphoreHandle_t s_lock;
+
+/* ---------------------------------------------------------------- 저장 */
+static void save_cfg(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, "region", s_region);
+    nvs_set_u8(h, "tmode", s_mode);
+    nvs_set_u8(h, "tbillday", s_billday);
+    nvs_set_u32(h, "tvcf", s_man_vcf_e6);
+    nvs_set_u32(h, "theat", s_man_heat_e6);
+    nvs_set_u32(h, "trate", s_man_rate_e6);
+    nvs_set_u32(h, "tbase", s_man_base);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void load_cfg(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;
+    size_t n = sizeof(s_region);
+    nvs_get_str(h, "region", s_region, &n);
+    nvs_get_u8(h, "tmode", &s_mode);
+    nvs_get_u8(h, "tbillday", &s_billday);
+    nvs_get_u32(h, "tvcf", &s_man_vcf_e6);
+    nvs_get_u32(h, "theat", &s_man_heat_e6);
+    nvs_get_u32(h, "trate", &s_man_rate_e6);
+    nvs_get_u32(h, "tbase", &s_man_base);
+    nvs_close(h);
+    if (s_billday < 1 || s_billday > 28) s_billday = 8;
+}
+
+static void mon_save(void)
+{
+    mon_blob_t bl = { 0 };
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bl.n = (uint8_t)s_mon_n;
+    memcpy(bl.m, s_mon, sizeof(s_mon));
+    xSemaphoreGive(s_lock);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, "tmon2", &bl, sizeof(bl));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void mon_load(void)
+{
+    mon_blob_t bl;
+    size_t n = sizeof(bl);
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_get_blob(h, "tmon2", &bl, &n) == ESP_OK && n == sizeof(bl) && bl.n <= MON_MAX) {
+        s_mon_n = bl.n;
+        memcpy(s_mon, bl.m, sizeof(s_mon));
+    }
+    nvs_close(h);
+}
+
+/* ---------------------------------------------------------------- 요금 */
+/* 유효 요금(e6): 보정·열량·단가는 수동/자동, 기본료는 항상 내 정보. */
+static void eff_e6(uint32_t *vcf, uint32_t *heat, uint32_t *rate, uint32_t *base)
+{
+    if (s_mode == MODE_MANUAL || !s_fet_valid) {
+        *vcf = s_man_vcf_e6; *heat = s_man_heat_e6; *rate = s_man_rate_e6;
+    } else {
+        *vcf = s_fet_vcf_e6; *heat = s_fet_heat_e6; *rate = s_fet_rate_e6;
+    }
+    *base = s_man_base;
+}
+
+static uint32_t won_of(double m3)
+{
+    uint32_t v, h, r, b;
+    eff_e6(&v, &h, &r, &b);
+    double fee  = m3 * (v / 1e6) * (h / 1e6) * (r / 1e6);
+    double bill = (b + fee) * 1.1;
+    if (bill < 0) bill = 0;
+    return (uint32_t)llround(bill);
+}
+
+static void relay_current(void)
+{
+    uint32_t p[4];
+    eff_e6(&p[0], &p[1], &p[2], &p[3]);
+    uint32_t sig = p[0] ^ (p[1] << 1) ^ (p[2] << 2) ^ (p[3] << 3);
+    if (sig == s_relay_sig) return;
+    hub_uplink_send(HUB_RK_CMD_TARIFF, (uint8_t *)p, sizeof(p));
+    s_relay_sig = sig;
+    ESP_LOGI(TAG, "요금 중계(%s): 보정 %.4f 열량 %.3f 단가 %.4f 기본 %u → 드라이버",
+             s_mode == MODE_MANUAL ? "수동" : "자동",
+             p[0] / 1e6, p[1] / 1e6, p[2] / 1e6, (unsigned)p[3]);
+}
+
+/* ---------------------------------------------------------------- HTTP(핀한 CA) */
+typedef struct { char *buf; int cap; int len; } rx_t;
+
+static esp_err_t on_http(esp_http_client_event_t *e)
+{
+    if (e->event_id == HTTP_EVENT_ON_DATA && e->user_data) {
+        rx_t *rx = e->user_data;
+        int n = e->data_len;
+        if (rx->len + n > rx->cap - 1) n = rx->cap - 1 - rx->len;
+        if (n > 0) { memcpy(rx->buf + rx->len, e->data, n); rx->len += n; rx->buf[rx->len] = 0; }
+    }
+    return ESP_OK;
+}
+
+static void use_sta_dns(void)
+{
+    ip_addr_t d1 = IPADDR4_INIT_BYTES(1, 1, 1, 1);
+    ip_addr_t d2 = IPADDR4_INIT_BYTES(8, 8, 8, 8);
+    dns_setserver(0, &d1);
+    dns_setserver(1, &d2);
+}
+
+/* 성공하면 받은 바이트 수, 실패 -1. */
+/* HTTPS 를 시작해도 되는 때까지 기다린다(최대 30초): 기기 연결이 핸드셰이크 중이 아니고 힙이 충분할 때. */
+static bool tls_room(void)
+{
+    for (int i = 0; i < 10; i++) {
+        if (!hub_proxy_handshaking() && esp_get_free_heap_size() >= TLS_MIN_FREE) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+    return false;
+}
+
+static int http_get(const char *url, char *buf, int cap)
+{
+    buf[0] = 0;
+    if (!tls_room()) {
+        ESP_LOGW(TAG, "GET 미룸(메모리 여유 %lu B) %s", (unsigned long)esp_get_free_heap_size(), url);
+        return -1;
+    }
+    use_sta_dns();
+    rx_t rx = { buf, cap, 0 };
+    buf[0] = 0;
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .event_handler = on_http,
+        .user_data = &rx,
+        .cert_pem = gas_ca_pem_start,
+        .cert_len = (size_t)(gas_ca_pem_end - gas_ca_pem_start),
+        .timeout_ms = 10000,
+        .buffer_size = 1024,
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return -1;
+    esp_err_t err = esp_http_client_perform(c);
+    int status = esp_http_client_get_status_code(c);
+    esp_http_client_cleanup(c);
+    if (err != ESP_OK || status != 200) {
+        ESP_LOGW(TAG, "GET 실패 %s err=%s status=%d", url, esp_err_to_name(err), status);
+        return -1;
+    }
+    return rx.len;
+}
+
+static bool num_after(const char *body, const char *key, double *out)
+{
+    const char *p = strstr(body, key);
+    if (!p) return false;
+    p = strchr(p + strlen(key), ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ') p++;
+    char *end;
+    double v = strtod(p, &end);
+    if (end == p) return false;
+    *out = v;
+    return true;
+}
+
+static void str_after(const char *body, const char *key, char *out, size_t cap)
+{
+    out[0] = 0;
+    const char *p = strstr(body, key);
+    if (!p) return;
+    p = strchr(p + strlen(key), ':');
+    if (!p) return;
+    p = strchr(p, '"');
+    if (!p) return;
+    p++;
+    size_t i = 0;
+    for (; *p && *p != '"' && i + 1 < cap; p++) out[i++] = *p;
+    out[i] = 0;
+}
+
+/* ---------------------------------------------------------------- 자동 조회 */
+static bool fetch_auto(void)
+{
+    char url[128];
+    snprintf(url, sizeof(url), "https://gas.yangsu.kim/api/bill?m3=0&region=%s", s_region);
+    if (http_get(url, s_buf, BUF_MAX) < 0) return false;
+    double vcf, heat, rate;
+    if (!num_after(s_buf, "\"보정계수\"", &vcf) ||
+        !num_after(s_buf, "\"열량\"", &heat) ||
+        !num_after(s_buf, "\"단가\"", &rate)) {
+        ESP_LOGW(TAG, "응답 파싱 실패");
+        return false;
+    }
+    if (vcf < 0.9 || vcf > 1.1 || heat < 20 || heat > 60 || rate <= 0 || rate > 100) {
+        ESP_LOGW(TAG, "값 범위 벗어남 vcf=%.4f heat=%.3f rate=%.4f", vcf, heat, rate);
+        return false;
+    }
+    s_fet_vcf_e6  = (uint32_t)lround(vcf * 1e6);
+    s_fet_heat_e6 = (uint32_t)lround(heat * 1e6);
+    s_fet_rate_e6 = (uint32_t)lround(rate * 1e6);
+    s_fet_valid   = true;
+    { long nw = time(NULL); s_fet_epoch = CLOCK_OK(nw) ? nw : 0; }   /* 동기 전이면 0(업타임 값 노출 안 함) */
+    str_after(s_buf, "\"지역\"", s_fet_regname, sizeof(s_fet_regname));
+    str_after(s_buf, "\"열량기준\"", s_fet_heatbasis, sizeof(s_fet_heatbasis));
+    ESP_LOGI(TAG, "요금 받음: 보정 %.4f 열량 %.3f(%s) 단가 %.4f", vcf, heat, s_fet_heatbasis, rate);
+    return true;
+}
+
+/* /api/regions 를 받아 datalist <option> 문자열로 만들어 둔다(검색 선택용). */
+static void opt_cat(char *out, size_t cap, const char *s)   /* <>&" 만 간단 이스케이프 */
+{
+    size_t o = strlen(out);
+    for (; *s && o + 7 < cap; s++) {
+        const char *r = NULL;
+        switch (*s) { case '<': r="&lt;"; break; case '>': r="&gt;"; break;
+                      case '&': r="&amp;"; break; case '"': r="&quot;"; break; }
+        if (r) { strlcpy(out + o, r, cap - o); o += strlen(r); }
+        else { out[o++] = *s; out[o] = 0; }
+    }
+}
+
+static void fetch_regions(void)
+{
+    char *raw = malloc(REG_RAW);
+    if (!raw) return;
+    if (http_get("https://gas.yangsu.kim/api/regions", raw, REG_RAW) < 0) { free(raw); return; }
+    s_reg_opts[0] = 0;
+    const char *p = raw;
+    int cnt = 0;
+    while ((p = strstr(p, "\"code\"")) != NULL) {
+        char code[16] = "", desc[72] = "";
+        str_after(p, "\"code\"", code, sizeof(code));
+        const char *d = strstr(p, "\"설명\"");
+        if (d) str_after(d, "\"설명\"", desc, sizeof(desc));
+        if (code[0]) {
+            strlcat(s_reg_opts, "<option value=\"", REG_OPTS);
+            opt_cat(s_reg_opts, REG_OPTS, code);
+            strlcat(s_reg_opts, "\">", REG_OPTS);
+            opt_cat(s_reg_opts, REG_OPTS, code);
+            if (desc[0]) { strlcat(s_reg_opts, " · ", REG_OPTS); opt_cat(s_reg_opts, REG_OPTS, desc); }
+            strlcat(s_reg_opts, "</option>", REG_OPTS);
+            cnt++;
+        }
+        p += 6;
+        if (strlen(s_reg_opts) > REG_OPTS - 120) break;    /* 버퍼 여유 없으면 멈춤 */
+    }
+    if (cnt > 0) s_regs_got = true;
+    free(raw);
+    ESP_LOGI(TAG, "구역 목록 %d개 받음", cnt);
+}
+
+/* ---------------------------------------------------------------- 월별 집계 */
+/* 청구월 N = 오늘이 검침일 지났으면 다음달, 아니면 이번달. 기간 = (N-1)월 검침일 ~ N월 (검침일-1). */
+static uint16_t period_key(long now)
+{
+    struct tm tmv;
+    time_t t = (time_t)now;
+    localtime_r(&t, &tmv);
+    int y = tmv.tm_year + 1900, mo = tmv.tm_mon + 1, d = tmv.tm_mday;
+    if (d >= s_billday) { if (++mo > 12) { mo = 1; y++; } }
+    return (uint16_t)(y * 12 + (mo - 1));
+}
+
+/* 청구월 ym 의 사용기간(from~to, "YYYY-MM-DD"). */
+static void period_dates(uint16_t ym, char from[11], char to[11])
+{
+    int y = ym / 12, m = ym % 12 + 1;
+    struct tm s = { 0 }, e = { 0 };
+    s.tm_year = y - 1900; s.tm_mon = (m - 1) - 1; s.tm_mday = s_billday; s.tm_hour = 12;
+    mktime(&s); strftime(from, 11, "%Y-%m-%d", &s);
+    e.tm_year = y - 1900; e.tm_mon = m - 1; e.tm_mday = s_billday - 1; e.tm_hour = 12;
+    mktime(&e); strftime(to, 11, "%Y-%m-%d", &e);
+}
+
+/* 청구월 ym 의 검침일(= N월 검침일, 마감 유예 기준) epoch. */
+static time_t billday_epoch(uint16_t ym)
+{
+    int y = ym / 12, m = ym % 12 + 1;
+    struct tm b = { 0 };
+    b.tm_year = y - 1900; b.tm_mon = m - 1; b.tm_mday = s_billday; b.tm_hour = 12;
+    return mktime(&b);
+}
+
+static void months_update(void)
+{
+    long now = time(NULL);
+    if (!CLOCK_OK(now)) return;
+    gas_view_t g; uint32_t step;
+    if (!hub_sensors_gas(&g, &step)) return;
+    uint32_t cur_l = g.count * step;
+    uint16_t key = period_key(now);
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool dirty = false;
+    tmon_t *cur = s_mon_n ? &s_mon[s_mon_n - 1] : NULL;
+    if (!cur || cur->ym != key) {
+        if (cur) {                        /* 이전 기간 끝 → 마감 대기(final=0) */
+            cur->use_l  = (cur_l >= cur->start_l) ? cur_l - cur->start_l : 0;
+            cur->won    = won_of(cur->use_l / 1000.0);
+            cur->closed = 1;
+            cur->final  = 0;
+        }
+        if (s_mon_n == MON_MAX) {
+            memmove(&s_mon[0], &s_mon[1], sizeof(tmon_t) * (MON_MAX - 1));
+            s_mon_n--;
+        }
+        cur = &s_mon[s_mon_n++];
+        cur->ym = key; cur->start_l = cur_l; cur->closed = 0; cur->final = 0;
+        dirty = true;
+    }
+    cur->use_l = (cur_l >= cur->start_l) ? cur_l - cur->start_l : 0;   /* 진행 중 라이브 */
+    cur->won   = won_of(cur->use_l / 1000.0);
+    xSemaphoreGive(s_lock);
+    if (dirty) mon_save();
+}
+
+/* 마감 대기(closed && !final) 중 가장 최근 달을 확정 등록 시도.
+ *  - /api/bill?from&to 청구액 = 청구서 재현(사용기간 가중평균).
+ *  - 열량기준이 "사용기간…"(정확 열량)이면 확정. 아니면 검침일+유예일 지나면 최신 월값으로 확정. */
+static void finalize_pending(void)
+{
+    long now = time(NULL);
+    if (!CLOCK_OK(now)) return;
+    int64_t nowu = esp_timer_get_time();
+    if (s_fin_last_us && nowu - s_fin_last_us < (int64_t)FIN_THROTTLE_S * 1000000) return;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    int j = -1;
+    for (int i = s_mon_n - 1; i >= 0; i--) if (s_mon[i].closed && !s_mon[i].final) { j = i; break; }
+    tmon_t m = (j >= 0) ? s_mon[j] : (tmon_t){ 0 };
+    xSemaphoreGive(s_lock);
+    if (j < 0) return;
+    s_fin_last_us = nowu;
+
+    char from[11], to[11];
+    period_dates(m.ym, from, to);
+    double m3 = m.use_l / 1000.0;
+    char url[160];
+    snprintf(url, sizeof(url), "https://gas.yangsu.kim/api/bill?region=%s&m3=%.2f&from=%s&to=%s",
+             s_region, m3, from, to);
+    if (http_get(url, s_buf, BUF_MAX) < 0) return;
+    double bill = 0;
+    if (!num_after(s_buf, "\"청구액\"", &bill)) return;
+    char basis[72] = "";
+    str_after(s_buf, "\"열량기준\"", basis, sizeof(basis));
+    bool accurate = strstr(basis, "사용기간") != NULL;     /* 사용기간 가중평균 = 정확 열량 확정 */
+    bool grace_over = now >= billday_epoch(m.ym) + (time_t)FIN_GRACE_D * 86400;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (j < s_mon_n && s_mon[j].ym == m.ym) {
+        s_mon[j].won = (uint32_t)llround(bill);
+        s_mon[j].final = (accurate || grace_over) ? 1 : 0;
+    }
+    xSemaphoreGive(s_lock);
+    ESP_LOGI(TAG, "마감 %04d-%02d: 청구 %.0f (%s)%s", m.ym / 12, m.ym % 12 + 1, bill, basis,
+             (accurate || grace_over) ? " 확정" : " 잠정");
+    mon_save();
+}
+
+/* ---------------------------------------------------------------- 태스크 */
+static void tariff_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(FIRST_DELAY_S * 1000));
+    int64_t last_fetch_us = 0;
+    for (;;) {
+        if (!s_regs_got) fetch_regions();
+        months_update();
+        bool need_retry = false;
+        if (s_mode == MODE_AUTO) {
+            int64_t nowu = esp_timer_get_time();
+            if (!s_fet_valid || nowu - last_fetch_us > (int64_t)FETCH_OK_S * 1000000) {
+                if (fetch_auto()) last_fetch_us = nowu;
+                else need_retry = !s_fet_valid;
+            }
+        }
+        relay_current();
+        finalize_pending();
+        uint32_t wait = need_retry ? FETCH_RETRY_S : (s_mon_n == 0 ? 30 : WAKE_S);
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait * 1000));
+    }
+}
+
+void hub_tariff_init(void)
+{
+    s_lock = xSemaphoreCreateMutex();
+    load_cfg();
+    mon_load();
+    if (!s_task) xTaskCreate(tariff_task, "hub_tariff", 8192, NULL, 3, &s_task);
+}
+
+/* ---------------------------------------------------------------- 포털 저장 */
+void hub_tariff_refresh(void)
+{
+    s_fet_valid = false;
+    s_relay_sig = 0xFFFFFFFFu;
+    if (s_task) xTaskNotifyGive(s_task);
+}
+
+int hub_tariff_apply(int mode, const char *region, int billday,
+                     double vcf, double heat, double rate, double base,
+                     char *err, int errlen)
+{
+#define FAIL(m) do { if (err) strlcpy(err, (m), errlen); return 0; } while (0)
+    if (billday < 1 || billday > 28) FAIL("검침일은 1~28 사이");
+    char rg[12] = "";
+    if (region) {
+        for (const char *p = region; *p && (size_t)(p - region) < sizeof(rg) - 1; p++) {
+            char ch = *p;
+            if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')))
+                FAIL("구역 코드는 영문·숫자만 (예: SD07)");
+            rg[p - region] = (ch >= 'a' && ch <= 'z') ? ch - 32 : ch;
+        }
+    }
+    if (!rg[0]) FAIL("구역 코드를 넣어 주세요 (예: SD07)");
+    if (base < 0 || base > 100000) FAIL("기본료 범위 벗어남");
+    if (mode == MODE_MANUAL) {
+        if (vcf < 0.9 || vcf > 1.1) FAIL("보정계수는 0.9~1.1");
+        if (heat < 20 || heat > 60) FAIL("열량은 20~60 MJ/N㎥");
+        if (rate <= 0 || rate > 100) FAIL("단가는 0~100 원/MJ");
+    }
+    s_mode    = mode == MODE_MANUAL ? MODE_MANUAL : MODE_AUTO;
+    s_billday = (uint8_t)billday;
+    strlcpy(s_region, rg, sizeof(s_region));
+    s_man_base = (uint32_t)lround(base);         /* 기본료 = 내 정보(항상 저장) */
+    if (mode == MODE_MANUAL) {
+        s_man_vcf_e6  = (uint32_t)lround(vcf * 1e6);
+        s_man_heat_e6 = (uint32_t)lround(heat * 1e6);
+        s_man_rate_e6 = (uint32_t)lround(rate * 1e6);
+    }
+    save_cfg();
+    s_fet_valid = false;
+    s_relay_sig = 0xFFFFFFFFu;
+    if (s_task) xTaskNotifyGive(s_task);
+    return 1;
+#undef FAIL
+}
+
+/* ---------------------------------------------------------------- API/metrics */
+void hub_tariff_cur(int *mode, const char **region, int *billday,
+                    double *vcf, double *heat, double *rate, double *base, long *last_fetch)
+{
+    uint32_t v, h, r, b;
+    eff_e6(&v, &h, &r, &b);
+    if (mode) *mode = s_mode;
+    if (region) *region = s_region;
+    if (billday) *billday = s_billday;
+    if (vcf) *vcf = v / 1e6;
+    if (heat) *heat = h / 1e6;
+    if (rate) *rate = r / 1e6;
+    if (base) *base = b;
+    if (last_fetch) *last_fetch = s_fet_valid ? s_fet_epoch : 0;
+}
+
+void hub_tariff_tick(void) { months_update(); }
+
+int hub_tariff_months(void) { return s_mon_n; }
+
+int hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won, int *closed)
+{
+    if (i < 0 || i >= s_mon_n) return 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    tmon_t m = s_mon[i];
+    xSemaphoreGive(s_lock);
+    if (year) *year = m.ym / 12;
+    if (month) *month = m.ym % 12 + 1;
+    if (m3) *m3 = m.use_l / 1000.0;
+    if (won) *won = m.won;
+    if (closed) *closed = m.final ? 2 : (m.closed ? 1 : 0);    /* 0 진행 1 잠정 2 확정 */
+    return 1;
+}
+
+/* ---------------------------------------------------------------- 관리 화면 */
+static void catf(char *out, size_t cap, const char *fmt, ...)
+{
+    size_t o = strlen(out);
+    if (o >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(out + o, cap - o, fmt, ap);
+    va_end(ap);
+}
+
+/* 온압보정계수 적용 고시일(연 1회 6/1) */
+static void vcf_basis(long now, char *out, size_t cap)
+{
+    struct tm t;
+    time_t tt = (time_t)now;
+    localtime_r(&tt, &t);
+    int y = t.tm_year + 1900;
+    if (t.tm_mon + 1 < 6) y--;                 /* 6월 전이면 작년 6/1 고시 */
+    snprintf(out, cap, "%d년 6월 1일 고시", y);
+}
+
+/* 열량 기준 글자를 사람이 읽기 좋게 바꾼다(서버가 주는 꼴 → 화면 글).
+ *   "month 20261119 (2026-10-19~2026-11-19 (api-range))" → "2026년 10월 19일~11월 19일 평균"
+ *   "사용기간 2026-10-08~2026-11-07 (가중평균)"            → "2026년 10월 8일~11월 7일 사용기간 가중평균"
+ * 날짜를 못 찾으면 받은 글자 그대로(이스케이프해서). */
+static void heat_basis_text(char *out, size_t cap)
+{
+    out[0] = 0;
+    for (const char *p = s_fet_heatbasis; *p; p++) {
+        int y1, m1, d1, y2, m2, d2;
+        if (*p < '0' || *p > '9' || sscanf(p, "%4d-%2d-%2d~%4d-%2d-%2d", &y1, &m1, &d1, &y2, &m2, &d2) != 6 ||
+            m1 < 1 || m1 > 12 || m2 < 1 || m2 > 12 || d1 < 1 || d1 > 31 || d2 < 1 || d2 > 31) {
+            continue;
+        }
+        const char *kind = strstr(s_fet_heatbasis, "가중평균") ? "사용기간 가중평균" : "평균";
+        if (y1 == y2) {
+            snprintf(out, cap, "%d년 %d월 %d일~%d월 %d일 %s", y1, m1, d1, m2, d2, kind);
+        } else {
+            snprintf(out, cap, "%d년 %d월 %d일~%d년 %d월 %d일 %s", y1, m1, d1, y2, m2, d2, kind);
+        }
+        return;
+    }
+    opt_cat(out, cap, s_fet_heatbasis);
+}
+
+/* '현재값' 줄들 — 관리 화면 카드와 /admin/gas-now(페이지를 다시 그리지 않는 새로고침)가 같이 쓴다.
+ * 노출 설정 카드와 같은 모양(.row: 왼쪽 이름, 오른쪽 값·기준). out 뒤에 덧붙인다. */
+void hub_tariff_now_html(char *out, size_t cap)
+{
+    if (!s_fet_valid) {
+        catf(out, cap, "<div class=row><span class=muted>받는 중… 계속 이 상태면 허브의 인터넷 연결을 확인하세요.</span></div>");
+        return;
+    }
+    char b[128];
+    vcf_basis(time(NULL), b, sizeof(b));
+    catf(out, cap, "<div class=row><span>온압보정계수</span><span class=gv><b>%.4f</b><small>%s</small></span></div>",
+         s_fet_vcf_e6 / 1e6, b);
+    heat_basis_text(b, sizeof(b));
+    catf(out, cap, "<div class=row><span>열량</span><span class=gv><b>%.3f</b> MJ/N㎥<small>%s</small></span></div>",
+         s_fet_heat_e6 / 1e6, b);
+    catf(out, cap, "<div class=row><span>단가</span><span class=gv><b>%.4f</b> 원/MJ</span></div>", s_fet_rate_e6 / 1e6);
+    if (s_fet_regname[0]) {
+        b[0] = 0;
+        opt_cat(b, sizeof(b), s_fet_regname);
+        catf(out, cap, "<div class=row><span>구역</span><span class=gv>%s</span></div>", b);
+    }
+    if (s_fet_epoch) {
+        time_t tt = (time_t)s_fet_epoch;
+        struct tm tm;
+        localtime_r(&tt, &tm);
+        catf(out, cap, "<div class=row><span>받은 시각</span><span class=gv>%d월 %d일 %02d:%02d</span></div>",
+             tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+    }
+}
+
+void hub_tariff_render(char *out, size_t cap)
+{
+    months_update();
+    bool man = (s_mode == MODE_MANUAL);
+
+    catf(out, cap, "<h2>가스 요금</h2><div class=card>");
+
+    /* 월별 그래프 */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    int n = s_mon_n;
+    tmon_t mv[MON_MAX];
+    memcpy(mv, s_mon, sizeof(mv));
+    xSemaphoreGive(s_lock);
+    int show = n > 12 ? 12 : n, offb = n - show;
+    if (show > 0) {
+        uint32_t mx = 1;
+        for (int i = offb; i < n; i++) if (mv[i].won > mx) mx = mv[i].won;
+        /* 막대 폭은 12칸 고정 — 기록된 달은 왼쪽부터 세우고, 나머지 오른쪽 칸은 빈 공간으로 둔다
+         * (한 달만 있을 때 막대가 폭 전체로 넓어지지 않게). */
+        const int SLOTS = 12;
+        const int W = 320, H = 150, PADB = 24, PADT = 14, bw = (W - 10) / SLOTS;
+        catf(out, cap, "<svg viewBox='0 0 %d %d' style='width:100%%;height:auto' role='img' aria-label='월별 가스요금'>", W, H);
+        catf(out, cap, "<line x1=5 y1=%d x2=%d y2=%d stroke='#333'/>", H - PADB, 5 + SLOTS * bw, H - PADB);
+        for (int i = offb; i < n; i++) {
+            int idx = i - offb, x = 5 + idx * bw;
+            int bh = (int)((double)mv[i].won * (H - PADB - PADT) / mx);
+            if (bh < 0) bh = 0;
+            int y = H - PADB - bh;
+            const char *fill = mv[i].final ? "#c33" : (mv[i].closed ? "#e66" : "#e88");
+            catf(out, cap, "<rect x=%d y=%d width=%d height=%d rx=2 fill='%s'/>", x + 2, y, bw - 4, bh, fill);
+            catf(out, cap, "<text x=%d y=%d font-size=9 fill='#bbb' text-anchor=middle>%d월</text>",
+                 x + bw / 2, H - 8, mv[i].ym % 12 + 1);
+            if (mv[i].won > 0)
+                catf(out, cap, "<text x=%d y=%d font-size=9 fill='#eee' text-anchor=middle>%u</text>",
+                     x + bw / 2, y - 3, (unsigned)mv[i].won);
+        }
+        catf(out, cap, "</svg><p class=muted style='margin:4px 0 0'>월별 청구액(원, 부가세 포함). "
+                       "진한색=확정, 중간=잠정(열량 확정 전), 옅은색=진행 중.</p>");
+    } else {
+        catf(out, cap, "<p class=muted>아직 월별 기록이 없습니다 (시간 동기화·가스 사용 후 쌓입니다).</p>");
+    }
+
+    /* ---- 설정 폼 ---- */
+    catf(out, cap, "<form method=post action=/admin/gas>");
+    /* 조회 방식: 한 줄(라벨 + 자동/수동) */
+    catf(out, cap, "<div class=gline><b>가스 요금 조회</b>"
+                   "<label class=gopt><input type=radio name=mode value=auto %s onchange=_gm()> 자동 (gas.yangsu.kim)</label>"
+                   "<label class=gopt><input type=radio name=mode value=manual %s onchange=_gm()> 수동</label></div>",
+         man ? "" : "checked", man ? "checked" : "");
+
+    /* 아래 상자들은 '노출 설정' 카드와 같은 모양(.grpbox 제목 + .row 왼쪽 이름/오른쪽 값) */
+    /* 자동: 구역 + 현재값(새로고침은 페이지 유지, 값만 갱신) */
+    catf(out, cap, "<div id=gauto><div class=grpbox><h3 class=grp>📍 구역</h3><p class='muted sub'>%s</p>",
+         s_regs_got ? "목록에서 지역·공급사를 검색해 고르거나 코드를 직접 입력 (예: SD07)"
+                    : "구역 목록 받는 중… 코드를 직접 입력 (예: SD07)");
+    if (s_regs_got) {
+        catf(out, cap, "<input name=region list=gregions value=\"%s\" autocapitalize=characters "
+                       "placeholder='검색: 지역·공급사'><datalist id=gregions>%s</datalist>", s_region, s_reg_opts);
+    } else {
+        catf(out, cap, "<input name=region value=\"%s\" maxlength=11 autocapitalize=characters>", s_region);
+    }
+    catf(out, cap, "</div><div class=grpbox><div class=ptitle><h3 class=grp>📊 현재값</h3>"
+                   "<button type=button class=lnk onclick=_grefresh() title='지금 다시 받기'>↻ 새로고침</button></div>"
+                   "<p class='muted sub'>gas.yangsu.kim 에서 자동으로 받은 값</p><div id=gnow>");
+    hub_tariff_now_html(out, cap);
+    catf(out, cap, "</div></div></div>");
+
+    /* 수동: 직접 넣는 값 */
+    catf(out, cap, "<div id=gman class=grpbox><h3 class=grp>✏️ 수동값</h3>"
+                   "<p class='muted sub'>직접 넣은 값으로 계산 (인터넷 불필요)</p>");
+    catf(out, cap, "<div class=row><span>온압보정계수</span><input class=gin name=vcf inputmode=decimal value=\"%.4f\"></div>",
+         s_man_vcf_e6 / 1e6);
+    catf(out, cap, "<div class=row><span>열량 (MJ/N㎥)</span><input class=gin name=heat inputmode=decimal value=\"%.3f\"></div>",
+         s_man_heat_e6 / 1e6);
+    catf(out, cap, "<div class=row><span>단가 (원/MJ)</span><input class=gin name=rate inputmode=decimal value=\"%.4f\"></div>",
+         s_man_rate_e6 / 1e6);
+    catf(out, cap, "</div>");
+
+    /* 내 정보(항상 편집) */
+    catf(out, cap, "<div class=grpbox><h3 class=grp>👤 내 정보</h3><p class='muted sub'>자동·수동 모두에 쓰는 값</p>");
+    catf(out, cap, "<div class=row><span>기본요금 (원/월)</span><input class=gin name=base inputmode=numeric value=\"%u\"></div>",
+         (unsigned)s_man_base);
+    catf(out, cap, "<div class=row><span>검침일 (매월 1~28일)</span><input class=gin name=billday inputmode=numeric value=\"%u\"></div>",
+         s_billday);
+    catf(out, cap, "</div>");
+    catf(out, cap, "<button class=sv>저장</button></form>");
+    catf(out, cap, "<p class=muted style='margin:8px 0 0'>요금 기간: 매월 <b>%u일</b>부터 다음 달 <b>%u일 전날</b>까지. "
+                   "즉 'N월' 막대 = 전달 %u일 ~ N월 %u일 사용분으로 계산합니다.</p>",
+         s_billday, s_billday, s_billday, s_billday ? s_billday - 1 : 0);
+
+    /* 스타일(이 카드에서만 쓰는 것) */
+    catf(out, cap, "<style>.gline{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;margin:6px 0}"
+                   ".gline b{white-space:nowrap}"
+                   ".gline .gopt{display:inline-flex;align-items:center;gap:4px;margin:0;white-space:nowrap;flex:none;color:#ddd}"
+                   ".gline .gopt input{width:auto;padding:0;margin:0;flex:none}"
+                   ".grpbox .row{align-items:center}.gv{text-align:right}"
+                   ".gv small{display:block;color:#888;font-size:12px}"
+                   "input.gin{width:8.5em;text-align:right;padding:8px 10px}"
+                   "input[inputmode=decimal],input[inputmode=numeric]{appearance:textfield;-moz-appearance:textfield}"
+                   "input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}</style>");
+
+    /* 토글(자동↔수동 상호배타) + 비동기 새로고침(페이지 유지, 값만 갱신) */
+    catf(out, cap, "<script>"
+                   "function _gm(){var m=document.querySelector('input[name=mode][value=manual]').checked;"
+                   "document.getElementById('gman').style.display=m?'':'none';"
+                   "document.getElementById('gauto').style.display=m?'none':'';"
+                   "document.getElementById('gman').querySelectorAll('input').forEach(function(i){i.disabled=!m});}"
+                   "function _gput(u){fetch(u).then(function(r){return r.text()}).then(function(t){"
+                   "document.getElementById('gnow').innerHTML=t}).catch(function(){});}"
+                   "var _gt;function _grefresh(){document.getElementById('gnow').innerHTML="
+                   "'<span style=opacity:.6>받는 중…</span>';_gput('/admin/gas-now?do=refresh');"
+                   "clearInterval(_gt);var k=0;_gt=setInterval(function(){"
+                   "if(++k>6){clearInterval(_gt);return}_gput('/admin/gas-now')},2000);}"
+                   "_gm();</script>");
+    catf(out, cap, "</div>");
+}

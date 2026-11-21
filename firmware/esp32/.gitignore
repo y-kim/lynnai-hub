@@ -4,5 +4,7 @@ sdkconfig.old
 managed_components/
 main/srv.pem
 *.pem
+# 공개 루트 인증서(GTS Root R4) — 비밀이 아니고 빌드에 필요하다(hub_tariff)
+!main/gas_ca.pem
 build_*/
 lynnai-hub-esp32c6-*.bin

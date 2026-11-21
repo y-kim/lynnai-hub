@@ -58,6 +58,7 @@ cap("connectbook02461.boilerStatus", { "status" }, {})
 cap("connectbook02461.roomStatus", { "roomStatus" }, {})
 cap("connectbook02461.hotWaterSetpoint", { "setpoint" }, { "setSetpoint" })
 local htc = cap("connectbook02461.heatType", { "heatType" }, { "setHeatType" })
+cap("connectbook02461.gasCost", { "month", "today", "usage" }, {})
 
 package.loaded["st.capabilities"] = capabilities
 package.loaded["log"] = { info = function() end, warn = function() end, error = function() end }
@@ -126,7 +127,7 @@ core.setup(driver, { send = function(_, text) sent_cmds[#sent_cmds + 1] = text; 
                      on_hub_init = function() end })
 
 ----------------------------------------------------------------- 메시지 빌더
-local CMD = { STATE = 0x01, LINKS = 0x02, ROOM = 0x03, GAS = 0x04, PLUGINS = 0x05, EXPOSE = 0x06, PAIRS = 0x07 }
+local CMD = { STATE = 0x01, LINKS = 0x02, ROOM = 0x03, GAS = 0x04, PLUGINS = 0x05, EXPOSE = 0x06, PAIRS = 0x07, TARIFF = 0x09 }
 local function mac3(hex)      -- "a1b2c3" -> 3 bytes
   return string.char(tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16))
 end
@@ -611,6 +612,43 @@ core.on_message(hub, CMD.PLUGINS, string.char(3, 0))               -- 펄스가 
 check(gas._online == true, "가스 복구 → 온라인")
 core.on_message(hub, CMD.PLUGINS, string.char(2, 1))               -- 온습도계 플러그인을 뺌: 기기 삭제(고장 비트는 의미 없음)
 check(deleted["room"] and driver._children["gas"] ~= nil, "플러그인을 빼면 그 기기만 삭제")
+
+print("[26] 가스 요금: 이번 달(청구일 리셋) + 지난 하루, 설정 기본값(서울)")
+reset()
+-- 수동 기본값(SD07 경기 중부1 코원): vcf 0.9939, 열량 42.576, 단가 22.6226, 기본료 1250, 부가세 10%
+local function won(m3, with_base)
+  local w = m3 * 0.9939 * 42.576 * 22.6226
+  if with_base then w = w + 1250 end
+  return math.floor(w * 1.1 + 0.5)
+end
+-- 첫 메시지: 누적 50㎥(reading=50000L), 지난 하루 5㎥. 이번 달 기준이 50 으로 잡혀 사용량 0.
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 50000, 0, 5000, 0))
+core.info_changed(nil, driver._children["gas"])   -- 설정변경 경로로 중복 캐시 비우고 다시 계산(앞 시나리오 값과 겹침 방지)
+check(lastv("gas", "cost", "usage").value == 0, "첫 값 → 이번 달 사용량 0(기준 설정)")
+check(lastv("gas", "cost", "month") == won(0, true), "이번 달 = 기본료만 = " .. won(0, true) .. "원")
+check(lastv("gas", "cost", "today") == won(5, false), "지난 하루(5㎥) = " .. won(5, false) .. "원")
+-- 둘째 메시지: 누적 53㎥ → 이번 달 3㎥, 지난 하루 2㎥
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 53000, 0, 2000, 0))
+check(lastv("gas", "cost", "usage").value == 3, "이번 달 사용량 = 53-50 = 3㎥")
+check(lastv("gas", "cost", "month") == won(3, true), "이번 달 청구액 = 기본료+3㎥ = " .. won(3, true) .. "원")
+check(lastv("gas", "cost", "today") == won(2, false), "지난 하루(2㎥)는 월 누적과 무관 = " .. won(2, false) .. "원")
+-- 계량기 교체/리셋(누적이 줄어듦) → 이번 달 기준 재설정, 음수 안 나옴
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 10000, 0, 0, 0))
+check(lastv("gas", "cost", "usage").value == 0, "누적이 줄면 기준 재설정 → 사용량 0(음수 아님)")
+
+print("[27] 허브가 중계한 요금 요소(CMD 0x09, 펌웨어 hub_tariff)로 계산")
+reset()
+local function won2(m3, with_base)      -- 중계값: 보정 0.99, 열량 43.0, 단가 20.0, 기본 1000
+  local w = m3 * 0.99 * 43.0 * 20.0
+  if with_base then w = w + 1000 end
+  return math.floor(w * 1.1 + 0.5)
+end
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 100000, 0, 10000, 0))   -- 누적 100㎥, 하루 10㎥, 가스 기기 생성
+core.on_message(hub, CMD.TARIFF, string.pack("<I4I4I4I4", 990000, 43000000, 20000000, 1000))  -- ×1e6, 기본료 원
+core.info_changed(nil, driver._children["gas"])     -- 중복 캐시 비우고 중계값으로 다시 그림
+check(lastv("gas", "cost", "month") == won2(0, true), "중계값으로 이번 달 = 기본료 " .. won2(0, true) .. "원(수동 1375 아님)")
+check(lastv("gas", "cost", "today") == won2(10, false), "중계값으로 지난 하루(10㎥) = " .. won2(10, false) .. "원")
+check(driver._children["gas"]._fields["api_heat"] == 43.0, "열량 중계값 캐시됨(42.576 수동 아님)")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

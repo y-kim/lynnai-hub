@@ -14,6 +14,7 @@ local log = require "log"
 
 local CMD_STATE, CMD_LINKS, CMD_ROOM, CMD_GAS, CMD_PLUGINS, CMD_EXPOSE, CMD_PAIRS = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
 local CMD_FORGET = 0x08
+local CMD_TARIFF = 0x09
 local KIND_F06, KIND_F09 = 6, 9
 
 -- 한 f09 안의 방 슬롯(7바이트, 슬롯 s 는 byte[7s]). 상태 0x02=켜짐, 0x40=난방 중. 명령 선택자 a0=슬롯+1.
@@ -56,6 +57,7 @@ local status_cap = capabilities["connectbook02461.boilerStatus"]
 local room_cap = capabilities["connectbook02461.roomStatus"]
 local hw_cap = capabilities["connectbook02461.hotWaterSetpoint"]
 local ht_cap = capabilities["connectbook02461.heatType"]
+local cost_cap = capabilities["connectbook02461.gasCost"]
 
 local driver
 
@@ -643,7 +645,93 @@ local function on_room(parent, b)
   show_room(parent)
 end
 
-local function show_gas(parent)
+-- 도시가스 요금(기본값: 서울 코원, 한국도시가스협회 ’26.11 주택난방 · 각 시·도 보정계수 고시)
+-- 수동 기본값(자동 조회 꺼짐·실패 시 폴백). SD07 경기 중부1 코원 기준.
+local GAS_PREF = {
+  vcf     = { key = "gasVcf",     def = 0.9939,  api = "api_vcf" },   -- 온압보정계수
+  heat    = { key = "gasHeat",    def = 42.576,  api = "api_heat" },  -- 월평균 열량 MJ/N㎥
+  rate    = { key = "gasRate",    def = 22.6226, api = "api_rate" },  -- 주택난방 단가 원/MJ
+  base    = { key = "gasBaseFee", def = 1250,    api = "api_base" },  -- 기본료 원/월
+  billday = { key = "gasBillDay", def = 8 },         -- 검침일
+  vat     = { key = "gasVat",     def = true },      -- 부가세 10% 포함
+}
+-- 자동 조회 주소(LAN). 비었으면 nil → 수동값만.
+local function api_base(dev)
+  local b = dev and dev.preferences and dev.preferences.gasApiBase
+  if b and b ~= "" then return (b:gsub("/+$", "")) end
+end
+-- 요금 요소: 받아온 캐시(펌웨어 중계 CMD 0x09 또는 LAN 직접 조회)가 있으면 그 값, 아니면 수동 설정값.
+local function pref(dev, p)
+  if p.api then
+    local a = dev and dev:get_field(p.api)
+    if a ~= nil then return a end
+  end
+  local v = dev and dev.preferences and dev.preferences[p.key]
+  if v == nil then return p.def end
+  return v
+end
+
+-- 이번 청구 기간(월)의 시작 태그 "YYYY-MM". 오늘이 청구일 이전이면 지난달이 기준.
+local function period_tag(billday)
+  local t = os.date("*t")
+  local y, m = t.year, t.month
+  if t.day < billday then
+    m = m - 1
+    if m < 1 then m, y = 12, y - 1 end
+  end
+  return string.format("%04d-%02d", y, m)
+end
+
+-- 사용량 m³ → 요금(원). with_base 면 기본료 포함(이번 달), 아니면 사용요금만(지난 하루).
+local function gas_won(dev, m3, with_base)
+  local won = m3 * pref(dev, GAS_PREF.vcf) * pref(dev, GAS_PREF.heat) * pref(dev, GAS_PREF.rate)
+  if with_base then won = won + pref(dev, GAS_PREF.base) end
+  if pref(dev, GAS_PREF.vat) ~= false then won = won * 1.1 end
+  return math.floor(won + 0.5)
+end
+
+-- gas-heat-logger(/api/bill)에서 요금 요소(보정계수·열량·단가·기본료)를 받아 기기에 캐시한다.
+-- Edge 샌드박스는 공개 인터넷을 막으므로 gasApiBase 는 LAN 주소여야 한다(예 NAS http://192.168.0.10:8496).
+local show_gas                          -- 전방 선언(fetch_tariff 가 먼저 쓴다)
+local GAS_API_TTL = 6 * 3600           -- 성공·실패와 무관하게 조회 간격(폭주 방지)
+local gas_fetching = {}                 -- child.id -> true (동시 조회 방지)
+local function num_after(body, key)     -- 평탄한 JSON 에서 "<key>": <숫자> 뽑기
+  local s = body:match('"' .. key .. '"%s*:%s*(%-?%d[%d%.]*)')
+  return s and tonumber(s)
+end
+local function fetch_tariff(child)
+  local base = api_base(child)
+  if not base or gas_fetching[child.id] then return end
+  local region = child.preferences and child.preferences.gasRegion
+  if not region or region == "" then region = "SD07" end
+  local ok_c, cosock = pcall(require, "cosock")   -- 시뮬 등 네트워크 없는 환경에선 건너뜀
+  if not ok_c then return end
+  gas_fetching[child.id] = true
+  local url = base .. "/api/bill?m3=0&region=" .. region
+  cosock.spawn(function()
+    local ok, body = pcall(function()
+      local req = url:match("^https") and cosock.asyncify "ssl.https" or cosock.asyncify "socket.http"
+      req.TIMEOUT = 10
+      local b, code = req.request(url)
+      if code ~= 200 or not b then error("http " .. tostring(code)) end
+      return b
+    end)
+    gas_fetching[child.id] = nil
+    if not ok then require("log").warn("가스 요금 조회 실패: " .. tostring(body)); return end
+    local vcf, heat = num_after(body, "보정계수"), num_after(body, "열량")
+    local rate, base2 = num_after(body, "단가"), num_after(body, "기본요금")
+    if not (vcf and heat and rate) then require("log").warn("가스 요금 응답 파싱 실패"); return end
+    child:set_field("api_vcf", vcf, { persist = true })
+    child:set_field("api_heat", heat, { persist = true })
+    child:set_field("api_rate", rate, { persist = true })
+    if base2 then child:set_field("api_base", base2, { persist = true }) end
+    require("log").info(string.format("가스 요금 자동: 보정 %.4f 열량 %.3f 단가 %.4f", vcf, heat, rate))
+    local p = child:get_parent_device()
+    if p then show_gas(p) end                   -- 받은 값으로 다시 그림
+  end, "gas-tariff")
+end
+
+function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
   if child and faulty(parent, FAULT_GAS) then
     emit(child, "flow", status_cap.status("펄스 없음 — 센서 확인"))
@@ -658,6 +746,31 @@ local function show_gas(parent)
   emit(child, "main", capabilities.gasMeter.gasMeterVolume({ value = m3, unit = "m^3" }))
   emit(child, "main", status_cap.status("1D " .. f(day) .. " · 1H " .. f(hour)))
   emit(child, "flow", status_cap.status(flow > 0 and string.format("%.2f㎥/h", flow / 1000) or "사용 안 함"))
+
+  -- 요금: 이번 달(청구일 기준 리셋) + 지난 하루. 누적 계량값은 펌웨어 NVS 에 남아 재부팅해도 이어진다.
+  local tag = period_tag(pref(child, GAS_PREF.billday))
+  local base_m3 = child:get_field("gas_month_base")
+  if child:get_field("gas_month_tag") ~= tag or base_m3 == nil or m3 < base_m3 then
+    base_m3 = m3                                   -- 새 청구 기간·재설치·계량기 교체 → 이번 달 기준 재설정
+    child:set_field("gas_month_tag", tag, { persist = true })
+    child:set_field("gas_month_base", base_m3, { persist = true })
+  end
+  local month_m3 = m3 - base_m3
+  if month_m3 < 0 then month_m3 = 0 end
+  month_m3 = math.floor(month_m3 * 100 + 0.5) / 100     -- 0.01㎥ 로 반올림(부동소수점 꼬리 제거)
+  emit(child, "cost", cost_cap.month(gas_won(child, month_m3, true)))
+  emit(child, "cost", cost_cap.today(gas_won(child, day / 1000, false)))
+  emit(child, "cost", cost_cap.usage({ value = month_m3, unit = "m^3" }))
+
+  -- 요금 요소 자동 갱신(6시간마다, 비동기). 받으면 새 값으로 다시 그린다.
+  -- 시도 시각으로 게이트 → 주소가 안 닿아도 매 업링크마다 재시도하지 않는다.
+  if api_base(child) then
+    local last = child:get_field("api_try")
+    if not last or os.time() - last > GAS_API_TTL then
+      child:set_field("api_try", os.time(), { persist = true })
+      fetch_tariff(child)
+    end
+  end
 end
 
 local function on_gas(parent, b)
@@ -943,8 +1056,24 @@ function M.setup(drv, opts)
   SUFFIX = opts.suffix or ""
 end
 
+-- 허브가 중계한 가스 요금 요소(CMD 0x09): u32 x4 (보정계수·열량·단가 ×1e6, 기본료 원). 가스 기기에 캐시.
+local function on_tariff(parent, b)
+  if #b < 16 then return end
+  local vcf_e6, heat_e6, rate_e6, base = string.unpack("<I4I4I4I4", b)
+  local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
+  if not child then return end          -- 가스 기기 아직 없으면 버림(다음 주기에 다시 온다)
+  child:set_field("api_vcf", vcf_e6 / 1e6, { persist = true })
+  child:set_field("api_heat", heat_e6 / 1e6, { persist = true })
+  child:set_field("api_rate", rate_e6 / 1e6, { persist = true })
+  child:set_field("api_base", base, { persist = true })
+  log.info(string.format("가스 요금 중계 수신: 보정 %.4f 열량 %.3f 단가 %.4f 기본 %d",
+    vcf_e6 / 1e6, heat_e6 / 1e6, rate_e6 / 1e6, base))
+  show_gas(parent)
+end
+
 local HANDLERS = { [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
-  [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget }
+  [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
+  [CMD_TARIFF] = on_tariff }
 
 function M.info_changed(_, device)
   if not is_child(device) then return end

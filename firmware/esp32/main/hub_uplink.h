@@ -31,6 +31,7 @@
                                      * 고장인 것은 오프라인으로 보인다. 옛 펌웨어는 첫 바이트만 보낸다 */
 #define HUB_RK_CMD_PAIRS    0x07    /* 보일러↔써머스탯 짝: ([f09 MAC끝3(3)][f06 MAC끝3(3)]) * n (관리 화면 수동) */
 #define HUB_RK_CMD_FORGET   0x08    /* 기기 삭제: [종류 6|9][MAC끝3바이트] — 드라이버가 그 기기 자식들을 지운다 */
+#define HUB_RK_CMD_TARIFF   0x09    /* 가스 요금 요소: u32 x4 (보정계수·열량·단가 ×1e6, 기본료 원) — hub_tariff.c */
 
 void hub_uplink_load(void);                    /* NVS 에서 고른 통로 읽기 */
 uint8_t hub_uplink_mask(void);

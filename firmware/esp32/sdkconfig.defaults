@@ -29,3 +29,10 @@ CONFIG_WOLFSSL_ALLOW_TLS12=y
 
 # 스택 보호(네트워크 파서가 많아서) — 깨진 스택을 바로 잡아낸다
 CONFIG_COMPILER_STACK_CHECK_MODE_NORM=y
+
+# Cloudflare/Google 등 공개 HTTPS 인증서 체인의 P-384 루트(예: GTS Root R4) 검증용
+CONFIG_MBEDTLS_ECP_DP_SECP384R1_ENABLED=y
+CONFIG_MBEDTLS_ECP_DP_SECP521R1_ENABLED=y
+
+# gas.yangsu.kim 체인(WE1·GTS Root R4)이 SHA-384 서명이라 필요
+CONFIG_MBEDTLS_SHA512_C=y

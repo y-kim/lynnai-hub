@@ -17,3 +17,82 @@ components:
         version: 1
     categories:
       - name: GasMeter
+  - id: cost
+    label: 요금
+    capabilities:
+      - id: connectbook02461.gasCost
+        version: 1
+    categories:
+      - name: GasMeter
+preferences:
+  - name: gasApiBase
+    title: 요금 자동 조회 주소 (LAN)
+    description: 비우면 아래 수동값 사용. 예 http://192.168.0.10:8496 (gas-heat-logger LAN). Edge 는 공개 인터넷 불가 — LAN 주소만
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 0
+      maxLength: 64
+      default: ""
+  - name: gasRegion
+    title: 구역 코드
+    description: 자동 조회용 구역(예 SD07=경기 중부1 코원). 목록 /api/regions
+    required: false
+    preferenceType: string
+    definition:
+      stringType: text
+      minLength: 0
+      maxLength: 8
+      default: SD07
+  - name: gasVcf
+    title: 온압보정계수 (수동)
+    description: 자동 조회 꺼짐·실패 시 사용. 청구서 '보정계수'
+    required: false
+    preferenceType: number
+    definition:
+      minimum: 0.9
+      maximum: 1.1
+      default: 0.9939
+  - name: gasHeat
+    title: 열량계수 (수동, MJ/N㎥)
+    description: 자동 조회 꺼짐·실패 시 사용. 청구서 '열량계수'
+    required: false
+    preferenceType: number
+    definition:
+      minimum: 30
+      maximum: 50
+      default: 42.576
+  - name: gasRate
+    title: 단가 (수동, 원/MJ)
+    description: 자동 조회 꺼짐·실패 시 사용. 주택난방 단가(부가세 별도)
+    required: false
+    preferenceType: number
+    definition:
+      minimum: 0
+      maximum: 100
+      default: 22.6226
+  - name: gasBaseFee
+    title: 기본료 (원/월)
+    description: 월 기본요금(부가세 별도)
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 100000
+      default: 1250
+  - name: gasBillDay
+    title: 검침일 (1-28)
+    description: 가스 검침일. 이번 달 사용량·요금을 이 날 기준으로 센다
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 1
+      maximum: 28
+      default: 8
+  - name: gasVat
+    title: 부가세 10% 포함
+    required: false
+    preferenceType: boolean
+    definition:
+      default: true

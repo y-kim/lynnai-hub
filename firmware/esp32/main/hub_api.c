@@ -28,6 +28,7 @@
 #include "hub_api.h"
 #include "hub_rinnai.h"
 #include "hub_sensors.h"
+#include "hub_tariff.h"
 #include "hub_proxy.h"
 #include "hub_plugins.h"
 
@@ -382,6 +383,27 @@ static esp_err_t state_get(httpd_req_t *req)
     } else {
         CHUNK("\"gas\":null");
     }
+
+    {
+        int mode = 0, billday = 8;
+        const char *region = "";
+        double vcf = 0, heat = 0, rate = 0, base = 0;
+        long lf = 0;
+        hub_tariff_tick();
+        hub_tariff_cur(&mode, &region, &billday, &vcf, &heat, &rate, &base, &lf);
+        CHUNK(",\"tariff\":{\"mode\":\"%s\",\"region\":\"%s\",\"billday\":%d,", mode ? "manual" : "auto", region, billday);
+        CHUNK("\"vcf\":%.6f,\"heat\":%.4f,\"rate\":%.6f,\"base\":%.0f,\"fetched\":%ld,\"months\":[", vcf, heat, rate, base, lf);
+        int mn = hub_tariff_months();
+        for (int i = 0; i < mn; i++) {
+            int y, mo, st;
+            double m3;
+            uint32_t won;
+            hub_tariff_month_at(i, &y, &mo, &m3, &won, &st);
+            CHUNK("%s{\"year\":%d,\"month\":%d,\"m3\":%.2f,\"won\":%u,\"closed\":%s,\"final\":%s}",
+                  i ? "," : "", y, mo, m3, (unsigned)won, st >= 1 ? "true" : "false", st == 2 ? "true" : "false");
+        }
+        CHUNK("]}");
+    }
     httpd_resp_sendstr_chunk(req, "}");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -470,6 +492,33 @@ static esp_err_t metrics_get(httpd_req_t *req)
         if (g.reading_l != 0xFFFFFFFFu) {
             CHUNK("# TYPE lynnai_gas_meter_cubic_meters gauge\nlynnai_gas_meter_cubic_meters %lu.%03lu\n",
                   (unsigned long)(g.reading_l / 1000), (unsigned long)(g.reading_l % 1000));
+        }
+    }
+    {
+        double vcf, heat, rate, base;
+        hub_tariff_tick();
+        hub_tariff_cur(NULL, NULL, NULL, &vcf, &heat, &rate, &base, NULL);
+        CHUNK("# TYPE lynnai_gas_tariff gauge\n");
+        CHUNK("lynnai_gas_tariff{what=\"vcf\"} %.6f\nlynnai_gas_tariff{what=\"heat\"} %.4f\n", vcf, heat);
+        CHUNK("lynnai_gas_tariff{what=\"rate\"} %.6f\nlynnai_gas_tariff{what=\"base\"} %.0f\n", rate, base);
+        int mn = hub_tariff_months();
+        if (mn > 0) {
+            CHUNK("# TYPE lynnai_gas_month_cost_won gauge\n");
+            for (int i = 0; i < mn; i++) {
+                int y, mo, cl;
+                double m3;
+                uint32_t won;
+                hub_tariff_month_at(i, &y, &mo, &m3, &won, &cl);
+                CHUNK("lynnai_gas_month_cost_won{month=\"%04d-%02d\"} %u\n", y, mo, (unsigned)won);
+            }
+            CHUNK("# TYPE lynnai_gas_month_cubic_meters gauge\n");
+            for (int i = 0; i < mn; i++) {
+                int y, mo, cl;
+                double m3;
+                uint32_t won;
+                hub_tariff_month_at(i, &y, &mo, &m3, &won, &cl);
+                CHUNK("lynnai_gas_month_cubic_meters{month=\"%04d-%02d\"} %.2f\n", y, mo, m3);
+            }
         }
     }
     return httpd_resp_sendstr_chunk(req, NULL);

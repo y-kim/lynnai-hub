@@ -42,6 +42,7 @@
 #include "hub_zigbee.h"
 #include "hub_rinnai.h"
 #include "hub_sensors.h"
+#include "hub_tariff.h"
 #include "hub_uplink.h"
 #include "hub_lan.h"
 #include "hub_plugins.h"
@@ -555,6 +556,7 @@ void app_main(void)
     hub_expose_load();                      /* 항목별 노출 통로(Zigbee/LAN/Matter) */
     hub_pairs_load();                       /* 보일러↔써머스탯 수동 짝 */
     hub_sensors_start();                    /* 온습도계 + 가스 계량기 */
+    hub_tariff_init();                       /* 가스 요금 요소(열량·보정·단가) 중계 → 드라이버 */
     hub_devs_load();                        /* 등록된 린나이 기기 목록(등록 안 된 단말은 기기로 보지 않는다) */
     hub_rinnai_start();                     /* 중계 MQTT 엿보기 → Zigbee */
     hub_proxy_start();                      /* 보일러 TLS1.1 수신 → 클라우드 중계 */
