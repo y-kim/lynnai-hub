@@ -60,6 +60,8 @@ cap("connectbook02461.hotWaterSetpoint", { "setpoint" }, { "setSetpoint" })
 local htc = cap("connectbook02461.heatType", { "heatType" }, { "setHeatType" })
 cap("connectbook02461.gasCost", { "month", "today", "usage" }, {})
 
+cap("connectbook02461.gasUse", { "day", "hour", "period" }, {})
+cap("connectbook02461.gasFlow", { "flow" }, {})
 package.loaded["st.capabilities"] = capabilities
 package.loaded["log"] = { info = function() end, warn = function() end, error = function() end }
 
@@ -594,7 +596,7 @@ core.on_message(hub, CMD.PLUGINS, string.char(3, 1))               -- 온습도�
 check(room._online == false and gas._online == true, "온습도계 고장 → 온습도계만 오프라인")
 core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 가스도: 난방 중인데 펄스 없음
 check(gas._online == false, "가스 고장 → 가스 계량기 오프라인")
-check(lastv("gas", "flow", "status") == "펄스 없음 — 센서 확인", "가스 기기에 이유 표시")
+check(lastv("gas", "main", "status") == "펄스 없음 — 센서 확인", "가스 기기에 이유 표시")
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 305, 0xFFFFFFFF, 0, 0, 0))
 check(gas._online == false, "고장 중 1분마다 오는 가스 값으로 온라인이 되지 않음")
 core.info_changed(nil, room)
@@ -624,17 +626,19 @@ end
 -- 첫 메시지: 누적 50㎥(reading=50000L), 지난 하루 5㎥. 이번 달 기준이 50 으로 잡혀 사용량 0.
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 50000, 0, 5000, 0))
 core.info_changed(nil, driver._children["gas"])   -- 설정변경 경로로 중복 캐시 비우고 다시 계산(앞 시나리오 값과 겹침 방지)
-check(lastv("gas", "cost", "usage").value == 0, "첫 값 → 이번 달 사용량 0(기준 설정)")
-check(lastv("gas", "cost", "month") == won(0, true), "이번 달 = 기본료만 = " .. won(0, true) .. "원")
-check(lastv("gas", "cost", "today") == won(5, false), "지난 하루(5㎥) = " .. won(5, false) .. "원")
+check(lastv("gas", "main", "period").value == 0, "첫 값 → 이번 달 사용량 0(기준 설정)")
+check(lastv("gas", "main", "month") == won(0, true), "이번 달 = 기본료만 = " .. won(0, true) .. "원")
+check(lastv("gas", "main", "today") == won(5, false), "지난 하루(5㎥) = " .. won(5, false) .. "원")
+check(lastv("gas", "main", "day").value == 5 and lastv("gas", "main", "hour").value == 0, "하루·한 시간 사용량은 숫자(㎥)로")
+check(lastv("gas", "main", "flow").value == 0, "유량은 숫자(㎥/h)로 — 안 쓰면 0")
 -- 둘째 메시지: 누적 53㎥ → 이번 달 3㎥, 지난 하루 2㎥
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 53000, 0, 2000, 0))
-check(lastv("gas", "cost", "usage").value == 3, "이번 달 사용량 = 53-50 = 3㎥")
-check(lastv("gas", "cost", "month") == won(3, true), "이번 달 청구액 = 기본료+3㎥ = " .. won(3, true) .. "원")
-check(lastv("gas", "cost", "today") == won(2, false), "지난 하루(2㎥)는 월 누적과 무관 = " .. won(2, false) .. "원")
+check(lastv("gas", "main", "period").value == 3, "이번 달 사용량 = 53-50 = 3㎥")
+check(lastv("gas", "main", "month") == won(3, true), "이번 달 청구액 = 기본료+3㎥ = " .. won(3, true) .. "원")
+check(lastv("gas", "main", "today") == won(2, false), "지난 하루(2㎥)는 월 누적과 무관 = " .. won(2, false) .. "원")
 -- 계량기 교체/리셋(누적이 줄어듦) → 이번 달 기준 재설정, 음수 안 나옴
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 10000, 0, 0, 0))
-check(lastv("gas", "cost", "usage").value == 0, "누적이 줄면 기준 재설정 → 사용량 0(음수 아님)")
+check(lastv("gas", "main", "period").value == 0, "누적이 줄면 기준 재설정 → 사용량 0(음수 아님)")
 
 print("[27] 허브가 중계한 요금 요소(CMD 0x09, 펌웨어 hub_tariff)로 계산")
 reset()
@@ -646,8 +650,8 @@ end
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 100000, 0, 10000, 0))   -- 누적 100㎥, 하루 10㎥, 가스 기기 생성
 core.on_message(hub, CMD.TARIFF, string.pack("<I4I4I4I4", 990000, 43000000, 20000000, 1000))  -- ×1e6, 기본료 원
 core.info_changed(nil, driver._children["gas"])     -- 중복 캐시 비우고 중계값으로 다시 그림
-check(lastv("gas", "cost", "month") == won2(0, true), "중계값으로 이번 달 = 기본료 " .. won2(0, true) .. "원(수동 1375 아님)")
-check(lastv("gas", "cost", "today") == won2(10, false), "중계값으로 지난 하루(10㎥) = " .. won2(10, false) .. "원")
+check(lastv("gas", "main", "month") == won2(0, true), "중계값으로 이번 달 = 기본료 " .. won2(0, true) .. "원(수동 1375 아님)")
+check(lastv("gas", "main", "today") == won2(10, false), "중계값으로 지난 하루(10㎥) = " .. won2(10, false) .. "원")
 check(driver._children["gas"]._fields["api_heat"] == 43.0, "열량 중계값 캐시됨(42.576 수동 아님)")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))

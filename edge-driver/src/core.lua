@@ -61,6 +61,8 @@ local cost_cap = capabilities["connectbook02461.gasCost"]
 
 local driver
 
+local usage_cap = capabilities["connectbook02461.gasUse"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
+local flow_cap = capabilities["connectbook02461.gasFlow"]     -- 지금 유량
 -- 허브(부모)별 상태. boilers[mac]=해독값, thermos[mac]={z1=..}, online={["6:mac"]=true}
 local hubs = {}
 local function hub_state(parent)
@@ -734,7 +736,7 @@ end
 function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
   if child and faulty(parent, FAULT_GAS) then
-    emit(child, "flow", status_cap.status("펄스 없음 — 센서 확인"))
+    emit(child, "main", status_cap.status("펄스 없음 — 센서 확인"))
     return go_offline(child, false, true)
   end
   local v = hub_state(parent).gas
@@ -743,9 +745,14 @@ function show_gas(parent)
   mark_online(child)
   local m3 = (reading ~= 0xFFFFFFFF) and reading / 1000 or count * 0.01
   local function f(l) return string.format("%.2f㎥", l / 1000) end
+  local function r2(l) return math.floor(l / 10 + 0.5) / 100 end     -- 리터 → ㎥, 0.01 자리로
+  -- 가스 기기는 구역(component)이 main 하나다 — 구역이 여럿이면 앱이 구역마다 제목 줄(main·유량·요금)을 붙인다.
+  -- 글자 상태(1D · 1H)는 팝업·기기 카드용 요약이고, 상세 화면에는 아래 숫자 카드들이 나온다(화면 구성은 프로필의 vid).
   emit(child, "main", capabilities.gasMeter.gasMeterVolume({ value = m3, unit = "m^3" }))
   emit(child, "main", status_cap.status("1D " .. f(day) .. " · 1H " .. f(hour)))
-  emit(child, "flow", status_cap.status(flow > 0 and string.format("%.2f㎥/h", flow / 1000) or "사용 안 함"))
+  emit(child, "main", usage_cap.day({ value = r2(day), unit = "m^3" }))
+  emit(child, "main", usage_cap.hour({ value = r2(hour), unit = "m^3" }))
+  emit(child, "main", flow_cap.flow({ value = r2(flow), unit = "m³/h" }))
 
   -- 요금: 이번 달(청구일 기준 리셋) + 지난 하루. 누적 계량값은 펌웨어 NVS 에 남아 재부팅해도 이어진다.
   local tag = period_tag(pref(child, GAS_PREF.billday))
@@ -758,9 +765,12 @@ function show_gas(parent)
   local month_m3 = m3 - base_m3
   if month_m3 < 0 then month_m3 = 0 end
   month_m3 = math.floor(month_m3 * 100 + 0.5) / 100     -- 0.01㎥ 로 반올림(부동소수점 꼬리 제거)
-  emit(child, "cost", cost_cap.month(gas_won(child, month_m3, true)))
-  emit(child, "cost", cost_cap.today(gas_won(child, day / 1000, false)))
-  emit(child, "cost", cost_cap.usage({ value = month_m3, unit = "m^3" }))
+  -- 금액은 숫자만 보낸다(서버가 capability 의 기본 단위 "원"을 붙인다). 단위를 같이 보내면 허브가 거부한다 — 허브가
+  -- 들고 있는 capability 정의가 옛것(KRW 만)이라서다. 2026-11-22 에 두 번 확인: 정의를 고친 지 2시간이 지나고 드라이버를
+  -- 다시 설치해도 "Given 원 for unit. Incorrect string given" 으로 그 뒤의 요금 갱신이 전부 멈췄다.
+  emit(child, "main", cost_cap.month(gas_won(child, month_m3, true)))
+  emit(child, "main", cost_cap.today(gas_won(child, day / 1000, false)))
+  emit(child, "main", usage_cap.period({ value = month_m3, unit = "m^3" }))     -- 이번달 사용량은 사용량 카드에
 
   -- 요금 요소 자동 갱신(6시간마다, 비동기). 받으면 새 값으로 다시 그린다.
   -- 시도 시각으로 게이트 → 주소가 안 닿아도 매 업링크마다 재시도하지 않는다.
