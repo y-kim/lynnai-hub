@@ -31,6 +31,7 @@
 #include "hub_tariff.h"
 #include "hub_proxy.h"
 #include "hub_diag.h"
+#include "hub_dbgkey.h"
 #include "hub_plugins.h"
 
 static const char *TAG = "HUB_API";
@@ -160,6 +161,12 @@ deny:
     return false;
 }
 
+/* 읽기 API 접근 허용: 서버 API 토큰 또는 원격 디버그 키. 디버그 키부터 조용히 확인(맞으면 401 안 보냄). */
+static bool api_or_dbg(httpd_req_t *req)
+{
+    return hub_dbgkey_check(req) || hub_api_authorized(req);
+}
+
 /* ---------------------------------------------------------------- 해독 */
 
 typedef struct {
@@ -273,7 +280,7 @@ static void legacy_snapshot(uint8_t *f06, int *n06, uint8_t *f09, int *n09, uint
 
 static esp_err_t state_get(httpd_req_t *req)
 {
-    if (!hub_api_authorized(req)) {
+    if (!api_or_dbg(req)) {
         return ESP_OK;
     }
     uint8_t f06[64], f09[64], links;
@@ -419,7 +426,7 @@ static esp_err_t state_get(httpd_req_t *req)
 
 static esp_err_t metrics_get(httpd_req_t *req)
 {
-    if (!hub_api_authorized(req)) {
+    if (!api_or_dbg(req)) {
         return ESP_OK;
     }
     hub_dev_t dev[6];

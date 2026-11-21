@@ -26,6 +26,7 @@
 #include "hub_proxy.h"
 #include "hub_crypt.h"
 #include "hub_tariff.h"
+#include "hub_dbgkey.h"
 #include "hub_devs.h"
 #include "hub_zigbee.h"
 #include "hub_plugins.h"
@@ -470,6 +471,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_plugins_render(b, cap); FLUSH();
     hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(자동/수동 + 월별 그래프) */
     hub_crypt_render(b, cap); FLUSH();     /* 저장 데이터 암호화 */
+    hub_dbgkey_render(b, cap); FLUSH();    /* 원격 디버그 키 */
     strlcat(b, "<h2>서버 연동 (장기 기록·그래프)</h2><div class=card><p class=muted>"
                "<code>/api/v1/state</code> (JSON), <code>/metrics</code> (Prometheus), <code>/api/events</code>. ", cap);
     strlcat(b, hub_api_has_token() ? "API 토큰 <b>켜짐</b>: 요청에 <code>Authorization: Bearer &lt;토큰&gt;</code> 필요.</p>"
@@ -844,6 +846,59 @@ static esp_err_t gasnow_get(httpd_req_t *req)
     return httpd_resp_sendstr(req, b);
 }
 
+/* 원격 디버그 키 만들기/삭제 — 키는 관리자만 만든다(암호 필요). 디버그 키로는 또 못 만든다. */
+static esp_err_t dbgkey_post(httpd_req_t *req)
+{
+    log_req(req);
+    /* 관리 화면은 fetch(X-Ajax)로 보내고 카드 안쪽만 받는다. 페이지째 응답하면 주소가 /admin/dbgkey 로 남아
+     * 새로고침할 때마다 폼이 다시 보내져 키가 또 생긴다. 스크립트가 꺼진 브라우저만 예전처럼 페이지로 답한다. */
+    bool ajax = httpd_req_get_hdr_value_len(req, "X-Ajax") > 0;
+    if (!authed(req)) {
+        if (ajax) {
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_set_type(req, "text/plain; charset=utf-8");
+            return httpd_resp_sendstr(req, "로그인이 풀렸습니다 — 페이지를 새로고침해 다시 로그인하세요");
+        }
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[288], op[8] = "", tok[33] = "";       /* 한글 별명은 URL 인코딩으로 길어진다 */
+    const char *note = "잘못된 요청";
+    bool ok = false, made = false;
+    if (read_body(req, body, sizeof(body)) >= 0) {
+        form_get(body, "op", op, sizeof(op));
+        if (!strcmp(op, "new")) {
+            char alias[24] = "";
+            form_get(body, "alias", alias, sizeof(alias));
+            made = ok = hub_dbgkey_create(alias, tok) != 0;
+            note = ok ? "" : "키를 만들지 못했습니다 (가득 찼거나 저장 실패)";
+        } else if (!strcmp(op, "del")) {
+            char idxs[8] = "";
+            form_get(body, "idx", idxs, sizeof(idxs));
+            ok = idxs[0] && hub_dbgkey_delete(atoi(idxs)) != 0;
+            note = ok ? "디버그 키를 삭제했습니다" : "삭제하지 못했습니다";
+        }
+    }
+    if (ajax) {
+        const size_t cap = 4608;
+        char *b = calloc(1, cap);
+        if (!b) {
+            return httpd_resp_send_500(req);
+        }
+        hub_dbgkey_render_body(b, cap, made ? tok : NULL, note, ok);
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        esp_err_t r = httpd_resp_sendstr(req, b);
+        free(b);
+        return r;
+    }
+    if (made) {
+        char msg[120];
+        snprintf(msg, sizeof(msg), "새 디버그 키: %s  (지금만 보입니다 — 복사해 두세요)", tok);
+        return admin_page(req, msg, true);
+    }
+    return admin_page(req, note, ok);
+}
+
 /* ---------- 캡티브: 모르는 주소는 전부 설정 페이지로 ---------- */
 static esp_err_t captive_get(httpd_req_t *req)
 {
@@ -912,6 +967,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &crypt);
     const httpd_uri_t dapp = { .uri = "/admin/dev-approve", .method = HTTP_POST, .handler = dev_approve_post };
     httpd_register_uri_handler(srv, &dapp);
+    const httpd_uri_t dbgk = { .uri = "/admin/dbgkey", .method = HTTP_POST, .handler = dbgkey_post };
+    httpd_register_uri_handler(srv, &dbgk);
     const httpd_uri_t gnow = { .uri = "/admin/gas-now", .method = HTTP_GET, .handler = gasnow_get };
     httpd_register_uri_handler(srv, &gnow);
     hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
