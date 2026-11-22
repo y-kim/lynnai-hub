@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 272" width="960" role="img"
-     aria-label="ESP32 허브 구성도: 보일러 조절기(WF-S6000 등)와 온도 조절기(RICH-WCR(N) 등)가 허브 AP(Wi-Fi)로 LYNNAI 허브(ESP32-C6)에 붙고, 허브는 집 Wi-Fi 로 공유기에, 공유기는 인터넷으로 린나이 클라우드에(프록시 모드) 이어진다. 허브는 Zigbee 로 SmartThings 허브를 거쳐 SmartThings 앱에 이어진다">
+     aria-label="ESP32 허브 구성도: 보일러 제어기(WF-S6000 등)와 각방 온도 조절기(RICH-WCR(N) 등)가 허브 AP(Wi-Fi)로 LYNNAI 허브(ESP32-C6)에 붙고, 허브는 집 Wi-Fi 로 공유기에, 공유기는 인터넷으로 린나이 클라우드에(프록시 모드) 이어진다. 허브는 Zigbee 로 SmartThings 허브를 거쳐 SmartThings 앱에 이어진다">
   <title>lynnai-hub 구성도 (ESP32 허브)</title>
   <style>
     .bg    { fill: #ffffff; stroke: #d0d7de; }
@@ -33,10 +33,10 @@
 
   <!-- 린나이 기기 -->
   <rect class="box" x="24" y="42" width="156" height="56" rx="8"/>
-  <text class="name" x="102" y="66">보일러 조절기</text>
+  <text class="name" x="102" y="66">보일러 제어기</text>
   <text class="sub" x="102" y="85">WF-S6000 등</text>
   <rect class="box" x="24" y="114" width="156" height="56" rx="8"/>
-  <text class="name" x="102" y="138">온도 조절기</text>
+  <text class="name" x="102" y="138">각방 온도 조절기</text>
   <text class="sub" x="102" y="157">RICH-WCR(N) 등</text>
 
   <!-- 기기 → 허브 (허브가 띄운 AP) -->

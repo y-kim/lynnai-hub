@@ -1,83 +1,128 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 322" width="960" role="img"
-     aria-label="NAS 허브 구성도: 보일러 조절기(WF-S6000 등)와 온도 조절기(RICH-WCR(N) 등)가 집 Wi-Fi 로 공유기에 붙는다. 공유기는 DHCP 로 DNS 서버를 NAS 로 알려 준다. NAS(Docker)에는 DNS 서버와 LYNNAI 허브가 같이 돌고 공유기에 유선 LAN 으로 붙어 있다 — DNS 서버는 린나이 기기가 rkiot.net 을 물으면 NAS 주소로 답해 기기가 클라우드 대신 허브로 오게 한다. 공유기는 인터넷으로 린나이 클라우드에(프록시 모드), LAN 으로 SmartThings 허브를 거쳐 SmartThings 앱에 이어진다">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 506" width="960" role="img"
+     aria-label="NAS 허브 구성도: 린나이 기기(보일러 제어기·각방 온도 조절기)와 스마트폰은 공유기에 붙고, 공유기의 DNS 설정은 NAS 를 가리킨다. NAS 안에 DNS 서버와 LYNNAI 허브가 Docker 로 돈다. 린나이 기기가 묻는 rkiot.net 은 공유기의 DNS 를 거쳐 NAS 의 DNS 서버로 가고, DNS 서버가 NAS 주소로 답해 LYNNAI 허브로 간다. 스마트폰이 묻는 rkiot.net 과 google.com 은 같은 DNS 서버를 거치지만 진짜 주소를 받아 공유기를 통해 인터넷으로 나간다. LYNNAI 허브는 프록시 모드에서 공유기를 통해 린나이 클라우드로 이어지고, 공유기는 LAN 으로 SmartThings 허브와 앱에 이어진다">
   <title>lynnai-hub 구성도 (NAS 허브)</title>
   <style>
     .bg    { fill: #ffffff; stroke: #d0d7de; }
     .box   { fill: #f6f8fa; stroke: #57606a; stroke-width: 1.5; }
     .hub   { fill: #ddf4ff; stroke: #0969da; stroke-width: 2; }
-    .opt   { stroke-dasharray: 6 4; }
+    .dns   { fill: #ffffff; stroke: #57606a; stroke-width: 1.3; stroke-dasharray: 5 4; }
+    .inner { fill: #ffffff; stroke: #57606a; stroke-width: 1.5; }
     .group { fill: none; stroke: #8c959f; stroke-width: 1.2; }
     .line  { fill: none; stroke: #57606a; stroke-width: 1.5; }
     .head  { fill: #57606a; }
+    .bay   { fill: #d0d7de; }
+    .led   { fill: #1a7f37; }
+    .ta, .tb, .tc { fill: none; stroke-width: 2; stroke-dasharray: 7 4; stroke-linecap: round; }
+    .ta    { stroke: #cf222e; } .ha { fill: #cf222e; }
+    .tb    { stroke: #0969da; } .hb { fill: #0969da; }
+    .tc    { stroke: #1a7f37; } .hc { fill: #1a7f37; }
     text   { font-family: system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
              font-size: 14px; fill: #1f2328; text-anchor: middle; }
     .name  { font-weight: 600; }
     .sub   { font-size: 12px; fill: #57606a; }
     .via   { font-size: 12.5px; fill: #57606a; }
+    .l     { text-anchor: start; }
+    .r     { text-anchor: end; }
+    .la    { font-size: 12px; fill: #cf222e; }
+    .lb    { font-size: 12px; fill: #0969da; }
+    .lc    { font-size: 12px; fill: #1a7f37; }
     @media (prefers-color-scheme: dark) {
       .bg   { fill: #0d1117; stroke: #30363d; }
       .box  { fill: #161b22; stroke: #8b949e; }
       .hub  { fill: #0c2d6b; stroke: #58a6ff; }
+      .dns  { fill: #0d1117; stroke: #8b949e; }
+      .inner { fill: #0d1117; stroke: #8b949e; }
       .group { stroke: #6e7681; }
       .line { stroke: #8b949e; }
       .head { fill: #8b949e; }
+      .bay  { fill: #30363d; }
+      .led  { fill: #3fb950; }
+      .ta   { stroke: #ff7b72; } .ha { fill: #ff7b72; } .la { fill: #ff7b72; }
+      .tb   { stroke: #58a6ff; } .hb { fill: #58a6ff; } .lb { fill: #58a6ff; }
+      .tc   { stroke: #3fb950; } .hc { fill: #3fb950; } .lc { fill: #3fb950; }
       text  { fill: #e6edf3; }
       .sub, .via { fill: #8b949e; }
     }
   </style>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path class="head" d="M0 0 L10 5 L0 10 z"/>
-    </marker>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="head" d="M0 0 L10 5 L0 10 z"/></marker>
+    <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ha" d="M0 0 L10 5 L0 10 z"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="hb" d="M0 0 L10 5 L0 10 z"/></marker>
+    <marker id="ac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="hc" d="M0 0 L10 5 L0 10 z"/></marker>
   </defs>
 
-  <rect class="bg" x="0.5" y="0.5" width="959" height="321" rx="10"/>
+  <rect class="bg" x="0.5" y="0.5" width="959" height="505" rx="10"/>
+  <rect class="group" x="14" y="92" width="176" height="162" rx="10"/>
+  <text class="via" x="102" y="111">린나이 기기</text>
+  <rect class="box" x="24" y="120" width="156" height="52" rx="8"/>
+  <text class="name" x="102" y="142">보일러 제어기</text>
+  <text class="sub" x="102" y="160">WF-S6000 등</text>
+  <rect class="box" x="24" y="184" width="156" height="52" rx="8"/>
+  <text class="name" x="102" y="206">각방 온도 조절기</text>
+  <text class="sub" x="102" y="224">RICH-WCR(N) 등</text>
+  <rect class="box" x="319" y="22" width="150" height="50" rx="8"/>
+  <text class="name" x="394" y="43">스마트폰</text>
+  <text class="sub" x="394" y="61">린나이 앱 · 웹</text>
+  <rect class="box" x="310" y="110" width="190" height="176" rx="8"/>
+  <text class="name l" x="322" y="134">공유기</text>
+  <rect class="dns" x="322" y="190" width="92" height="56" rx="6"/>
+  <text class="name" x="346" y="212" style="font-size:13px">DNS</text>
+  <text class="sub" x="346" y="228" style="font-size:11.5px">→ NAS</text>
+  <rect class="box" x="266" y="330" width="390" height="160" rx="14"/>
+  <rect class="inner" x="280" y="342" width="38" height="30" rx="4"/>
+  <rect class="bay" x="285" y="347" width="5" height="14" rx="1"/>
+  <rect class="bay" x="292.5" y="347" width="5" height="14" rx="1"/>
+  <rect class="bay" x="300" y="347" width="5" height="14" rx="1"/>
+  <rect class="bay" x="307.5" y="347" width="5" height="14" rx="1"/>
+  <circle class="led" cx="287" cy="367" r="1.6"/>
+  <text class="name l" x="326" y="363" style="font-size:16px">NAS</text>
+  <rect class="inner" x="282" y="400" width="164" height="68" rx="8"/>
+  <text class="name" x="328" y="431">DNS 서버</text>
+  <text class="sub" x="364" y="455">린나이 기기만 NAS 로</text>
+  <rect class="hub" x="478" y="400" width="164" height="68" rx="10"/>
+  <text class="name" x="560" y="431">LYNNAI 허브</text>
+  <text class="sub" x="560" y="455">클라우드 대신 받음</text>
+  <rect class="group" x="744" y="82" width="196" height="154" rx="10"/>
+  <text class="via" x="842" y="102">인터넷</text>
+  <rect class="box" x="760" y="114" width="166" height="44" rx="8"/>
+  <text class="name" x="843" y="141">google.com</text>
+  <rect class="box" x="760" y="172" width="166" height="50" rx="8"/>
+  <text class="name" x="843" y="194">rkiot.net</text>
+  <text class="sub" x="843" y="211">린나이 클라우드</text>
+  <rect class="box" x="590" y="244" width="140" height="48" rx="8"/>
+  <text class="name" x="660" y="273">SmartThings 허브</text>
+  <rect class="box" x="754" y="244" width="126" height="48" rx="8"/>
+  <text class="name" x="817" y="273">SmartThings 앱</text>
 
-  <!-- 린나이 기기 -->
-  <rect class="box" x="24" y="42" width="156" height="56" rx="8"/>
-  <text class="name" x="102" y="66">보일러 조절기</text>
-  <text class="sub" x="102" y="85">WF-S6000 등</text>
-  <rect class="box" x="24" y="114" width="156" height="56" rx="8"/>
-  <text class="name" x="102" y="138">온도 조절기</text>
-  <text class="sub" x="102" y="157">RICH-WCR(N) 등</text>
+  <!-- physical links -->
+  <path class="line" d="M180 146 L308 146" marker-end="url(#arrow)"/>
+  <path class="line" d="M180 206 L308 206" marker-end="url(#arrow)"/>
+  <text class="via" x="246" y="180">집 Wi-Fi</text>
+  <path class="line" d="M340 288 L340 328" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <text class="via r" x="332" y="313">유선 LAN</text>
+  <path class="line" d="M500 165 L742 165" marker-end="url(#arrow)"/>
+  <text class="via" x="600" y="158">인터넷</text>
+  <path class="line" d="M500 268 L588 268" marker-end="url(#arrow)"/>
+  <text class="via" x="545" y="261">LAN</text>
+  <path class="line" d="M730 268 L752 268" marker-end="url(#arrow)"/>
 
-  <!-- 기기 → 공유기 (집 Wi-Fi) -->
-  <path class="line" d="M180 70 H328" marker-end="url(#arrow)"/>
-  <path class="line" d="M180 142 H328" marker-end="url(#arrow)"/>
-  <text class="via" x="254" y="110">집 Wi-Fi</text>
+  <!-- traffic: Rinnai rkiot.net -> router DNS -> NAS DNS server -> LYNNAI hub -->
+  <path class="ta" d="M190 238 L365 238 Q374 238 374 247 L374 423 Q374 432 383 432 L476 432" marker-end="url(#aa)"/>
+  <text class="la l" x="196" y="272">rkiot.net</text>
+  <!-- traffic: smartphone -> router DNS -> NAS DNS server -> back out through the router -->
+  <path class="tb" d="M388 72 L388 414 Q388 423 397 423 L425 423 Q434 423 434 414 L434 200 Q434 191 443 191 L758 191" marker-end="url(#ab)"/>
+  <path class="tc" d="M400 72 L400 405 Q400 414 409 414 L413 414 Q422 414 422 405 L422 145 Q422 136 431 136 L758 136" marker-end="url(#ac)"/>
+  <text class="lb r" x="382" y="96">rkiot.net</text>
+  <text class="lc l" x="406" y="96">google.com</text>
+  <!-- proxy mode: hub -> router -> Rinnai cloud -->
+  <path class="ta" d="M490 400 L490 214 Q490 205 499 205 L758 205" marker-end="url(#aa)"/>
+  <text class="la l" x="498" y="370">프록시 모드</text>
 
-  <!-- 공유기: DHCP 가 나눠 주는 DNS 서버를 NAS 로 바꿔 둔다 -->
-  <rect class="box" x="330" y="52" width="170" height="108" rx="8"/>
-  <text class="name" x="415" y="103">공유기</text>
-  <text class="sub" x="415" y="123">DHCP: DNS 서버 = NAS</text>
-
-  <!-- 공유기 ↔ NAS -->
-  <path class="line" d="M415 162 V202" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
-  <text class="via" x="456" y="187">유선 LAN</text>
-
-  <!-- NAS (Docker): DNS 서버 + 허브 -->
-  <rect class="group" x="236" y="204" width="358" height="98" rx="10"/>
-  <text class="via" x="415" y="223">NAS (Docker)</text>
-  <rect class="box" x="248" y="232" width="160" height="58" rx="8"/>
-  <text class="name" x="328" y="257">DNS 서버</text>
-  <text class="sub" x="328" y="276">rkiot.net → NAS 주소</text>
-  <rect class="hub" x="422" y="232" width="160" height="58" rx="10"/>
-  <text class="name" x="502" y="257" style="font-size:15px">LYNNAI 허브</text>
-  <text class="sub" x="502" y="276">클라우드 대신 받음</text>
-
-  <!-- 공유기 → 린나이 클라우드 (프록시 모드에서만) -->
-  <path class="line opt" d="M500 88 H770" marker-end="url(#arrow)"/>
-  <text class="via" x="636" y="79">인터넷</text>
-  <rect class="box opt" x="772" y="58" width="164" height="60" rx="8"/>
-  <text class="name" x="854" y="84">린나이 클라우드</text>
-  <text class="sub" x="854" y="103">프록시 모드</text>
-
-  <!-- 공유기 → SmartThings -->
-  <path class="line" d="M500 130 H695 V235" marker-end="url(#arrow)"/>
-  <text class="via" x="598" y="121">LAN</text>
-  <rect class="box" x="620" y="237" width="150" height="48" rx="8"/>
-  <text class="name" x="695" y="266">SmartThings 허브</text>
-  <path class="line" d="M770 261 H798" marker-end="url(#arrow)"/>
-  <rect class="box" x="800" y="237" width="136" height="48" rx="8"/>
-  <text class="name" x="868" y="266">SmartThings 앱</text>
+  <!-- legend -->
+  <path class="ta" d="M686 402 L716 402" marker-end="url(#aa)"/>
+  <text class="l" x="724" y="406" style="font-size:11.5px">린나이 기기의 rkiot.net → LYNNAI 허브</text>
+  <path class="tb" d="M686 426 L716 426" marker-end="url(#ab)"/>
+  <text class="l" x="724" y="430" style="font-size:11.5px">스마트폰의 rkiot.net → 린나이 클라우드</text>
+  <path class="tc" d="M686 450 L716 450" marker-end="url(#ac)"/>
+  <text class="l" x="724" y="454" style="font-size:11.5px">스마트폰의 google.com → 인터넷</text>
 </svg>

@@ -11,11 +11,11 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 
 **ESP32 허브** — [설치·운영 안내](docs/esp32-hub.md)
 
-![구성도: 보일러 조절기(WF-S6000 등)·온도 조절기(RICH-WCR(N) 등) → Wi-Fi(허브 AP) → LYNNAI 허브(ESP32-C6) → 집 Wi-Fi → 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 허브 → Zigbee → SmartThings 허브 → SmartThings 앱](docs/overview.svg)
+![구성도: 보일러 제어기(WF-S6000 등)·각방 온도 조절기(RICH-WCR(N) 등) → Wi-Fi(허브 AP) → LYNNAI 허브(ESP32-C6) → 집 Wi-Fi → 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 허브 → Zigbee → SmartThings 허브 → SmartThings 앱](docs/overview.svg)
 
 **NAS 허브** (ESP32 없이 NAS 도커로) — [설치·운영 안내](docs/nas-hub.md)
 
-![NAS 허브 구성도: 보일러 조절기(WF-S6000 등)·온도 조절기(RICH-WCR(N) 등) → 집 Wi-Fi → 공유기(DHCP 의 DNS 서버 = NAS) ↔ 유선 LAN ↔ NAS(Docker: DNS 서버 + LYNNAI 허브), 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 공유기 → LAN → SmartThings 허브 → SmartThings 앱](docs/overview-nas.svg)
+![NAS 허브 구성도: 집 안 기기는 공유기가 알려 준 DNS 서버(NAS 를 가리킴)에 주소를 묻는다. NAS 에 DNS 서버와 LYNNAI 허브가 Docker 로 돈다. 린나이 기기(보일러 제어기·각방 온도 조절기)의 rkiot.net 은 NAS 주소로 답해 LYNNAI 허브로, 스마트폰의 rkiot.net·google.com 은 진짜 주소 그대로 인터넷으로 간다. 허브 → LAN → SmartThings, 프록시 모드에서는 허브 → 린나이 클라우드](docs/overview-nas.svg)
 
 ## 빠른 시작
 
@@ -58,7 +58,7 @@ SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 �
     <td valign="top" width="33%">
       <img src="docs/screen-devices.svg" alt="기기 목록 화면: 방마다 각방 온도조절기(현재 온도와 난방·예약·꺼짐 상태), 다용도실에 LYNNAI Hub·보일러 컨트롤러·가스 계량기·온습도계 카드">
       <br><br>
-      <img src="docs/screen-gas.svg" alt="가스 계량기 화면: 24시간·1시간·이번달 사용량, 계량기 지침, 유량, 이번달 예상 금액·지난 24시간 요금">
+      <img src="docs/screen-gas.svg" alt="가스 계량기 화면: 24시간·1시간·이번달 사용량, 계량기 지침, 유량, 이번달 예상 금액과 지난 24시간 요금(금액 옆 막대의 끝은 사용량 경고 기준)">
     </td>
     <td valign="top" width="33%">
       <img src="docs/screen-boiler.svg" alt="보일러 컨트롤러 화면: 전원·난방·외출·온수·온수 예열 구역마다 켜짐/꺼짐 스위치, 난방 구역에 온도조절 모드(온돌)와 난방 온도 설정, 온수 구역에 수온 설정">
@@ -128,6 +128,14 @@ keeps working) or works on its own (standalone mode), and talks to SmartThings o
 
 > ⚠️ Unofficial, reverse‑engineered project. Not affiliated with, endorsed by, or supported by Rinnai.
 > `lynnai` is a placeholder name to avoid trademark use. Use on hardware you own, at your own risk.
+
+**ESP32 hub**
+
+![Overview: boiler controller (e.g. WF-S6000) and room thermostat (e.g. RICH-WCR(N)) → Wi-Fi (hub AP) → LYNNAI hub (ESP32-C6) → home Wi-Fi → router → internet → Rinnai cloud (proxy mode); hub → Zigbee → SmartThings hub → SmartThings app](docs/overview.en.svg)
+
+**NAS hub** (no ESP32 — Docker on a NAS)
+
+![NAS hub overview: devices ask the DNS server handed out by the router, which points to the NAS. The NAS runs a DNS server and the LYNNAI hub in Docker. rkiot.net from Rinnai devices is answered with the NAS address and goes to the LYNNAI hub; rkiot.net and google.com from a smartphone get the real address and go to the internet. Hub → LAN → SmartThings, and in proxy mode hub → Rinnai cloud](docs/overview-nas.en.svg)
 
 - `firmware/esp32/` — the ESP32‑C6 hub firmware (ESP‑IDF v5.5). Setup and troubleshooting:
   [docs/esp32-hub.md](docs/esp32-hub.md) (Korean).
