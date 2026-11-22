@@ -29,6 +29,7 @@
 #include "hub_zigbee.h"
 #include "hub_zb_rinnai.h"
 #include "hub_wifi.h"
+#include "hub_ota.h"
 
 static const char *TAG = "HUB_BBOX";
 
@@ -39,7 +40,7 @@ static const char *TAG = "HUB_BBOX";
 #define GTAIL_CAP 2560          /* 그 밖의 줄: 마지막 부분(고리) */
 #define BB_LINE 200
 #define MAGIC    0x62627832u    /* "bbx2" */
-#define HIST_N   12
+#define HIST_N   48
 #define FC_TICK_MS 5000
 
 typedef struct {
@@ -338,8 +339,25 @@ static uint8_t s_scan_on_fail = 1;
 /* 주기 측정(붙어 있는 동안 s_auto_s 초마다 스캔 한 번): 비콘 수신률이 시간대에 따라 어떻게 변하나. 0 = 끔 */
 static uint16_t s_auto_s;
 static uint32_t s_auto_total, s_auto_hit, s_auto_err;
+/* 주기 재부팅(재가입 실패를 다시 잡으려는 시험): s_rb_min 분마다 일부러 재시작한다. 0 = 끔.
+ * 붙어 있고 이번 부팅에 실패가 한 번도 없을 때만 한다 — 실패가 잡힌 부팅(되살리기로 올라온 부팅 포함)은 그대로 둬서
+ * 직전 부팅 기록이 덮이지 않게 하고, 붙지 못한 채 재시작해 되살리기 횟수를 쓰는 일도 없게 한다. */
+static uint16_t s_rb_min;
+static uint32_t s_rb_from;                  /* 켠 때의 부팅 번호(그 뒤로 몇 번 재부팅했나 세려고) */
+static bool s_rb_resume;                    /* 실패가 잡혀 멈춘 부팅에서 "그래도 계속" 을 받았나 */
 static int8_t s_auto_rssi, s_auto_ed;       /* 마지막으로 들은 우리 망 비콘의 신호 / 우리 채널 소음 */
 static int8_t s_scan_rssi, s_scan_ed;       /* 스캔 한 번의 값(콜백이 채움) */
+/* 가입 최소 신호 품질(LQI): 스택은 비콘의 품질이 이 값보다 낮은 부모는 고르지 않는다. 0xff = 스택 기본값 그대로.
+ * 스택 기본값은 75 인데, 허브와 SmartThings 허브가 방 하나쯤 떨어지면 비콘 품질이 30~80 을 오간다. 그러면 부팅 때
+ * 재가입이 "붙을 부모 없음(0x2c3)" 으로 연달아 실패하고, 끝내 가입 정보를 잃는다 — 비콘은 다 들리는데도(2026-11-22
+ * 11:01 의 실패: 직후 스캔 8번 중 8번 들림, 품질 31~77). 40 으로 낮춘 뒤로는 재부팅마다 1초에 붙었다.
+ * 40 인 까닭: 코디네이터는 거의 늘 통과하고, 훨씬 약한 라우터(품질 12~30)는 부모로 고르지 않게. */
+#define MIN_JOIN_LQI_DEFAULT 40
+static uint8_t s_minlqi = MIN_JOIN_LQI_DEFAULT;
+static uint8_t s_minlqi_boot = 0xff;        /* 이번 부팅에 스택이 들고 있던 값(우리가 바꾸기 전) */
+static uint8_t s_scan_lqa;                  /* 스캔 한 번에서 우리 망 비콘 가운데 가장 좋은 품질 */
+static uint8_t s_auto_lqa;                  /* 주기 측정의 마지막 값 */
+static uint32_t s_lqa_hist[8];              /* 주기 측정에서 본 품질 분포(32 단위 8칸) */
 
 static void probe_out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void probe_out(const char *fmt, ...)
@@ -367,6 +385,9 @@ static void scan_active_cb(ezb_nwk_active_scan_result_t *r, void *ctx)
     if (r->panid == s_net_pan) {
         s_scan_ours++;
         s_scan_rssi = r->rssi;
+        if (r->lqa > s_scan_lqa) {
+            s_scan_lqa = r->lqa;
+        }
     }
     size_t o = strlen(s_scan_line);
     snprintf(s_scan_line + o, sizeof(s_scan_line) - o, " [%04x pan=%04x ch=%d lqa=%d rssi=%d upd=%d pj=%d rc=%d edc=%d]",
@@ -401,6 +422,7 @@ static int do_scan(uint8_t type, uint8_t dur, uint32_t mask)
     }
     s_scan_line[0] = 0;
     s_scan_n = s_scan_ours = 0;
+    s_scan_lqa = 0;
     xSemaphoreTake(s_scan_done, 0);
     esp_zigbee_lock_acquire(portMAX_DELAY);
     ezb_err_t e = ezb_nwk_scan(&q);
@@ -424,6 +446,8 @@ static void probe_task(void *arg)
             if (s_scan_ours) {
                 s_auto_hit++;
                 s_auto_rssi = s_scan_rssi;
+                s_auto_lqa = s_scan_lqa;
+                s_lqa_hist[s_scan_lqa >> 5]++;
             } else {
                 hub_bbox_note("auto scan miss: dur=%d beacons=%d%s (hit %lu/%lu)", q.dur, s_scan_n, s_scan_line,
                               (unsigned long)s_auto_hit, (unsigned long)s_auto_total);
@@ -534,6 +558,19 @@ esp_err_t hub_bbox_scan_http(httpd_req_t *req)
                 }
             }
         }
+        if (httpd_query_key_value(q, "minlqi", v, sizeof(v)) == ESP_OK) {      /* 가입 최소 신호 품질(0~254, 255 = 스택 기본값) */
+            int m = atoi(v);
+            if (m >= 0 && m <= 255) {
+                s_minlqi = (uint8_t)m;
+                bbox_set_u8("minlqi", s_minlqi);
+                if (hub_zigbee_is_ready()) {        /* 지금도 바로 적용(255 면 이번 부팅의 스택 값으로 되돌림) */
+                    esp_zigbee_lock_acquire(portMAX_DELAY);
+                    ezb_nwk_set_min_join_lqi(s_minlqi != 0xff ? s_minlqi : s_minlqi_boot);
+                    esp_zigbee_lock_release();
+                }
+                hub_bbox_note("min_join_lqi set: %d", s_minlqi);
+            }
+        }
         if (httpd_query_key_value(q, "onfail", v, sizeof(v)) == ESP_OK) {
             s_scan_on_fail = atoi(v) ? 1 : 0;
             bbox_set_u8("scanfail", s_scan_on_fail);
@@ -556,17 +593,24 @@ esp_err_t hub_bbox_scan_http(httpd_req_t *req)
         };
         started = probe_start(r);
     }
-    int bdb_dur = -1;
+    int bdb_dur = -1, minlqi = -1;
     if (hub_zigbee_is_ready()) {
         esp_zigbee_lock_acquire(portMAX_DELAY);
         bdb_dur = ezb_bdb_get_scan_duration();
+        minlqi = ezb_nwk_get_min_join_lqi();
         esp_zigbee_lock_release();
     }
-    char hdr[280];
-    snprintf(hdr, sizeof(hdr), "# zbscan: running=%d started=%d bdb_scan_dur=%d setdur=%d onfail=%d net=pan %04x ch %d\n"
-             "# auto: every %us, hit %lu of %lu (err %lu), last rssi %d, noise %d\n",
-             s_probe_running, started, bdb_dur, s_scandur, s_scan_on_fail, s_net_pan, s_net_ch, s_auto_s,
-             (unsigned long)s_auto_hit, (unsigned long)s_auto_total, (unsigned long)s_auto_err, s_auto_rssi, s_auto_ed);
+    char hdr[520];
+    int hl = snprintf(hdr, sizeof(hdr), "# zbscan: running=%d started=%d bdb_scan_dur=%d setdur=%d onfail=%d net=pan %04x ch %d\n"
+             "# min_join_lqi: now=%d stack_default=%d set=%d\n"
+             "# auto: every %us, hit %lu of %lu (err %lu), last rssi %d lqa %d, noise %d\n# auto lqa histogram:",
+             s_probe_running, started, bdb_dur, s_scandur, s_scan_on_fail, s_net_pan, s_net_ch, minlqi, s_minlqi_boot, s_minlqi,
+             s_auto_s, (unsigned long)s_auto_hit, (unsigned long)s_auto_total, (unsigned long)s_auto_err, s_auto_rssi,
+             s_auto_lqa, s_auto_ed);
+    for (int i = 0; i < 8 && hl < (int)sizeof(hdr) - 24; i++) {
+        hl += snprintf(hdr + hl, sizeof(hdr) - (size_t)hl, " %d-%d:%lu", i * 32, i * 32 + 31, (unsigned long)s_lqa_hist[i]);
+    }
+    snprintf(hdr + hl, sizeof(hdr) - (size_t)hl, "\n");
     httpd_resp_sendstr_chunk(req, hdr);
     char *copy = malloc(PROBE_TXT);
     if (copy) {
@@ -618,6 +662,11 @@ void hub_bbox_zb_boot(uint32_t fc)
     if (s_scandur != 0xff) {                        /* 시험용 설정: 가입·재가입 스캔을 더 오래(여기는 스택 문맥 — 잠금 불필요) */
         ezb_bdb_set_scan_duration(s_scandur);
     }
+    s_minlqi_boot = ezb_nwk_get_min_join_lqi();
+    if (s_minlqi != 0xff) {
+        ezb_nwk_set_min_join_lqi(s_minlqi);
+    }
+    hub_bbox_note("zb boot: min_join_lqi stack=%d set=%d now=%d", s_minlqi_boot, s_minlqi, ezb_nwk_get_min_join_lqi());
     if (!s_hmx) {
         return;
     }
@@ -681,13 +730,18 @@ void hub_bbox_zb_joined(void)
     }
     xSemaphoreTake(s_hmx, portMAX_DELAY);
     rec_t *e = cur_rec();
+    bool after_fail = false;
     if (e && e->result != 1) {
         e->result = 1;
         e->join_s = clamp16(up_s());
         radio_into(e);
         hist_save();
+        after_fail = e->fails > 0;
     }
     xSemaphoreGive(s_hmx);
+    if (after_fail) {                               /* 실패 끝에 붙었다 — 붙은 순간의 비콘 품질을 실패 때와 견줄 수 있게 */
+        probe_start((probe_req_t){ .n = 4, .dur = 3, .gap_ms = 200 });
+    }
 }
 
 void hub_bbox_zb_left(uint8_t leave_type, bool while_up)
@@ -742,6 +796,9 @@ void hub_bbox_before_restart(void)
     hub_bbox_note("restart: fc_last=%lu", (unsigned long)l.fc);
 }
 
+/* 이번 부팅에 실패 흔적이 없나(있으면 주기 재부팅을 멈춘다) */
+static bool rb_clean(const rec_t *e) { return !e->fails && !e->restore_try; }
+
 static void fc_task(void *arg)
 {
     (void)arg;
@@ -764,7 +821,15 @@ static void fc_task(void *arg)
             e->epoch = (uint32_t)(now - (time_t)up_s());
             hist_save();
         }
+        bool rb = s_rb_min && e && e->result == 1 && (rb_clean(e) || s_rb_resume) && !s_probe_running &&
+                  up_s() >= (uint32_t)s_rb_min * 60;
         xSemaphoreGive(s_hmx);
+        if (rb) {
+            hub_bbox_note("periodic reboot: up %lus (every %u min)", (unsigned long)up_s(), s_rb_min);
+            ESP_LOGW(TAG, "주기 재부팅(%u분마다)", s_rb_min);
+            hub_ota_planned_reboot();
+            esp_restart();
+        }
     }
 }
 
@@ -830,8 +895,11 @@ void hub_bbox_start(void)
             s_zb_lvl = lvl;
         }
         nvs_get_u8(h, "scandur", &s_scandur);
+        nvs_get_u8(h, "minlqi", &s_minlqi);
         nvs_get_u8(h, "scanfail", &s_scan_on_fail);
         nvs_get_u16(h, "scanauto", &s_auto_s);
+        nvs_get_u16(h, "rbmin", &s_rb_min);
+        nvs_get_u32(h, "rbfrom", &s_rb_from);
         sz = sizeof(b);
         if (nvs_get_blob(h, "net", b, &sz) == ESP_OK && sz == sizeof(b)) {
             s_net_pan = (uint16_t)(b[0] | (b[1] << 8));
@@ -983,7 +1051,7 @@ esp_err_t hub_bbox_http(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    char q[48] = "", part[8] = "", v[8] = "";
+    char q[64] = "", part[8] = "", v[8] = "";
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
         httpd_query_key_value(q, "part", part, sizeof(part));
         if (httpd_query_key_value(q, "zblvl", v, sizeof(v)) == ESP_OK) {
@@ -998,11 +1066,43 @@ esp_err_t hub_bbox_http(httpd_req_t *req)
                 }
             }
         }
+        if (httpd_query_key_value(q, "reboot", v, sizeof(v)) == ESP_OK) {      /* 주기 재부팅 간격(분, 0 = 끔, 5~1440) */
+            int m = atoi(v);
+            nvs_handle_t h;
+            xSemaphoreTake(s_hmx, portMAX_DELAY);
+            rec_t *e = cur_rec();
+            if (m > 0 && !s_rb_min && e) {
+                s_rb_from = e->boot_no;
+            }
+            s_rb_min = (uint16_t)(m <= 0 ? 0 : m < 5 ? 5 : m > 1440 ? 1440 : m);
+            s_rb_resume = s_rb_min != 0;            /* 멈춰 있던 부팅에서 다시 켜면 이어서 한다 */
+            xSemaphoreGive(s_hmx);
+            if (nvs_open("bbox", NVS_READWRITE, &h) == ESP_OK) {
+                nvs_set_u16(h, "rbmin", s_rb_min);
+                nvs_set_u32(h, "rbfrom", s_rb_from);
+                nvs_commit(h);
+                nvs_close(h);
+            }
+            hub_bbox_note("periodic reboot set: every %u min", s_rb_min);
+        }
     }
     bool all = !part[0];
-    char hdr[96];
-    snprintf(hdr, sizeof(hdr), "# up_s=%lu zblvl=%d prev=%s zb_stack_free=%d\n", (unsigned long)up_s(), s_zb_lvl,
-             s_prev_ok ? "yes" : "no", hub_zigbee_stack_free());
+    char hdr[224];
+    int hl = snprintf(hdr, sizeof(hdr), "# up_s=%lu zblvl=%d prev=%s zb_stack_free=%d\n", (unsigned long)up_s(), s_zb_lvl,
+                      s_prev_ok ? "yes" : "no", hub_zigbee_stack_free());
+    xSemaphoreTake(s_hmx, portMAX_DELAY);
+    rec_t *e = cur_rec();
+    if (!s_rb_min) {
+        snprintf(hdr + hl, sizeof(hdr) - (size_t)hl, "# periodic reboot: off\n");
+    } else if (e) {
+        bool held = !(rb_clean(e) || s_rb_resume);
+        long left = (long)s_rb_min * 60 - (long)up_s();
+        snprintf(hdr + hl, sizeof(hdr) - (size_t)hl, "# periodic reboot: every %u min, %lu boots since on, %s (next in %lds)\n",
+                 s_rb_min, (unsigned long)(e->boot_no - s_rb_from),
+                 held ? "HELD: this boot saw a join failure" : e->result == 1 ? "armed" : "waiting for join",
+                 held ? -1L : left < 0 ? 0L : left);
+    }
+    xSemaphoreGive(s_hmx);
     httpd_resp_sendstr_chunk(req, hdr);
     if (all || !strcmp(part, "hist")) {
         send_hist(req);
