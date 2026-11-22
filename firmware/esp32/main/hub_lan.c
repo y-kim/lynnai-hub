@@ -435,5 +435,5 @@ void hub_lan_start(const char *device_id)
     snprintf(s_id, sizeof(s_id), "%s", device_id);
     tokens_load();
     xTaskCreate(server_task, "hub_lan", 3072, NULL, 4, NULL);
-    xTaskCreate(ssdp_task, "hub_ssdp", 3072, NULL, 3, NULL);
+    xTaskCreate(ssdp_task, "hub_ssdp", 4096, NULL, 3, NULL);   /* 3072 일 때 스택이 444B 밖에 안 남았다(실측) */
 }

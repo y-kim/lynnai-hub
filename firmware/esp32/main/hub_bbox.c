@@ -25,6 +25,7 @@
 #endif
 
 #include "hub_bbox.h"
+#include "esp_heap_caps.h"
 #include "hub_radio.h"
 #include "hub_zigbee.h"
 #include "hub_zb_rinnai.h"
@@ -1047,6 +1048,32 @@ static void send_slot(httpd_req_t *req, int idx, bool live, const char *title)
     free(copy);
 }
 
+/* part=tasks: 힙 요약과 태스크 목록(이름, 스택 최소 여유 바이트, 우선순위). 스택 크기 자체는 FreeRTOS 가 알려 주지 않는다. */
+static void send_tasks(httpd_req_t *req)
+{
+    char line[160];
+    snprintf(line, sizeof(line), "== heap: free %lu, min %lu, largest %lu, tasks %u ==\n",
+             (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size(),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT), (unsigned)uxTaskGetNumberOfTasks());
+    httpd_resp_sendstr_chunk(req, line);
+#if configUSE_TRACE_FACILITY
+    UBaseType_t n = uxTaskGetNumberOfTasks() + 4;
+    TaskStatus_t *t = calloc(n, sizeof(*t));
+    if (!t) {
+        return;
+    }
+    n = uxTaskGetSystemState(t, n, NULL);
+    for (UBaseType_t i = 0; i < n; i++) {
+        snprintf(line, sizeof(line), "task %-16s stack_min_free=%-6lu prio=%u\n", t[i].pcTaskName,
+                 (unsigned long)t[i].usStackHighWaterMark, (unsigned)t[i].uxCurrentPriority);
+        httpd_resp_sendstr_chunk(req, line);
+    }
+    free(t);
+#else
+    httpd_resp_sendstr_chunk(req, "(task list needs CONFIG_FREERTOS_USE_TRACE_FACILITY)\n");
+#endif
+}
+
 esp_err_t hub_bbox_http(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
@@ -1112,6 +1139,9 @@ esp_err_t hub_bbox_http(httpd_req_t *req)
     }
     if (all || !strcmp(part, "cur")) {
         send_slot(req, s_nv.cur, true, "this boot");
+    }
+    if (!strcmp(part, "tasks")) {                    /* 태스크마다 스택이 가장 적게 남았던 양 — 스택 크기를 근거 있게 잡으려고 */
+        send_tasks(req);
     }
     return httpd_resp_send_chunk(req, NULL, 0);
 }
