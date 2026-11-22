@@ -35,6 +35,7 @@
 #include "hub_events.h"
 #include "hub_api.h"
 #include "hub_room_calc.h"
+#include "hub_bbox.h"
 
 static const char *TAG = "HUB_SENSORS";
 
@@ -74,6 +75,18 @@ static uint32_t s_count_unsaved;     /* 아직 NVS 에 안 쓴 펄스 수 */
 /* 센서마다 독립: 세대 번호가 바뀌면 그 센서 태스크만 스스로 종료한다(다른 센서는 안 건드림). */
 static volatile uint32_t s_gas_gen, s_room_gen;
 static volatile bool s_gas_alive, s_room_alive;
+/* 일부러 재시작할 때(주기 재부팅, 펌웨어 올리기 등) 리드 스위치의 상태를 플래시로 넘겨준다. 재시작부터 가스 태스크가
+ * 다시 돌 때까지 약 2초는 스위치를 못 본다. 그 사이에 자석이 와서 닫혔고 다시 볼 때도 닫혀 있으면, 예전에는 "이미 센
+ * 닫힘인지" 몰라서 세지 않았다(그 펄스를 잃음). 재시작 직전에 "다음 닫힘은 새 펄스" 였는지를 넘겨주면 그 펄스를 센다.
+ * RAM 이 아니라 플래시에 두는 까닭: 다른 빌드로 넘어가는 펌웨어 업데이트에서도 이어져야 한다(RAM 은 배치가 달라진다).
+ * 부팅할 때 한 번 읽고 바로 지운다 — 전원이 끊겼다 켜졌거나 저절로 재시작했으면 값이 없고, 예전처럼 세지 않는
+ * 쪽(두 번 세지 않는 쪽)으로 둔다. */
+#define GK_NONE 0
+#define GK_NEXT_NEW 1                         /* 다음에 닫히면(또는 지금 닫혀 있는 것이) 새 펄스 */
+#define GK_COUNTED 2                          /* 닫혀 있고 이미 셌다 */
+static uint8_t s_gas_keep;                    /* 부팅 때 플래시에서 읽은 값(첫 가스 태스크가 한 번 쓴다) */
+static volatile bool s_gas_next_new;          /* 지금 닫히면(또는 닫혀 있는 것이) 새 펄스인가 — 가스 태스크가 갱신 */
+static volatile uint32_t s_gas_closed_ms;     /* 마지막으로 닫혀 있던 길이(자석이 스위치 앞에 머문 시간) */
 /* 지금 돌고 있는 설정(바뀐 센서만 다시 적용하려고 비교용) */
 static bool s_run_gas_on, s_run_room_on;
 static int s_run_gas_pin = -1, s_run_sda = -1, s_run_scl = -1, s_run_rtype = -1;
@@ -217,6 +230,14 @@ static void gas_load(void)
         if (nvs_get_blob(h, "bk", &s_carry, &sz) != ESP_OK || sz != sizeof(s_carry) || s_carry.magic != BK_MAGIC) {
             memset(&s_carry, 0, sizeof(s_carry));    /* 없거나 다른 형식 — 이번 부팅부터 센다 */
         }
+        s_gas_keep = GK_NONE;                        /* 재시작 직전에 넘겨준 스위치 상태: 한 번 읽고 지운다 */
+        if (hs_get_u8(h, NS, "keep", &s_gas_keep) == ESP_OK && s_gas_keep != GK_NONE) {
+            hs_erase(h, "keep");
+            nvs_commit(h);
+        }
+        if (s_gas_keep != GK_NEXT_NEW && s_gas_keep != GK_COUNTED) {
+            s_gas_keep = GK_NONE;
+        }
         nvs_close(h);
     }
 }
@@ -271,6 +292,8 @@ static gas_view_t gas_view(void)
     xSemaphoreGive(s_lock);
     v.hour_l = hour * GAS_STEP_L;
     v.day_l = day * GAS_STEP_L;
+    v.closed_ms = s_gas_closed_ms;
+    v.closed_now = s_run_gas_on && s_run_gas_pin >= 0 && gpio_get_level(s_run_gas_pin) == 0;
     return v;
 }
 
@@ -303,7 +326,7 @@ static void gas_pulse(void)
 static void send_gas(void);
 
 /* 일부러 재시작하기 직전(OTA·재부팅 버튼·Zigbee 되살리기): 아직 안 쓴 누적 펄스와 사용량 칸을 플래시에 쓴다 */
-void hub_sensors_flush(void)
+static void gas_flush(void)
 {
     if (!s_lock || !s_run_gas_on) {
         return;
@@ -313,6 +336,19 @@ void hub_sensors_flush(void)
         gas_save(false);
     }
     bk_save();
+}
+
+void hub_sensors_flush(void)
+{
+    gas_flush();
+    if (s_run_gas_on && s_gas_alive) {              /* 재시작 뒤의 가스 태스크에게 스위치 상태를 넘긴다 */
+        nvs_handle_t h;
+        if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+            hs_set_u8(h, "keep", s_gas_next_new ? GK_NEXT_NEW : GK_COUNTED);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
 }
 
 /* GAS_WATCH_S 초마다: 난방 중인 시간을 쌓고, 한도를 넘도록 펄스가 없으면 고장으로 본다 */
@@ -344,6 +380,15 @@ static void gas_task(void *arg)
     gpio_config(&io);
     int low_ms = 0, high_ms = 0;
     bool armed = false;
+    if (s_gas_keep != GK_NONE) {                     /* 일부러 한 재시작: 직전 상태를 이어받는다 */
+        armed = s_gas_keep == GK_NEXT_NEW;
+        bool closed = gpio_get_level(pin) == 0;
+        ESP_LOGI(TAG, "가스: 재시작 전 상태 이어받음 — 다음 닫힘은 %s, 지금 스위치 %s", armed ? "새 펄스" : "이미 센 것",
+                 closed ? "닫힘" : "열림");
+        hub_bbox_note("gas: switch state kept over restart: next_new=%d closed_now=%d count=%lu", armed, closed,
+                      (unsigned long)s_count);       /* 부팅 기록에도 남긴다(닫힘 + 새 펄스 = 재시작 틈에 온 펄스를 살린 경우) */
+    }
+    s_gas_keep = GK_NONE;
     int64_t next_gas = 0, next_save = 60LL * 1000000, next_watch = 0, next_bk = 0;
     for (;;) {
         if (gen != s_gas_gen) {                        /* 가스 설정이 바뀜 — 이 태스크만 종료 */
@@ -358,12 +403,17 @@ static void gas_task(void *arg)
                 armed = false;
                 gas_pulse();
             }
+            s_gas_next_new = armed;                    /* 닫혀 있고 아직 안 셌으면 새 펄스, 셌으면 아님 */
         } else {
+            if (low_ms) {
+                s_gas_closed_ms = (uint32_t)low_ms;
+            }
             low_ms = 0;
             high_ms += GAS_POLL_MS;
             if (high_ms >= GAS_HIGH_MS) {
                 armed = true;
             }
+            s_gas_next_new = true;                     /* 열려 있다 — 다음에 닫히면 새 펄스 */
         }
         /* 보고: 펄스가 오면 곧바로(최소 5초 간격), 아니면 1분마다. 센 적·보정한 적 없으면 안 보냄 */
         int64_t t = esp_timer_get_time();
@@ -394,11 +444,12 @@ static void gas_task(void *arg)
 static void send_gas(void)
 {
     gas_view_t v = gas_view();
-    uint32_t p[5] = { v.count, v.reading_l, v.hour_l, v.day_l, v.flow_lph };
+    /* 여섯째 = 1펄스 양(L). 옛 드라이버는 앞의 다섯만 읽는다 */
+    uint32_t p[6] = { v.count, v.reading_l, v.hour_l, v.day_l, v.flow_lph, GAS_STEP_L };
     if (s_gas_fault) {
         send_plugins();       /* 고장 중엔 값보다 먼저 다시 알린다(드라이버가 재시작해 잊었어도 온라인으로 되돌리지 않게) */
     }
-    hub_uplink_send(HUB_RK_CMD_GAS, (uint8_t *)p, sizeof(p));   /* 리틀엔디언 u32 x5 */
+    hub_uplink_send(HUB_RK_CMD_GAS, (uint8_t *)p, sizeof(p));   /* 리틀엔디언 u32 x6 */
 }
 
 /* ---------------------------------------------------------------- 온습도 */
@@ -814,10 +865,12 @@ static bool gas_status(char *out, size_t cap)
                  (unsigned long)(s_gas_heat_s / 60));
         return false;
     }
+    gas_view_t g = gas_view();
     if (!last) {
-        snprintf(out, cap, "정상 · 누적 %lu펄스 · 켜진 뒤 펄스 없음", (unsigned long)s_count);
+        snprintf(out, cap, "정상 · 유량 %.2f ㎥/h · 누적 %lu펄스 · 켜진 뒤 펄스 없음", g.flow_lph / 1000.0, (unsigned long)s_count);
     } else {
-        snprintf(out, cap, "정상 · 누적 %lu펄스 · 마지막 펄스 %lu분 전", (unsigned long)s_count, (unsigned long)((t - last) / 60));
+        snprintf(out, cap, "정상 · 유량 %.2f ㎥/h · 누적 %lu펄스 · 마지막 펄스 %lu분 전", g.flow_lph / 1000.0,
+                 (unsigned long)s_count, (unsigned long)((t - last) / 60));
     }
     return true;
 }
@@ -839,7 +892,47 @@ void hub_sensors_refresh(void)
 }
 
 /* 가스 플러그인의 '즉시 동작'(관리 화면): 지금 계량기 숫자에 맞춘다 */
-static bool gas_calibrate(const char *value, char *msg, size_t msglen)
+/* 계량기 숫자 맞추기. 허브가 알던 지침과 새 숫자의 차이를 어떻게 볼지는 사람이 고른다:
+ *   apply = false  숫자만 바로잡는다 — 펄스 수는 그대로라 이번 달 사용량·요금이 변하지 않는다(처음 맞출 때는 늘 이쪽)
+ *   apply = true   차이를 허브가 놓친 사용량으로 본다 — 그만큼 펄스를 더해 이번 달 사용량·요금에 들어간다.
+ *                  24시간·1시간 사용량과 유량에는 넣지 않는다(언제 쓴 것인지 모른다). 새 숫자가 더 작으면 넣을 것이 없다.
+ * delta_l = 새 숫자 − 알던 지침(L, 처음이면 0), added = 더한 펄스 수 */
+static bool gas_set_reading(double m3, bool apply, int64_t *delta_l, uint32_t *added)
+{
+    if (!isfinite(m3) || m3 <= 0 || m3 > 4000000) {
+        return false;
+    }
+    uint32_t new_l = (uint32_t)(m3 * 1000 + 0.5);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool had = s_base_l != UNSET;
+    uint32_t cur_l = had ? s_base_l + (s_count - s_base_count) * GAS_STEP_L : 0;
+    *delta_l = had ? (int64_t)new_l - (int64_t)cur_l : 0;
+    *added = 0;
+    if (apply && had && new_l > cur_l) {
+        *added = (new_l - cur_l + GAS_STEP_L / 2) / GAS_STEP_L;
+        s_count += *added;
+    }
+    s_base_l = new_l;
+    s_base_count = s_count;
+    s_count_unsaved = 0;
+    xSemaphoreGive(s_lock);
+    gas_save(true);                                 /* 누적 펄스와 보정값을 같이 */
+    s_gas_dirty = true;
+    ESP_LOGI(TAG, "가스 계량기 보정: %.2f m³ (펄스 %lu, 차이 %lld L, 더한 펄스 %lu)", m3, (unsigned long)s_count,
+             (long long)*delta_l, (unsigned long)*added);
+    return true;
+}
+
+bool hub_sensors_set_reading(double m3)
+{
+    int64_t d;
+    uint32_t n;
+    return gas_set_reading(m3, false, &d, &n);
+}
+
+static void gas_buttons(void);
+
+static bool gas_calibrate(const char *value, const char *opt, char *msg, size_t msglen)
 {
     char v[32];
     strlcpy(v, value, sizeof(v));
@@ -848,30 +941,58 @@ static bool gas_calibrate(const char *value, char *msg, size_t msglen)
     }
     char *end;
     double m3 = strtod(v, &end);
-    if (end == v || *end || !isfinite(m3) || !hub_sensors_set_reading(m3)) {   /* "nan"·"inf" 도 거절 */
+    bool apply = opt && !strcmp(opt, "alt");
+    int64_t delta_l = 0;
+    uint32_t added = 0;
+    if (end == v || *end || !isfinite(m3) || !gas_set_reading(m3, apply, &delta_l, &added)) {   /* "nan"·"inf" 도 거절 */
         snprintf(msg, msglen, "계량기 숫자를 확인해 주세요 (예: 1676.47)");
         return false;
     }
-    snprintf(msg, msglen, "계량기 숫자를 %.2f ㎥ 로 맞췄습니다", m3);
-    return true;
-}
-
-/* 관리 화면에서: 지금 계량기 숫자에 맞춘다 */
-bool hub_sensors_set_reading(double m3)
-{
-    if (!isfinite(m3) || m3 <= 0 || m3 > 4000000) {
-        return false;
+    gas_buttons();                                  /* 처음 맞춘 뒤부터는 '차이를 넣을지' 를 묻는다 */
+    if (added) {
+        snprintf(msg, msglen, "계량기 숫자를 %.2f ㎥ 로 맞췄습니다 — 차이 %+.2f ㎥ 를 이번 달 사용량·요금에 넣었습니다", m3,
+                 delta_l / 1000.0);
+    } else if (apply && delta_l < 0) {
+        snprintf(msg, msglen, "계량기 숫자를 %.2f ㎥ 로 맞췄습니다 — 새 숫자가 더 작아서(%+.2f ㎥) 사용량에 넣을 것이 없습니다", m3,
+                 delta_l / 1000.0);
+    } else if (delta_l) {
+        snprintf(msg, msglen, "계량기 숫자를 %.2f ㎥ 로 맞췄습니다 — 차이 %+.2f ㎥ 는 사용량·요금에 넣지 않았습니다", m3,
+                 delta_l / 1000.0);
+    } else {
+        snprintf(msg, msglen, "계량기 숫자를 %.2f ㎥ 로 맞췄습니다", m3);
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_base_l = (uint32_t)(m3 * 1000 + 0.5);
-    s_base_count = s_count;
-    xSemaphoreGive(s_lock);
-    gas_save(true);
-    s_gas_dirty = true;
-    ESP_LOGI(TAG, "가스 계량기 보정: %.2f m³ (펄스 %lu)", m3, (unsigned long)s_count);
     return true;
 }
 
+/* 카드 맨 위에 크게: 현재 계량기 지침 */
+static void gas_headline(char *out, size_t cap)
+{
+    gas_view_t g = gas_view();
+    if (g.reading_l == UNSET) {
+        snprintf(out, cap, "<span style=\"font-size:18px;color:#f88\">아직 맞추지 않음</span>");
+    } else {
+        snprintf(out, cap, "%.2f <span style=\"font-size:16px;font-weight:400\">㎥</span>", g.reading_l / 1000.0);
+    }
+}
+
+/* 맞추기 칸 위의 안내 줄: 두 버튼의 뜻 */
+static void gas_note(char *out, size_t cap)
+{
+    gas_view_t g = gas_view();
+    if (g.reading_l == UNSET) {
+        snprintf(out, cap, "아직 맞춘 적이 없습니다. 계량기에 보이는 숫자를 넣으세요(빨간 칸은 소수점 아래).");
+    } else {
+        snprintf(out, cap, "위의 지침이 실제 계량기와 다르면 계량기의 숫자를 넣으세요. "
+                 "그 차이가 허브가 세지 못한 사용량이면 <b>넣음</b>을, 숫자만 바로잡는 것이면 <b>넣지 않음</b>을 누릅니다.");
+    }
+}
+
+static void gas_buttons(void)
+{
+    bool had = s_base_l != UNSET;
+    hub_plugin_action_buttons("gas", had ? "맞추기 — 차이를 사용량·요금에 넣지 않음" : NULL,
+                              had ? "맞추기 — 차이를 사용량·요금에 넣음" : NULL, gas_note);
+}
 
 /* ---- 가스 센서: 자기 세대만 다룬다(온습도는 안 건드림) ---- */
 static void gas_apply(void)
@@ -888,7 +1009,7 @@ static void gas_apply(void)
     for (int i = 0; i < 40 && s_gas_alive; i++) {
         vTaskDelay(pdMS_TO_TICKS(25));
     }
-    hub_sensors_flush();                            /* 내리기 전에 누적·사용량 칸을 플래시에(아직 s_run_gas_on 은 옛 값) */
+    gas_flush();                                    /* 내리기 전에 누적·사용량 칸을 플래시에(아직 s_run_gas_on 은 옛 값) */
     if (s_run_gas_on && s_run_gas_pin >= 0) {
         gpio_reset_pin(s_run_gas_pin);              /* 옛 핀 되돌림 */
     }
@@ -898,7 +1019,9 @@ static void gas_apply(void)
     if (want) {
         ESP_LOGI(TAG, "가스 계량기: 핀 %d, 1펄스 %lu L, 누적 %lu", pin, (unsigned long)s_step_l, (unsigned long)s_count);
         hub_plugin_register_action("gas", "계량기 숫자 맞추기 (㎥)", "예: 1676.47", gas_calibrate);
+        gas_buttons();
         hub_plugin_register_status("gas", gas_status);
+        hub_plugin_register_headline("gas", "현재 계량기 지침", gas_headline);
         xTaskCreate(gas_task, "hub_gas", 4096, (void *)(uintptr_t)s_gas_gen, 6, NULL);
     } else {
         ESP_LOGI(TAG, "가스 계량기 %s", hub_plugin_paused("gas") ? "멈춤" : "꺼짐");

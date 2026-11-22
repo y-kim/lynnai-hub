@@ -15,8 +15,15 @@
 #define PLUG_GAS   0x02     /* 가스 계량기 리드 스위치 */
 
 /* 플러그인이 등록하는 '즉시 동작'(재부팅 없음): 값 문자열 하나를 받아 처리. msg 에 결과 문구를 쓴다. */
-typedef bool (*hub_plugin_action_fn)(const char *value, char *msg, size_t msglen);
+/* opt = 누른 버튼: ""(첫 버튼) 또는 "alt"(둘째 버튼 — hub_plugin_action_buttons 로 둔 경우) */
+typedef bool (*hub_plugin_action_fn)(const char *value, const char *opt, char *msg, size_t msglen);
 void hub_plugin_register_action(const char *id, const char *label, const char *hint, hub_plugin_action_fn fn);
+/* 즉시 동작의 버튼 글자와 안내 줄. main = 첫 버튼(NULL 이면 label), alt = 둘째 버튼(NULL 이면 없음),
+ * note = 입력 칸 위에 보일 한 줄을 쓰는 함수(NULL 이면 없음). 같은 값을 두 가지 방식으로 적용할지 물을 때 쓴다. */
+typedef void (*hub_plugin_note_fn)(char *out, size_t cap);
+void hub_plugin_action_buttons(const char *id, const char *main, const char *alt, hub_plugin_note_fn note);
+/* 카드 맨 위에 크게 보일 값(예: 현재 계량기 지침). label = 작은 제목, fn 이 큰 글자로 보일 값을 쓴다(비우면 안 그림) */
+void hub_plugin_register_headline(const char *id, const char *label, hub_plugin_note_fn fn);
 bool hub_plugins_action(const char *form, char *msg, size_t msglen);   /* POST /admin/plugin-action */
 /* 플러그인이 등록하는 '지금 상태'(관리 화면 카드에 한 줄): out 에 문구를 쓰고, 정상이면 true(오프라인이면 false) */
 typedef bool (*hub_plugin_status_fn)(char *out, size_t cap);

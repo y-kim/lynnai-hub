@@ -70,6 +70,11 @@ static int s_val[NPLUG][4];
 static const char *s_act_label[NPLUG];
 static const char *s_act_hint[NPLUG];
 static hub_plugin_action_fn s_act_fn[NPLUG];
+static const char *s_act_main[NPLUG];
+static const char *s_act_alt[NPLUG];
+static hub_plugin_note_fn s_act_note[NPLUG];
+static const char *s_head_label[NPLUG];
+static hub_plugin_note_fn s_head_fn[NPLUG];
 static hub_plugin_status_fn s_stat_fn[NPLUG];
 
 static const plugin_t *find(const char *id, int *idx)
@@ -92,6 +97,25 @@ void hub_plugin_register_action(const char *id, const char *label, const char *h
         s_act_label[i] = label;
         s_act_hint[i] = hint;
         s_act_fn[i] = fn;
+    }
+}
+
+void hub_plugin_action_buttons(const char *id, const char *main, const char *alt, hub_plugin_note_fn note)
+{
+    int i;
+    if (find(id, &i)) {
+        s_act_main[i] = main;
+        s_act_alt[i] = alt;
+        s_act_note[i] = note;
+    }
+}
+
+void hub_plugin_register_headline(const char *id, const char *label, hub_plugin_note_fn fn)
+{
+    int i;
+    if (find(id, &i)) {
+        s_head_label[i] = label;
+        s_head_fn[i] = fn;
     }
 }
 
@@ -238,6 +262,18 @@ void hub_plugins_render(char *o, size_t cap)
                  "onclick=\"return confirm('플러그인을 삭제할까요? 센서를 더 이상 읽지 않고, 모든 플랫폼에서 기기가 빠집니다.')\">"
                  "\U0001f5d1️</button></form></span></div><p class=muted>%s</p>", p->id, p->help);
         cat(o, cap, t);
+        if (s_head_fn[i]) {                         /* 카드에서 가장 먼저 보일 값 하나를 크게 */
+            char hv[64];
+            hv[0] = 0;
+            s_head_fn[i](hv, sizeof(hv));
+            if (hv[0]) {
+                snprintf(t, sizeof(t), "<div style=\"margin:12px 0 10px;padding:12px 14px;border-radius:10px;background:#222;"
+                         "border:1px solid #444\"><div class=muted>%s</div>"
+                         "<div style=\"font-size:30px;font-weight:700;line-height:1.2;color:#fff\">%s</div></div>",
+                         s_head_label[i], hv);
+                cat(o, cap, t);
+            }
+        }
         if (s_pz[i]) {                              /* 멈춤: 센서를 안 읽는다 — 상태 줄 대신 안내 */
             cat(o, cap, "<p class=warn>⏸ 멈춤 — 센서를 읽지 않습니다. 플랫폼에는 기기가 남고 오프라인으로 보입니다. "
                         "센서·배선을 바꾼 뒤 ▶ 를 누르면 다시 읽습니다.</p>");
@@ -259,9 +295,27 @@ void hub_plugins_render(char *o, size_t cap)
         cat(o, cap, "</span></div><button name=op value=save class=sv>저장</button></form>");
         if (s_act_fn[i]) {                          /* 즉시 동작(예: 계량기 숫자 맞추기)은 따로 */
             snprintf(t, sizeof(t), "<form method=post action=/admin/plugin-action><input type=hidden name=id value=%s>"
-                     "<label>%s</label><input name=value inputmode=decimal placeholder=\"%s\">"
-                     "<button class=ghost>%s</button></form>", p->id, s_act_label[i], s_act_hint[i], s_act_label[i]);
+                     "<label>%s</label>", p->id, s_act_label[i]);
             cat(o, cap, t);
+            if (s_act_note[i]) {
+                char note[420];
+                note[0] = 0;
+                s_act_note[i](note, sizeof(note));
+                if (note[0]) {
+                    cat(o, cap, "<p class=muted style=\"margin:0 0 6px\">");
+                    cat(o, cap, note);
+                    cat(o, cap, "</p>");
+                }
+            }
+            snprintf(t, sizeof(t), "<input name=value inputmode=decimal placeholder=\"%s\">"
+                     "<button class=ghost name=opt value=\"\">%s</button>", s_act_hint[i],
+                     s_act_main[i] ? s_act_main[i] : s_act_label[i]);
+            cat(o, cap, t);
+            if (s_act_alt[i]) {                     /* 같은 값을 다른 방식으로 적용하는 둘째 버튼 */
+                snprintf(t, sizeof(t), "<button class=ghost name=opt value=alt>%s</button>", s_act_alt[i]);
+                cat(o, cap, t);
+            }
+            cat(o, cap, "</form>");
         }
         cat(o, cap, "</div>");
     }
@@ -444,7 +498,7 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
 
 bool hub_plugins_action(const char *form, char *msg, size_t msglen)
 {
-    char id[16], value[48];
+    char id[16], value[48], opt[8] = "";
     int idx;
     if (httpd_query_key_value(form, "id", id, sizeof(id)) != ESP_OK || !find(id, &idx) || !s_act_fn[idx]) {
         snprintf(msg, msglen, "잘못된 요청");
@@ -468,5 +522,6 @@ bool hub_plugins_action(const char *form, char *msg, size_t msglen)
         }
     }
     *w = 0;
-    return s_act_fn[idx](value, msg, msglen);
+    httpd_query_key_value(form, "opt", opt, sizeof(opt));       /* 없으면 첫 버튼 */
+    return s_act_fn[idx](value, opt, msg, msglen);
 }

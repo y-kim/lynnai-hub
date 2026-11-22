@@ -416,8 +416,8 @@ static esp_err_t state_get(httpd_req_t *req)
         } else {
             CHUNK("\"meter_m3\":null,");
         }
-        CHUNK("\"hour_l\":%lu,\"day_l\":%lu,\"flow_lph\":%lu}", (unsigned long)g.hour_l, (unsigned long)g.day_l,
-              (unsigned long)g.flow_lph);
+        CHUNK("\"hour_l\":%lu,\"day_l\":%lu,\"flow_lph\":%lu,\"closed_ms\":%lu,\"closed_now\":%s}", (unsigned long)g.hour_l,
+              (unsigned long)g.day_l, (unsigned long)g.flow_lph, (unsigned long)g.closed_ms, g.closed_now ? "true" : "false");
     } else {
         CHUNK("\"gas\":null");
     }

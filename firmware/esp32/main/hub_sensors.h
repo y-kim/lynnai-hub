@@ -18,6 +18,8 @@ void hub_sensors_print(void);                   /* USB diag */
 /* 서버 API 용 */
 typedef struct {
     uint32_t count, reading_l, hour_l, day_l, flow_lph;   /* reading_l = 0xFFFFFFFF 이면 계량기 숫자 미보정 */
+    uint32_t closed_ms;                                   /* 마지막 펄스에서 스위치가 닫혀 있던 시간(0 = 아직 모름) */
+    bool closed_now;                                      /* 지금 스위치가 닫혀 있나(자석이 스위치 앞) — 맞출 때 참고 */
 } gas_view_t;
 bool hub_sensors_room(float *t, float *h, int *age_s);  /* 마지막 온습도, 없으면 false. 습도가 없는 센서면 *h = NAN */
 void hub_sensors_room_test(char *out, size_t cap);      /* 세 센서를 한 번씩 읽어 본 결과(JSON) — 고른 종류·멈춤과 무관 */

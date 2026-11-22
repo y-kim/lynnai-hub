@@ -645,7 +645,7 @@ local function won(m3, with_base)
   return math.floor(w * 1.1 + 0.5)
 end
 -- 첫 메시지: 누적 50㎥(reading=50000L), 지난 하루 5㎥. 이번 달 기준이 50 으로 잡혀 사용량 0.
-core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 50000, 0, 5000, 0))
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1000, 50000, 0, 5000, 0))
 core.info_changed(nil, driver._children["gas"])   -- 설정변경 경로로 중복 캐시 비우고 다시 계산(앞 시나리오 값과 겹침 방지)
 check(lastv("gas", "main", "period").value == 0, "첫 값 → 이번 달 사용량 0(기준 설정)")
 check(lastv("gas", "main", "month").value == won(0, true), "이번 달 = 기본료만 = " .. won(0, true) .. "원")
@@ -657,13 +657,31 @@ check(lastv("gas", "main", "dayText") == "5.00" and lastv("gas", "main", "hourTe
 check(lastv("gas", "main", "month").unit == "원" and lastv("gas", "main", "monthRange").value.maximum == 50000
   and lastv("gas", "main", "todayRange").value.maximum == 10000, "경고 기준이 없으면 막대 끝값은 값이 들어가는 둥근 수(5만원 · 1만원)")
 -- 둘째 메시지: 누적 53㎥ → 이번 달 3㎥, 지난 하루 2㎥
-core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 53000, 0, 2000, 0))
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1300, 53000, 0, 2000, 0))       -- 300펄스 = 3㎥
 check(lastv("gas", "main", "period").value == 3, "이번 달 사용량 = 53-50 = 3㎥")
 check(lastv("gas", "main", "month").value == won(3, true), "이번 달 청구액 = 기본료+3㎥ = " .. won(3, true) .. "원")
 check(lastv("gas", "main", "today").value == won(2, false), "지난 하루(2㎥)는 월 누적과 무관 = " .. won(2, false) .. "원")
--- 계량기 교체/리셋(누적이 줄어듦) → 이번 달 기준 재설정, 음수 안 나옴
-core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 10000, 0, 0, 0))
-check(lastv("gas", "main", "period").value == 0, "누적이 줄면 기준 재설정 → 사용량 0(음수 아님)")
+-- 계량기 숫자 맞추기: 펄스는 그대로인데 지침만 크게 바뀜(관리 화면에서 실제 계량기 숫자를 넣음) → 이번 달 사용량은 이어진다
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1300, 1694230, 0, 2000, 0))    -- 같은 펄스 수, 지침 1694.23 으로
+check(lastv("gas", "main", "period").value == 3, "지침을 맞춰도 이번 달 사용량은 3㎥ 그대로(1644㎥ 가 되지 않음)")
+check(lastv("gas", "main", "month").value == won(3, true), "이번달 예상 금액도 그대로")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1350, 1694730, 0, 2000, 0))    -- 그 뒤 50펄스(0.5㎥) 사용
+check(lastv("gas", "main", "period").value == 3.5, "맞춘 뒤의 사용은 그대로 더해짐(3.5㎥)")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1350, 20000, 0, 2000, 0))      -- 지침을 낮춰 다시 맞춤
+check(lastv("gas", "main", "period").value == 3.5, "낮춰 맞춰도 이번 달 사용량 유지(음수·0 이 되지 않음)")
+-- "차이를 사용량에 넣음"으로 맞춘 경우: 허브가 펄스 수도 같이 늘려 보낸다 → 쓴 것으로 센다
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4", 1450, 21000, 0, 2000, 0, 10))  -- +100펄스, 지침 +1㎥
+check(lastv("gas", "main", "period").value == 4.5, "펄스와 지침이 같이 늘면 사용량에 들어감(4.5㎥)")
+-- 1펄스 = 100 L 인 계량기(여섯째 값): 2펄스에 0.2㎥ — 맞추기로 오해하지 않는다
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4", 1452, 21200, 0, 2000, 0, 100))
+check(lastv("gas", "main", "period").value == 4.7, "1펄스 양이 달라도(100 L) 쓴 만큼만 더해짐(4.7㎥)")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1452, 20000, 0, 2000, 0))        -- 뒤 시험을 위해 10 L 로 되돌림(옛 형식)
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 1350, 20000, 0, 2000, 0))
+-- 허브를 초기화해 펄스 수와 지침이 함께 0 근처로 돌아가면 이번 달을 새로 센다
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 0xFFFFFFFF, 0, 0, 0))
+check(lastv("gas", "main", "period").value == 0, "허브 초기화(펄스 0) → 기준 재설정, 사용량 0(음수 아님)")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 10000, 0, 0, 0))            -- 이후 시험의 기준: 지침 10㎥
+check(lastv("gas", "main", "period").value == 0, "초기화 뒤 지침을 맞춤 → 사용량 0 그대로")
 -- 사용량 경고: 이번달 예상 금액이 설정 기준(원) 이상이면 경고. 기준 0(기본) = 끔
 check(lastv("gas", "main", "alert") == "normal", "경고 기준 없음(0) → 정상")
 local gasdev = driver._children["gas"]
@@ -672,7 +690,7 @@ gasdev.preferences.gasWarnCost = won(3, true)                 -- 기준 = 3㎥ �
 core.info_changed(nil, gasdev)
 check(lastv("gas", "main", "alert") == "normal", "기준 아래(사용량 0) → 정상")
 check(not (lastv("gas", "main", "status") or ""):find("경고", 1, true), "정상일 때 요약 글자에 경고 없음")
-core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 13000, 0, 3000, 0))    -- 기준 10 → 이번 달 3㎥
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 300, 13000, 0, 3000, 0))  -- 기준 10 → 300펄스 → 이번 달 3㎥
 check(lastv("gas", "main", "alert") == "warning", "이번달 예상 금액이 기준에 닿음 → 경고")
 check((lastv("gas", "main", "status") or ""):find("⚠ 사용량 경고 · 1D 3.00㎥", 1, true), "요약 글자 앞에 경고 표시 (" .. tostring(lastv("gas", "main", "status")) .. ")")
 gasdev.preferences.gasWarnCost = won(3, true) + 1

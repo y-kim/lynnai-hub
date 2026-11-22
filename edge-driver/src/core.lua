@@ -788,7 +788,8 @@ function show_gas(parent)
   if not child or not v then return end
   local count, reading, hour, day, flow = table.unpack(v)
   mark_online(child)
-  local m3 = (reading ~= 0xFFFFFFFF) and reading / 1000 or count * 0.01
+  local step_m3 = (hub_state(parent).gas_step or 10) / 1000                   -- 1펄스 = 몇 ㎥
+  local m3 = (reading ~= 0xFFFFFFFF) and reading / 1000 or count * step_m3
   local function f(l) return string.format("%.2f㎥", l / 1000) end
   local function r2(l) return math.floor(l / 10 + 0.5) / 100 end     -- 리터 → ㎥, 0.01 자리로
   -- 가스 기기는 구역(component)이 main 하나다 — 구역이 여럿이면 앱이 구역마다 제목 줄(main·유량·요금)을 붙인다.
@@ -806,6 +807,19 @@ function show_gas(parent)
   -- 요금: 이번 달(청구일 기준 리셋) + 지난 하루. 누적 계량값은 펌웨어 NVS 에 남아 재부팅해도 이어진다.
   local tag = period_tag(pref(child, GAS_PREF.billday))
   local base_m3 = child:get_field("gas_month_base")
+  -- 계량기 숫자 맞추기(관리 화면): 지침이 펄스 수와 안 맞게 뛰면 쓴 가스가 아니라 숫자를 고친 것이다 → 이번 달 기준도
+  -- 그만큼 옮겨, 이번 달 사용량·요금이 이어지게 한다(안 옮기면 15㎥ → 1694㎥ 로 맞춘 순간 이번 달에 1679㎥ 를 쓴 것이 된다).
+  -- 허브가 "차이를 사용량에 넣음"으로 맞추면 그만큼 펄스 수도 같이 늘려 보내므로 여기서는 뛴 것으로 보이지 않는다(쓴 것으로 센다).
+  local last = child:get_field("gas_last")
+  if base_m3 ~= nil and last then
+    local jump = m3 - (last.m3 + (count - last.count) * step_m3)
+    if math.abs(jump) > 0.5 then
+      log.info(string.format("가스 계량기 지침이 %.2f㎥ 만큼 맞춰짐 — 이번 달 기준도 옮김", jump))
+      base_m3 = base_m3 + jump
+      child:set_field("gas_month_base", base_m3, { persist = true })
+    end
+  end
+  child:set_field("gas_last", { m3 = m3, count = count })
   if child:get_field("gas_month_tag") ~= tag or base_m3 == nil or m3 < base_m3 then
     base_m3 = m3                                   -- 새 청구 기간·재설치·계량기 교체 → 이번 달 기준 재설정
     child:set_field("gas_month_tag", tag, { persist = true })
@@ -858,6 +872,8 @@ end
 
 local function on_gas(parent, b)
   hub_state(parent).gas = { string.unpack("<I4I4I4I4I4", b) }
+  -- 여섯째(있으면) = 1펄스 양(L). 옛 펌웨어는 다섯만 보낸다 → 10 L 로 본다
+  hub_state(parent).gas_step = (#b >= 24) and string.unpack("<I4", b, 21) or 10
   if not visible(parent, BIT.gas) then return end
   create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter")
   show_gas(parent)
