@@ -196,8 +196,23 @@ static const char *TAG = "TEMPERATURE_SENSOR";
 
 static int16_t zb_temperature_to_s16(float temp) { return (int16_t)(temp * 100); }
 
+/* 마지막으로 잰 칩 온도(1/100°C). 생존 신호에 실어 보낸다 — ZCL 속성 보고는 SmartThings 쪽 바인딩이 있어야 가는데,
+ * 가입 정보를 되살리거나 다시 가입하면 바인딩이 사라져 온도가 멈춘다(2026-11-21 이후 실제로 멈춰 있었음). */
+static volatile int16_t s_chip_c100 = INT16_MIN;
+
+bool hub_main_chip_temp(int16_t *c100)
+{
+    int16_t v = s_chip_c100;
+    if (v == INT16_MIN || !hub_expose_bit_on(EXPOSE_CH_ZIGBEE, EXPOSE_HUB_TEMP)) {
+        return false;                    /* 아직 못 쟀거나 관리 화면에서 허브 칩 온도를 끔 */
+    }
+    *c100 = v;
+    return true;
+}
+
 static void esp_app_temp_sensor_handler(float temperature)
 {
+    s_chip_c100 = zb_temperature_to_s16(temperature);
     if (!hub_expose_bit_on(EXPOSE_CH_ZIGBEE, EXPOSE_HUB_TEMP)) {
         return;                          /* 관리 화면에서 허브 칩 온도를 끔 → 값을 안 바꿔 보고도 멈춤 */
     }

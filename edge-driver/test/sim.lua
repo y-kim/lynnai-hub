@@ -362,6 +362,21 @@ check(hc.chip ~= nil and not hc.chip["temperatureMeasurement"], "비트 11 끔 �
 expose(0x7FFFFFFF, {})
 hc = hub._caps or {}
 check(hc.chip and hc.chip["temperatureMeasurement"], "비트 11 켬 → 허브 온도 보임")
+-- 온도 값은 생존 신호(0x0a)에 실려 온다: [0][s16 1/100°C]
+core.on_message(hub, 0x0a, string.char(0) .. string.pack("<i2", 3215))
+local function count_chip() local n = 0
+  for _, e in ipairs(emitted) do if e.key == "hub" and e.comp == "chip" then n = n + 1 end end
+  return n end
+local chip_ev
+for _, e in ipairs(emitted) do if e.key == "hub" and e.comp == "chip" and e.attr == "temperature" then chip_ev = e.value end end
+check(chip_ev and math.abs((type(chip_ev) == "table" and chip_ev.value or chip_ev) - 32.2) < 0.01, "생존 신호에 실린 허브 온도를 보임(32.15 → 32.2)")
+local n_chip = count_chip()
+core.on_message(hub, 0x0a, string.char(0) .. string.pack("<i2", 3230))
+check(count_chip() == n_chip, "조금(0.5°C 미만) 바뀐 것은 다시 내지 않음")
+core.on_message(hub, 0x0a, string.char(0) .. string.pack("<i2", 3400))
+check(count_chip() == n_chip + 1, "0.5°C 넘게 바뀌면 냄")
+core.on_message(hub, 0x0a, string.char(0))
+check(count_chip() == n_chip + 1, "온도가 없는 생존 신호(옛 펌웨어·꺼 둠)는 그대로 받음")
 
 print("[14] 각방 '예약' 스위치(f09 96/97)·상태(stat 0x08)")
 reset()

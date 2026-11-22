@@ -18,7 +18,11 @@
 #define ESP_ZIGBEE_PRIMARY_CHANNEL_MASK   (0x07FFF800U)
 #define ESP_ZIGBEE_SECONDARY_CHANNEL_MASK (0x07FFF800U)
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "hub_radio.h"
+
+bool hub_main_chip_temp(int16_t *c100);   /* 허브 칩 온도(1/100°C). 못 쟀거나 노출 설정에서 껐으면 false */
 
 #define ESP_ZIGBEE_HA_TEMPERATURE_SENSOR_EP_ID (10)
 

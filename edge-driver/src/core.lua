@@ -17,6 +17,7 @@ local CMD_STATE, CMD_LINKS, CMD_ROOM, CMD_GAS, CMD_PLUGINS, CMD_EXPOSE, CMD_PAIR
 local CMD_FORGET = 0x08
 local CMD_TARIFF = 0x09
 local CMD_MODE = 0x0b
+local CMD_ALIVE = 0x0a
 local KIND_F06, KIND_F09 = 6, 9
 
 -- 한 f09 안의 방 슬롯(7바이트, 슬롯 s 는 byte[7s]). 상태 0x02=켜짐, 0x40=난방 중. 명령 선택자 a0=슬롯+1.
@@ -1253,7 +1254,23 @@ local function set_hub_mode(_, device, cmd)
   -- 표시는 허브가 새 모드를 알려 줄 때 바뀐다(허브가 저장에 실패하면 옛 값을 다시 보내 준다)
 end
 
-local HANDLERS = { [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
+-- 생존 신호(CMD 0x0a): [0][허브 칩 온도 s16, 1/100°C]. 온도는 허브가 노출 설정에서 켰을 때만 붙여 보낸다.
+-- 표준 온도 클러스터의 속성 보고도 받지만(init.lua) 그건 SmartThings 쪽 바인딩이 있어야 오고, 허브가 가입 정보를
+-- 되살리면 바인딩이 사라져 멈춘다 — 그래서 우리 통로로도 받는다. 20~30초마다 오므로 0.5°C 넘게 바뀌었거나 10분이
+-- 지났을 때만 낸다. LAN 허브 기기에는 온도 구역이 없다.
+local chip_shown = {}
+local function on_alive(parent, b)
+  if #b < 3 or not visible(parent, BIT.hub_temp) then return end
+  local chip = parent.profile.components.chip
+  if not chip then return end
+  local t = string.unpack("<i2", b, 2) / 100
+  local was = chip_shown[parent.id]
+  if was and math.abs(t - was.t) < 0.5 and os.time() - was.at < 600 then return end
+  chip_shown[parent.id] = { t = t, at = os.time() }
+  parent:emit_component_event(chip, capabilities.temperatureMeasurement.temperature({ value = math.floor(t * 10 + 0.5) / 10, unit = "C" }))
+end
+
+local HANDLERS = { [CMD_ALIVE] = on_alive, [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
   [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
   [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode }
 

@@ -25,6 +25,7 @@
 #include "hub_expose.h"
 #include "hub_devs.h"
 #include "hub_trace.h"
+#include "hub_main.h"
 
 static const char *TAG = "HUB_RINNAI";
 
@@ -766,9 +767,15 @@ static void zb_task(void *arg)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
         if (xTaskGetTickCount() - last_alive >= pdMS_TO_TICKS(ALIVE_S * 1000)) {
             /* SmartThings 는 Zigbee 기기가 30분쯤 조용해야 오프라인으로 바꾼다. 드라이버가 먼저 알아채도록 짧게 자주 */
-            static const uint8_t zero = 0;
+            /* [0][칩 온도 s16, 1/100°C] — 온도는 노출 설정에서 켰을 때만 붙는다(없으면 1바이트) */
+            uint8_t alive[3] = { 0 };
+            int16_t chip;
+            bool has_chip = hub_main_chip_temp(&chip);
+            if (has_chip) {
+                memcpy(alive + 1, &chip, 2);
+            }
             last_alive = xTaskGetTickCount();
-            hub_uplink_send(HUB_RK_CMD_ALIVE, &zero, 1);
+            hub_uplink_send(HUB_RK_CMD_ALIVE, alive, has_chip ? 3 : 1);
         }
         bool beat = xTaskGetTickCount() - last_beat >= pdMS_TO_TICKS(HEARTBEAT_S * 1000);
         lock();
