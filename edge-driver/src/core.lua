@@ -698,7 +698,7 @@ local GAS_PREF = {
   heat    = { key = "gasHeat",    def = 42.576,  api = "api_heat" },  -- 월평균 열량 MJ/N㎥
   rate    = { key = "gasRate",    def = 22.6226, api = "api_rate" },  -- 주택난방 단가 원/MJ
   base    = { key = "gasBaseFee", def = 1250,    api = "api_base" },  -- 기본료 원/월
-  billday = { key = "gasBillDay", def = 8 },         -- 검침일
+  billday = { key = "gasBillDay", def = 8, api = "api_billday" },   -- 검침일(1~31 — 그 날이 없는 달은 마지막 날, 허브는 말일을 32 로 보냄). 허브가 알려 주면 그 값
   vat     = { key = "gasVat",     def = true },      -- 부가세 10% 포함
 }
 -- 자동 조회 주소(LAN). 비었으면 nil → 수동값만.
@@ -717,8 +717,20 @@ local function pref(dev, p)
   return v
 end
 
--- 이번 청구 기간(월)의 시작 태그 "YYYY-MM". 오늘이 청구일 이전이면 지난달이 기준.
+-- 청구월 태그 "YYYY-MM": 이번 기간이 끝나는 달. 기간 = 전달 검침일 다음 날 ~ 이번 달 검침일(당일 포함).
+-- 검침일이 그 달에 없는 날(말일 = 31 포함)이면 그 달 마지막 날 → "말일"이면 기간이 1일 ~ 말일이 된다. 허브(hub_tariff.c)와 같은 규칙.
+local function month_days(y, m) return os.date("*t", os.time({ year = y, month = m + 1, day = 0, hour = 12 })).day end
 local function period_tag(billday)
+  local t = os.date("*t")
+  local y, m = t.year, t.month
+  if t.day > math.min(billday, month_days(y, m)) then
+    m = m + 1
+    if m > 12 then m, y = 1, y + 1 end
+  end
+  return string.format("%04d-%02d", y, m)
+end
+-- 옛 규칙의 태그(기간이 시작하는 달, 검침일 당일부터 새 기간) — 드라이버를 올린 직후 이번 달 기준을 잃지 않게 견줄 때만 쓴다
+local function old_period_tag(billday)
   local t = os.date("*t")
   local y, m = t.year, t.month
   if t.day < billday then
@@ -805,8 +817,16 @@ function show_gas(parent)
   emit(child, "main", flow_cap.flowText(t2(r2(flow))))
 
   -- 요금: 이번 달(청구일 기준 리셋) + 지난 하루. 누적 계량값은 펌웨어 NVS 에 남아 재부팅해도 이어진다.
-  local tag = period_tag(pref(child, GAS_PREF.billday))
+  local billday = pref(child, GAS_PREF.billday)
+  local tag = period_tag(billday)
   local base_m3 = child:get_field("gas_month_base")
+  if child:get_field("gas_tag_v") ~= 2 then        -- 옛 규칙(기간이 시작하는 달)으로 적어 둔 태그를 한 번만 새 규칙으로 옮긴다
+    if base_m3 ~= nil and child:get_field("gas_month_tag") == old_period_tag(billday) then
+      -- 같은 기간이다: 이름만 바꾸고 기준은 그대로(이번 달 사용량을 0 으로 돌리지 않는다)
+      child:set_field("gas_month_tag", tag, { persist = true })
+    end
+    child:set_field("gas_tag_v", 2, { persist = true })
+  end
   -- 계량기 숫자 맞추기(관리 화면): 지침이 펄스 수와 안 맞게 뛰면 쓴 가스가 아니라 숫자를 고친 것이다 → 이번 달 기준도
   -- 그만큼 옮겨, 이번 달 사용량·요금이 이어지게 한다(안 옮기면 15㎥ → 1694㎥ 로 맞춘 순간 이번 달에 1679㎥ 를 쓴 것이 된다).
   -- 허브가 "차이를 사용량에 넣음"으로 맞추면 그만큼 펄스 수도 같이 늘려 보내므로 여기서는 뛴 것으로 보이지 않는다(쓴 것으로 센다).
@@ -1157,12 +1177,14 @@ end
 local function on_tariff(parent, b)
   if #b < 16 then return end
   local vcf_e6, heat_e6, rate_e6, base = string.unpack("<I4I4I4I4", b)
+  local billday = (#b >= 20) and string.unpack("<I4", b, 17) or nil      -- 다섯째(있으면) = 허브에 설정한 검침일
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
   if not child then return end          -- 가스 기기 아직 없으면 버림(다음 주기에 다시 온다)
   child:set_field("api_vcf", vcf_e6 / 1e6, { persist = true })
   child:set_field("api_heat", heat_e6 / 1e6, { persist = true })
   child:set_field("api_rate", rate_e6 / 1e6, { persist = true })
   child:set_field("api_base", base, { persist = true })
+  if billday and billday >= 1 and billday <= 32 then child:set_field("api_billday", billday, { persist = true }) end   -- 32 = 말일
   log.info(string.format("가스 요금 중계 수신: 보정 %.4f 열량 %.3f 단가 %.4f 기본 %d",
     vcf_e6 / 1e6, heat_e6 / 1e6, rate_e6 / 1e6, base))
   show_gas(parent)

@@ -5,7 +5,8 @@
  *   요금(보정·열량·단가): 자동=gas.yangsu.kim/api/bill(구역별), 수동=직접 입력.
  *   기본료·검침일: 내 정보(항상 사용자 값).
  *   구역 목록: /api/regions 를 받아 관리 화면 datalist(검색 선택)로.
- *   월 마감: 청구월 N = (N-1)월 검침일 ~ N월 (검침일-1). 정확 열량(사용기간 가중평균)이 확정되면 그 청구액으로,
+ *   월 마감: 청구월 N = (N-1)월 검침일 다음 날 ~ N월 검침일(검침일 당일까지가 그 달 몫). 검침일을 "말일"(31)로 두면
+ *            N월 1일 ~ N월 말일. 정확 열량(사용기간 가중평균)이 확정되면 그 청구액으로,
  *            아니면 검침일+3일 뒤 최신 월 열량 청구액으로 등록(/api/bill 의 청구액 = 청구서 재현).
  */
 #include <string.h>
@@ -57,7 +58,8 @@ extern const char gas_ca_pem_end[]   asm("_binary_gas_ca_pem_end");
 
 static char     s_region[12] = "SD07";
 static uint8_t  s_mode     = MODE_AUTO;
-static uint8_t  s_billday  = 8;
+#define BILLDAY_LAST  32             /* 검침일 "말일": 그 달의 마지막 날(28~31일) */
+static uint8_t  s_billday  = 8;      /* 1~31(그 날이 없는 달에는 마지막 날) 또는 BILLDAY_LAST */
 static uint32_t s_man_vcf_e6  = DEF_VCF_E6;
 static uint32_t s_man_heat_e6 = DEF_HEAT_E6;
 static uint32_t s_man_rate_e6 = DEF_RATE_E6;
@@ -80,7 +82,7 @@ static int64_t  s_fin_last_us;
 /* ---- 월별 기록 ---- */
 #define MON_MAX 13
 typedef struct {
-    uint16_t ym;        /* 청구월(연*12 + 월-1). 기간 = (월-1) 검침일 ~ 월 (검침일-1) */
+    uint16_t ym;        /* 청구월(연*12 + 월-1). 기간 = (월-1) 검침일 다음 날 ~ 월 검침일 */
     uint32_t start_l;   /* 기간 시작 때 누적 리터(count*step) */
     uint32_t use_l;     /* 사용 리터 */
     uint32_t won;       /* 청구액 원 */
@@ -121,7 +123,7 @@ static void load_cfg(void)
     nvs_get_u32(h, "trate", &s_man_rate_e6);
     nvs_get_u32(h, "tbase", &s_man_base);
     nvs_close(h);
-    if (s_billday < 1 || s_billday > 28) s_billday = 8;
+    if (s_billday < 1 || s_billday > BILLDAY_LAST) s_billday = 8;
 }
 
 static void mon_save(void)
@@ -175,9 +177,10 @@ static uint32_t won_of(double m3)
 
 static void relay_current(void)
 {
-    uint32_t p[4];
+    uint32_t p[5];                                   /* 다섯째 = 검침일(1~31, 32 = 말일). 옛 드라이버는 앞의 넷만 읽는다 */
     eff_e6(&p[0], &p[1], &p[2], &p[3]);
-    uint32_t sig = p[0] ^ (p[1] << 1) ^ (p[2] << 2) ^ (p[3] << 3);
+    p[4] = s_billday;
+    uint32_t sig = p[0] ^ (p[1] << 1) ^ (p[2] << 2) ^ (p[3] << 3) ^ (p[4] << 24);
     if (sig == s_relay_sig) return;
     hub_uplink_send(HUB_RK_CMD_TARIFF, (uint8_t *)p, sizeof(p));
     s_relay_sig = sig;
@@ -354,14 +357,31 @@ static void fetch_regions(void)
 }
 
 /* ---------------------------------------------------------------- 월별 집계 */
-/* 청구월 N = 오늘이 검침일 지났으면 다음달, 아니면 이번달. 기간 = (N-1)월 검침일 ~ N월 (검침일-1). */
+/* y년 m월(1~12)의 날 수 */
+static int month_days(int y, int m)
+{
+    struct tm t = { 0 };
+    t.tm_year = y - 1900; t.tm_mon = m; t.tm_mday = 0; t.tm_hour = 12;    /* 다음 달 0일 = 이 달 마지막 날 */
+    mktime(&t);
+    return t.tm_mday;
+}
+
+/* y년 m월의 검침일(날짜). "말일"이거나 그 달에 없는 날이면 그 달 마지막 날 */
+static int bill_dom(int y, int m)
+{
+    int n = month_days(y, m);
+    return s_billday > n ? n : s_billday;
+}
+
+/* 청구월 N = 오늘이 이번 달 검침일을 지났으면 다음 달, 아니면(검침일 당일 포함) 이번 달.
+ * 기간 = (N-1)월 검침일 다음 날 ~ N월 검침일. 말일이면 N월 1일 ~ N월 말일. */
 static uint16_t period_key(long now)
 {
     struct tm tmv;
     time_t t = (time_t)now;
     localtime_r(&t, &tmv);
     int y = tmv.tm_year + 1900, mo = tmv.tm_mon + 1, d = tmv.tm_mday;
-    if (d >= s_billday) { if (++mo > 12) { mo = 1; y++; } }
+    if (d > bill_dom(y, mo)) { if (++mo > 12) { mo = 1; y++; } }
     return (uint16_t)(y * 12 + (mo - 1));
 }
 
@@ -369,10 +389,12 @@ static uint16_t period_key(long now)
 static void period_dates(uint16_t ym, char from[11], char to[11])
 {
     int y = ym / 12, m = ym % 12 + 1;
+    int py = y, pm = m - 1;
+    if (pm < 1) { pm = 12; py--; }
     struct tm s = { 0 }, e = { 0 };
-    s.tm_year = y - 1900; s.tm_mon = (m - 1) - 1; s.tm_mday = s_billday; s.tm_hour = 12;
+    s.tm_year = py - 1900; s.tm_mon = pm - 1; s.tm_mday = bill_dom(py, pm) + 1; s.tm_hour = 12;   /* 넘치면 다음 달 1일 */
     mktime(&s); strftime(from, 11, "%Y-%m-%d", &s);
-    e.tm_year = y - 1900; e.tm_mon = m - 1; e.tm_mday = s_billday - 1; e.tm_hour = 12;
+    e.tm_year = y - 1900; e.tm_mon = m - 1; e.tm_mday = bill_dom(y, m); e.tm_hour = 12;
     mktime(&e); strftime(to, 11, "%Y-%m-%d", &e);
 }
 
@@ -381,7 +403,7 @@ static time_t billday_epoch(uint16_t ym)
 {
     int y = ym / 12, m = ym % 12 + 1;
     struct tm b = { 0 };
-    b.tm_year = y - 1900; b.tm_mon = m - 1; b.tm_mday = s_billday; b.tm_hour = 12;
+    b.tm_year = y - 1900; b.tm_mon = m - 1; b.tm_mday = bill_dom(y, m); b.tm_hour = 12;
     return mktime(&b);
 }
 
@@ -506,7 +528,7 @@ int hub_tariff_apply(int mode, const char *region, int billday,
                      char *err, int errlen)
 {
 #define FAIL(m) do { if (err) strlcpy(err, (m), errlen); return 0; } while (0)
-    if (billday < 1 || billday > 28) FAIL("검침일은 1~28 사이");
+    if (billday < 1 || billday > BILLDAY_LAST) FAIL("검침일은 1~31일 또는 말일");
     char rg[12] = "";
     if (region) {
         for (const char *p = region; *p && (size_t)(p - region) < sizeof(rg) - 1; p++) {
@@ -732,13 +754,23 @@ void hub_tariff_render(char *out, size_t cap)
     catf(out, cap, "<div class=grpbox><h3 class=grp>👤 내 정보</h3><p class='muted sub'>자동·수동 모두에 쓰는 값</p>");
     catf(out, cap, "<div class=row><span>기본요금 (원/월)</span><input class=gin name=base inputmode=numeric value=\"%u\"></div>",
          (unsigned)s_man_base);
-    catf(out, cap, "<div class=row><span>검침일 (매월 1~28일)</span><input class=gin name=billday inputmode=numeric value=\"%u\"></div>",
-         s_billday);
+    catf(out, cap, "<div class=row><span>검침일</span><select class=gin name=billday>");
+    for (int d = 1; d <= 31; d++) {
+        catf(out, cap, "<option value=%d%s>%d일</option>", d, d == s_billday ? " selected" : "", d);
+    }
+    catf(out, cap, "<option value=%d%s>말일</option></select></div>", BILLDAY_LAST, s_billday == BILLDAY_LAST ? " selected" : "");
     catf(out, cap, "</div>");
     catf(out, cap, "<button class=sv>저장</button></form>");
-    catf(out, cap, "<p class=muted style='margin:8px 0 0'>요금 기간: 매월 <b>%u일</b>부터 다음 달 <b>%u일 전날</b>까지. "
-                   "즉 'N월' 막대 = 전달 %u일 ~ N월 %u일 사용분으로 계산합니다.</p>",
-         s_billday, s_billday, s_billday, s_billday ? s_billday - 1 : 0);
+    if (s_billday == BILLDAY_LAST) {
+        catf(out, cap, "<p class=muted style='margin:8px 0 0'>요금 기간: 매월 <b>1일</b>부터 <b>말일</b>까지. "
+                       "즉 'N월' 막대 = N월 1일 ~ N월 말일 사용분입니다.</p>");
+    } else if (s_billday <= 27) {
+        catf(out, cap, "<p class=muted style='margin:8px 0 0'>요금 기간: 전달 검침일 <b>다음 날</b>부터 이번 달 <b>검침일</b>까지. "
+                       "즉 'N월' 막대 = 전달 %u일 ~ N월 %u일 사용분입니다.</p>", s_billday + 1, s_billday);
+    } else {                                         /* 28~31일: 그 날이 없는 달이 있다 */
+        catf(out, cap, "<p class=muted style='margin:8px 0 0'>요금 기간: 전달 검침일 <b>다음 날</b>부터 이번 달 <b>검침일(%u일)</b>까지. "
+                       "%u일이 없는 달에는 그 달의 마지막 날을 검침일로 봅니다.</p>", s_billday, s_billday);
+    }
 
     /* 스타일(이 카드에서만 쓰는 것) */
     catf(out, cap, "<style>.gline{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;margin:6px 0}"
@@ -747,7 +779,8 @@ void hub_tariff_render(char *out, size_t cap)
                    ".gline .gopt input{width:auto;padding:0;margin:0;flex:none}"
                    ".grpbox .row{align-items:center}.gv{text-align:right}"
                    ".gv small{display:block;color:#888;font-size:12px}"
-                   "input.gin{width:8.5em;text-align:right;padding:8px 10px}"
+                   "input.gin,select.gin{width:8.5em;text-align:right;padding:8px 10px}"
+                   "select.gin{font-size:16px;border-radius:8px;border:1px solid #444;background:#1c1c1c;color:#eee}"
                    "input[inputmode=decimal],input[inputmode=numeric]{appearance:textfield;-moz-appearance:textfield}"
                    "input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}</style>");
 

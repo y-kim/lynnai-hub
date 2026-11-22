@@ -780,5 +780,48 @@ core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2400, -32768))     -- 습도
 check(room_events("humidity") == n3 and room_events("temperature") == nt2 + 2, "습도 없는 센서 → 온도만 보냄")
 os.time = real_time2
 
+print("[30] 검침일: 전달 검침일 다음 날 ~ 이번 달 검침일이 한 달, 말일(31)이면 1일 ~ 말일")
+reset()
+local real_date, fake_day = os.date, nil
+os.date = function(fmt, t)                       -- 오늘 날짜만 바꾼다(다른 시각 계산은 그대로)
+  if fmt == "*t" and t == nil and fake_day then return fake_day end
+  return real_date(fmt, t)
+end
+local function on_day(y, m, d) fake_day = { year = y, month = m, day = d, hour = 12, min = 0, sec = 0 } end
+local function gas_at(count) core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4", count, count * 10, 0, 0, 0, 10)) end
+on_day(2026, 11, 22)
+gas_at(5000)                                      -- 가스 기기 생성, 지침 50㎥
+local gdev = driver._children["gas"]
+gdev.preferences = { gasBillDay = 8 }
+gdev:set_field("gas_month_tag", "2026-11", { persist = true })     -- 옛 규칙이 적어 둔 태그(11/8 에 시작한 기간)
+gdev:set_field("gas_month_base", 40, { persist = true })
+gdev:set_field("gas_tag_v", nil, { persist = true })               -- 새 규칙으로 옮기기 전의 상태
+core.info_changed(nil, gdev)
+check(lastv("gas", "main", "period").value == 10, "옛 규칙의 태그를 이어받음: 기준 40 그대로 → 이번 달 10㎥(0 으로 돌아가지 않음)")
+check(gdev:get_field("gas_month_tag") == "2026-12", "태그는 새 규칙(끝나는 달 = 12월)으로 바뀜")
+on_day(2026, 12, 8); gas_at(5300)
+check(lastv("gas", "main", "period").value == 13, "검침일 당일(12/8)까지는 같은 달 몫 → 13㎥")
+on_day(2026, 12, 9); gas_at(5400)
+check(lastv("gas", "main", "period").value == 0, "검침일 다음 날(12/9)부터 새 달 → 0 부터")
+check(gdev:get_field("gas_month_tag") == "2027-01", "12/9 ~ 1/8 은 1월 몫")
+-- 말일
+gdev.preferences = { gasBillDay = 31 }
+on_day(2026, 11, 29); gas_at(5500)
+check(gdev:get_field("gas_month_tag") == "2026-11", "말일: 11/29 는 11월 몫")
+on_day(2026, 11, 30); gas_at(5600)
+check(lastv("gas", "main", "period").value == 1, "말일: 11월 30일(그 달 마지막 날)까지 11월 → 1㎥")
+on_day(2026, 12, 1); gas_at(5700)
+check(lastv("gas", "main", "period").value == 0 and gdev:get_field("gas_month_tag") == "2026-12", "말일: 12/1 부터 12월 → 0 부터")
+on_day(2027, 2, 28); gas_at(5800)
+check(gdev:get_field("gas_month_tag") == "2027-02", "말일: 2월은 28일이 마지막 날")
+on_day(2027, 3, 1); gas_at(5900)
+check(gdev:get_field("gas_month_tag") == "2027-03", "말일: 3/1 은 3월 몫")
+-- 허브가 알려 준 검침일이 드라이버 설정보다 먼저
+gdev.preferences = { gasBillDay = 8 }
+on_day(2027, 3, 20)
+core.on_message(hub, CMD.TARIFF, string.pack("<I4I4I4I4I4", 993900, 42576000, 22622600, 1250, 31))
+check(gdev:get_field("gas_month_tag") == "2027-03", "허브가 검침일 = 말일로 알려 주면 그 값을 씀(3/20 → 3월 몫, 설정 8일이면 4월)")
+os.date = real_date
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -92,13 +92,13 @@ preferences:
       maximum: 100000
       default: 1250
   - name: gasBillDay
-    title: 검침일 (1-28)
-    description: 가스 검침일. 이번 달 사용량·요금을 이 날 기준으로 센다
+    title: 검침일 (1-31, 말일은 31)
+    description: 가스 검침일. 전달 검침일 다음 날부터 이번 달 검침일까지를 한 달로 센다. 그 날이 없는 달에는 마지막 날(31 = 말일, 1일~말일). 허브에서 검침일을 정했으면 그 값을 쓴다
     required: false
     preferenceType: integer
     definition:
       minimum: 1
-      maximum: 28
+      maximum: 31
       default: 8
   - name: gasWarnCost
     title: 사용량 경고 - 이번달 예상 금액 (원)
