@@ -39,7 +39,7 @@ extern const char gas_ca_pem_end[]   asm("_binary_gas_ca_pem_end");
 #define FETCH_RETRY_S 15
 /* 부팅 직후엔 보일러·각방 연결의 TLS 핸드셰이크가 몰려 힙이 빠듯하다 — 그게 끝난 뒤에 조회를 시작한다 */
 #define FIRST_DELAY_S 40
-#define TLS_MIN_FREE  60000      /* HTTPS 한 번에 40KB 남짓 쓴다. 이만큼 남아 있을 때만 시작 */
+#define TLS_MIN_FREE  44000      /* HTTPS 한 번에 40KB 남짓 쓴다. 이만큼 남아 있을 때만 시작 */
 #define WAKE_S        600
 #define FIN_THROTTLE_S 3600          /* 마감 재시도는 한 시간에 한 번 */
 #define FIN_GRACE_D   3              /* 정확 열량이 없으면 검침일+이 일수 뒤 최신 월값으로 마감 */
@@ -68,6 +68,12 @@ static uint32_t s_man_base    = DEF_BASE;        /* 기본료 = 내 정보(항�
 static uint32_t s_fet_vcf_e6, s_fet_heat_e6, s_fet_rate_e6;   /* 자동: 마지막 조회값(보정·열량·단가) */
 static bool     s_fet_valid;
 static long     s_fet_epoch;
+static volatile bool s_fet_want;                 /* 새로고침: 다음 바퀴에 꼭 다시 받는다(받아 둔 값은 그동안 그대로 쓴다) */
+static volatile bool s_fet_busy;                 /* 받는 중(요청부터 그 시도가 끝날 때까지) — 화면 안내용 */
+static char     s_fet_err[40];                   /* 마지막 시도가 실패한 까닭(성공하면 빈 문자열) */
+static uint8_t  s_fet_fails;                     /* 잇따라 실패한 횟수(다시 받기 간격을 늘린다) */
+static uint32_t s_fet_retry_s;                   /* 실패 뒤 다음 시도까지(0 = 예정 없음) */
+static char     s_get_err[40];                   /* http_get 이 실패한 까닭 */
 static char     s_fet_regname[40];               /* "지역" */
 static char     s_fet_heatbasis[72];             /* "열량기준" (측정 기간/출처) */
 
@@ -224,11 +230,23 @@ static bool tls_room(void)
     return false;
 }
 
+/* HTTPS 한 번이 힙을 얼마나 쓰는지 잰다(TLS_MIN_FREE 를 근거 있게 잡으려고): 받는 동안 10ms 마다 남은 힙의 최저를 본다 */
+static volatile uint32_t s_get_low;
+
+static void get_low_tick(void *arg)
+{
+    uint32_t f = esp_get_free_heap_size();
+    if (f < s_get_low) {
+        s_get_low = f;
+    }
+}
+
 static int http_get(const char *url, char *buf, int cap)
 {
     buf[0] = 0;
     if (!tls_room()) {
         ESP_LOGW(TAG, "GET 미룸(메모리 여유 %lu B) %s", (unsigned long)esp_get_free_heap_size(), url);
+        strlcpy(s_get_err, "허브가 바빠서 미룸", sizeof(s_get_err));
         return -1;
     }
     use_sta_dns();
@@ -243,13 +261,36 @@ static int http_get(const char *url, char *buf, int cap)
         .timeout_ms = 10000,
         .buffer_size = 1024,
     };
+    uint32_t before = esp_get_free_heap_size();
+    s_get_low = before;
+    esp_timer_handle_t tick = NULL;
+    const esp_timer_create_args_t ta = { .callback = get_low_tick, .name = "get_low" };
+    if (esp_timer_create(&ta, &tick) == ESP_OK) {
+        esp_timer_start_periodic(tick, 10000);
+    }
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) return -1;
-    esp_err_t err = esp_http_client_perform(c);
-    int status = esp_http_client_get_status_code(c);
-    esp_http_client_cleanup(c);
+    esp_err_t err = c ? esp_http_client_perform(c) : ESP_FAIL;
+    int status = c ? esp_http_client_get_status_code(c) : 0;
+    if (c) {
+        esp_http_client_cleanup(c);
+    }
+    if (tick) {
+        esp_timer_stop(tick);
+        esp_timer_delete(tick);
+    }
+    ESP_LOGI(TAG, "GET 메모리: 시작 %lu B, 받는 동안 최저 %lu B (쓴 양 %lu B)", (unsigned long)before, (unsigned long)s_get_low,
+             (unsigned long)(before - s_get_low));
+    if (!c) {
+        strlcpy(s_get_err, "허브 메모리 부족", sizeof(s_get_err));
+        return -1;
+    }
     if (err != ESP_OK || status != 200) {
         ESP_LOGW(TAG, "GET 실패 %s err=%s status=%d", url, esp_err_to_name(err), status);
+        if (err != ESP_OK) {
+            strlcpy(s_get_err, "서버에 연결하지 못함", sizeof(s_get_err));
+        } else {
+            snprintf(s_get_err, sizeof(s_get_err), "서버 응답 %d", status);
+        }
         return -1;
     }
     return rx.len;
@@ -290,22 +331,28 @@ static bool fetch_auto(void)
 {
     char url[128];
     snprintf(url, sizeof(url), "https://gas.yangsu.kim/api/bill?m3=0&region=%s", s_region);
-    if (http_get(url, s_buf, BUF_MAX) < 0) return false;
+    if (http_get(url, s_buf, BUF_MAX) < 0) {
+        strlcpy(s_fet_err, s_get_err, sizeof(s_fet_err));
+        return false;
+    }
     double vcf, heat, rate;
     if (!num_after(s_buf, "\"보정계수\"", &vcf) ||
         !num_after(s_buf, "\"열량\"", &heat) ||
         !num_after(s_buf, "\"단가\"", &rate)) {
         ESP_LOGW(TAG, "응답 파싱 실패");
+        strlcpy(s_fet_err, "서버 응답을 읽지 못함", sizeof(s_fet_err));
         return false;
     }
     if (vcf < 0.9 || vcf > 1.1 || heat < 20 || heat > 60 || rate <= 0 || rate > 100) {
         ESP_LOGW(TAG, "값 범위 벗어남 vcf=%.4f heat=%.3f rate=%.4f", vcf, heat, rate);
+        strlcpy(s_fet_err, "받은 값이 범위를 벗어남", sizeof(s_fet_err));
         return false;
     }
     s_fet_vcf_e6  = (uint32_t)lround(vcf * 1e6);
     s_fet_heat_e6 = (uint32_t)lround(heat * 1e6);
     s_fet_rate_e6 = (uint32_t)lround(rate * 1e6);
     s_fet_valid   = true;
+    s_fet_err[0]  = 0;
     { long nw = time(NULL); s_fet_epoch = CLOCK_OK(nw) ? nw : 0; }   /* 동기 전이면 0(업타임 값 노출 안 함) */
     str_after(s_buf, "\"지역\"", s_fet_regname, sizeof(s_fet_regname));
     str_after(s_buf, "\"열량기준\"", s_fet_heatbasis, sizeof(s_fet_heatbasis));
@@ -495,14 +542,35 @@ static void tariff_task(void *arg)
         bool need_retry = false;
         if (s_mode == MODE_AUTO) {
             int64_t nowu = esp_timer_get_time();
-            if (!s_fet_valid || nowu - last_fetch_us > (int64_t)FETCH_OK_S * 1000000) {
-                if (fetch_auto()) last_fetch_us = nowu;
-                else need_retry = !s_fet_valid;
+            bool want = s_fet_want;
+            if (want || !s_fet_valid || nowu - last_fetch_us > (int64_t)FETCH_OK_S * 1000000) {
+                s_fet_want = false;
+                s_fet_busy = true;
+                if (fetch_auto()) {
+                    last_fetch_us = nowu;
+                    s_fet_fails = 0;
+                } else {
+                    /* 새로고침이었거나 받아 둔 값이 없으면 곧 다시(서버가 502 를 한 번 내고 다음엔 답하는 일이 있다) */
+                    need_retry = want || !s_fet_valid;
+                    if (need_retry) {
+                        s_fet_want = true;
+                        if (s_fet_fails < 250) s_fet_fails++;
+                    }
+                }
+                s_fet_busy = false;
             }
+        } else {
+            s_fet_want = false;
+            s_fet_busy = false;
         }
         relay_current();
         finalize_pending();
-        uint32_t wait = need_retry ? FETCH_RETRY_S : (s_mon_n == 0 ? 30 : WAKE_S);
+        uint32_t wait = s_mon_n == 0 ? 30 : WAKE_S;
+        if (need_retry) {              /* 15초, 30초, 1분 … 최대 10분 */
+            wait = FETCH_RETRY_S << (s_fet_fails > 6 ? 6 : s_fet_fails - 1);
+            if (wait > WAKE_S) wait = WAKE_S;
+        }
+        s_fet_retry_s = s_fet_err[0] ? wait : 0;
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait * 1000));
     }
 }
@@ -518,7 +586,11 @@ void hub_tariff_init(void)
 /* ---------------------------------------------------------------- 포털 저장 */
 void hub_tariff_refresh(void)
 {
-    s_fet_valid = false;
+    if (s_mode != MODE_AUTO) return;
+    /* 받아 둔 값은 버리지 않는다 — 새 값이 올 때까지 그 값으로 계산한다(실패해도 수동값으로 떨어지지 않게) */
+    s_fet_want  = true;
+    s_fet_busy  = true;
+    s_fet_fails = 0;
     s_relay_sig = 0xFFFFFFFFu;
     if (s_task) xTaskNotifyGive(s_task);
 }
@@ -556,6 +628,9 @@ int hub_tariff_apply(int mode, const char *region, int billday,
     }
     save_cfg();
     s_fet_valid = false;
+    s_fet_err[0] = 0;
+    s_fet_fails = 0;
+    s_fet_busy  = (s_mode == MODE_AUTO);
     s_relay_sig = 0xFFFFFFFFu;
     if (s_task) xTaskNotifyGive(s_task);
     return 1;
@@ -646,8 +721,25 @@ static void heat_basis_text(char *out, size_t cap)
  * 노출 설정 카드와 같은 모양(.row: 왼쪽 이름, 오른쪽 값·기준). out 뒤에 덧붙인다. */
 void hub_tariff_now_html(char *out, size_t cap)
 {
+    /* <i id=gw> = 아직 끝나지 않았다는 표시: 화면이 이게 사라질 때까지 이 조각을 다시 받아 온다 */
+    bool busy = s_fet_busy;
+    if (busy) {
+        catf(out, cap, "<div class=row><span class=muted>%s</span></div><i id=gw hidden></i>",
+             s_fet_valid ? "다시 받는 중…" : "받는 중…");
+    } else if (s_fet_err[0]) {
+        char when[96] = "";
+        uint32_t r = s_fet_retry_s;
+        if (r) {
+            snprintf(when, sizeof(when), r < 60 ? " · %lu초 뒤 다시 받습니다<i id=gw hidden></i>" : " · %lu분 뒤 다시 받습니다",
+                     (unsigned long)(r < 60 ? r : r / 60));
+        }
+        catf(out, cap, "<div class=row><span class=muted>⚠ 받지 못함 (%s)%s</span></div>", s_fet_err, when);
+    }
     if (!s_fet_valid) {
-        catf(out, cap, "<div class=row><span class=muted>받는 중… 계속 이 상태면 허브의 인터넷 연결을 확인하세요.</span></div>");
+        if (!busy && !s_fet_err[0]) {
+            catf(out, cap, "<div class=row><span class=muted>받는 중… 계속 이 상태면 허브의 인터넷 연결을 확인하세요.</span></div>"
+                           "<i id=gw hidden></i>");
+        }
         return;
     }
     char b[128];
@@ -792,10 +884,11 @@ void hub_tariff_render(char *out, size_t cap)
                    "document.getElementById('gman').querySelectorAll('input').forEach(function(i){i.disabled=!m});}"
                    "function _gput(u){fetch(u).then(function(r){return r.text()}).then(function(t){"
                    "document.getElementById('gnow').innerHTML=t}).catch(function(){});}"
-                   "var _gt;function _grefresh(){document.getElementById('gnow').innerHTML="
-                   "'<span style=opacity:.6>받는 중…</span>';_gput('/admin/gas-now?do=refresh');"
-                   "clearInterval(_gt);var k=0;_gt=setInterval(function(){"
-                   "if(++k>6){clearInterval(_gt);return}_gput('/admin/gas-now')},2000);}"
-                   "_gm();</script>");
+                   /* 값이 올 때까지(조각에 gw 표시가 있는 동안) 3초마다 다시 받아 온다. 최대 3분 */
+                   "var _gt;function _gpoll(){clearInterval(_gt);var k=0;_gt=setInterval(function(){"
+                   "if(++k>60||!document.getElementById('gw')){clearInterval(_gt);return}_gput('/admin/gas-now')},3000);}"
+                   "function _grefresh(){document.getElementById('gnow').innerHTML="
+                   "'<span style=opacity:.6>받는 중…</span><i id=gw hidden></i>';_gput('/admin/gas-now?do=refresh');_gpoll();}"
+                   "_gm();if(document.getElementById('gw'))_gpoll();</script>");
     catf(out, cap, "</div>");
 }

@@ -969,9 +969,14 @@ static esp_err_t gasnow_get(httpd_req_t *req)
         httpd_query_key_value(q, "do", v, sizeof(v)) == ESP_OK && !strcmp(v, "refresh")) {
         hub_tariff_refresh();
     }
-    char b[640] = "";
-    hub_tariff_now_html(b, sizeof(b));
-    return httpd_resp_sendstr(req, b);
+    char *b = calloc(1, 1024);            /* 안내 줄이 붙으면 640 을 넘는다 — 스택 대신 힙에 */
+    if (!b) {
+        return httpd_resp_sendstr(req, "<i id=gw hidden></i>");
+    }
+    hub_tariff_now_html(b, 1024);
+    esp_err_t r = httpd_resp_sendstr(req, b);
+    free(b);
+    return r;
 }
 
 /* 원격 디버그 키 만들기/삭제 — 키는 관리자만 만든다(암호 필요). 디버그 키로는 또 못 만든다. */
