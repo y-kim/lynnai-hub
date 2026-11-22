@@ -507,6 +507,14 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     strlcat(b, "<form method=post action=/admin/api><button name=op value=new>토큰 새로 만들기</button>"
                "<button name=op value=off class=ghost>토큰 끄기</button></form>"
                "<p class=muted>새로 만들면 이전 토큰은 바로 무효. 토큰은 만들 때 한 번만 보여 줍니다.</p></div>", cap);
+    strlcat(b, "<h2>관리자 암호</h2><div class=card><form method=post action=/admin/password autocomplete=off>"
+               "<label>현재 암호</label><input type=password name=cur autocomplete=current-password required>"
+               "<label>새 암호 (8자 이상)</label><input type=password name=pw minlength=8 maxlength=64 "
+               "autocomplete=new-password required>"
+               "<label>새 암호 확인</label><input type=password name=pw2 minlength=8 maxlength=64 "
+               "autocomplete=new-password required>"
+               "<button>암호 바꾸기</button></form>"
+               "<p class=muted>바꾸면 바로 로그아웃됩니다 — 새 암호로 다시 로그인하세요. 암호를 잊으면 허브를 공장 초기화해야 합니다.</p></div>", cap);
     FLUSH();
 #undef FLUSH
     free(b);
@@ -841,6 +849,52 @@ static esp_err_t apitoken_post(httpd_req_t *req)
     return admin_page(req, "잘못된 요청", false);
 }
 
+/* 관리자 암호 바꾸기: 로그인한 세션만(디버그 키로는 못 바꾼다). 현재 암호를 다시 확인하고, 틀리면 로그인처럼 늦춘다.
+ * 바꾸면 세션을 지우고 로그인 화면을 돌려준다(화면의 스크립트는 관리 화면이 아닌 응답을 그대로 띄운다). */
+static esp_err_t password_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    /* 버퍼는 힙에 둔다: 암호 셋(각 URL 인코딩 3배)과 본문을 스택에 두면 암호 해시 계산·저장과 겹쳐 httpd 스택(6KB)이
+     * 넘쳤다 — 2026-11-22 실제로 암호를 바꾸는 순간 허브가 죽어 재시작했다. */
+    enum { PWB = HUB_PASS_MAX * 3 + 1, BODY = 720 };
+    char *m = calloc(1, BODY + 3 * PWB), err[96] = "";
+    if (!m) {
+        return admin_page(req, "메모리가 부족합니다 — 잠시 뒤 다시 하세요", false);
+    }
+    char *body = m, *cur = m + BODY, *pw = cur + PWB, *pw2 = pw + PWB;
+    const char *msg = NULL;
+    bool ok = false;
+    if (read_body(req, body, BODY) < 0) {
+        msg = "잘못된 요청";
+    } else {
+        form_get(body, "cur", cur, PWB);
+        form_get(body, "pw", pw, PWB);
+        form_get(body, "pw2", pw2, PWB);
+        if (!cur[0] || !hub_state_verify_admin(cur)) {
+            vTaskDelay(pdMS_TO_TICKS(1000));         /* 암호 맞히기 늦추기 */
+            msg = "현재 암호가 맞지 않습니다";
+        } else if (strcmp(pw, pw2)) {
+            msg = "새 암호와 확인이 서로 다릅니다";
+        } else if (hub_state_set_admin(pw, err, sizeof(err)) != ESP_OK) {
+            msg = err;
+        } else {
+            ok = true;
+        }
+    }
+    memset(m, 0, BODY + 3 * PWB);
+    free(m);
+    ESP_LOGI(TAG, "암호 바꾸기 %s (httpd 스택 여유 최저 %u B)", ok ? "성공" : "거절", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    if (ok) {                                        /* 바꾸면 바로 로그아웃 — 새 암호로 다시 들어오게 한다 */
+        s_sess[0] = 0;
+        httpd_resp_set_hdr(req, "Set-Cookie", "lynnai_s=; Path=/; Max-Age=0");
+        return login_page(req, "관리자 암호를 바꿨습니다. 새 암호로 로그인하세요.");
+    }
+    return admin_page(req, msg, false);
+}
+
 static esp_err_t plugin_action_post(httpd_req_t *req)
 {
     log_req(req);
@@ -990,7 +1044,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
     cfg.max_uri_handlers = 34;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
-    cfg.stack_size = 6144;
+    cfg.stack_size = 8192;                /* 6144 에서: 암호 해시 계산 + 저장이 한 요청에 겹칠 때 여유 */
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
     httpd_handle_t srv = NULL;
@@ -1010,6 +1064,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     const httpd_uri_t lout = { .uri = "/logout", .method = HTTP_GET, .handler = logout_get };
     const httpd_uri_t loutp = { .uri = "/logout", .method = HTTP_POST, .handler = logout_post };
     const httpd_uri_t plug = { .uri = "/admin/plugin", .method = HTTP_POST, .handler = plugin_post };
+    const httpd_uri_t pwch = { .uri = "/admin/password", .method = HTTP_POST, .handler = password_post };
+    httpd_register_uri_handler(srv, &pwch);
     const httpd_uri_t gas = { .uri = "/admin/plugin-action", .method = HTTP_POST, .handler = plugin_action_post };
     const httpd_uri_t expo = { .uri = "/admin/expose", .method = HTTP_POST, .handler = expose_post };
     const httpd_uri_t prs = { .uri = "/admin/devices", .method = HTTP_POST, .handler = pairs_post };

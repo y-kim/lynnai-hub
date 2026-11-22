@@ -34,3 +34,5 @@ esp_err_t hub_state_provision(hub_state_t *st,
                               const char *admin_pw, char *err, int err_len);
 
 bool hub_state_verify_admin(const char *pw);
+/* 관리자 암호 바꾸기(8~64자). 현재 암호 확인은 호출부가 한다. 실패 시 err 에 사유 */
+esp_err_t hub_state_set_admin(const char *admin_pw, char *err, int err_len);

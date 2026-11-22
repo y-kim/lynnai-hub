@@ -141,17 +141,46 @@ esp_err_t hub_state_provision(hub_state_t *st,
     return ESP_OK;
 }
 
+esp_err_t hub_state_set_admin(const char *admin_pw, char *err, int err_len)
+{
+    size_t n = strlen(admin_pw);
+    if (n < 8) FAIL("새 암호는 8자 이상");
+    if (n > HUB_PASS_MAX) FAIL("새 암호가 너무 깁니다");
+    if (has_ctrl(admin_pw)) FAIL("암호에 쓸 수 없는 문자가 있습니다");
+    uint8_t cred[SALT_LEN + HASH_LEN];
+    esp_fill_random(cred, SALT_LEN);
+    if (hash_pw(admin_pw, cred, cred + SALT_LEN) != ESP_OK) FAIL("암호 처리 실패");
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) FAIL("저장소 열기 실패");
+    /* 소금과 해시를 한 값(adm_cred)으로 쓴다 — 따로 쓰면 그 사이에 꺼졌을 때 짝이 안 맞아 어느 암호로도 못 들어온다.
+     * 처음 설정 때 쓴 옛 두 값(adm_salt·adm_hash)은 그대로 두고, 확인할 때 adm_cred 가 있으면 그것을 먼저 본다. */
+    esp_err_t e = hs_set_blob(h, "adm_cred", cred, sizeof(cred));
+    if (e == ESP_OK) e = nvs_commit(h);
+    nvs_close(h);
+    memset(cred, 0, sizeof(cred));
+    if (e != ESP_OK) FAIL("저장 실패 — 암호는 바뀌지 않았습니다");
+    ESP_LOGW(TAG, "관리자 암호가 바뀜");
+    return ESP_OK;
+}
+
 bool hub_state_verify_admin(const char *pw)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return false;
     }
-    uint8_t salt[SALT_LEN], want[HASH_LEN], got[HASH_LEN];
-    size_t sl = sizeof(salt), hl = sizeof(want);
-    bool ok = hs_get_blob(h, NS, "adm_salt", salt, &sl) == ESP_OK &&
-              hs_get_blob(h, NS, "adm_hash", want, &hl) == ESP_OK &&
-              sl == SALT_LEN && hl == HASH_LEN && hash_pw(pw, salt, got) == ESP_OK;
+    uint8_t salt[SALT_LEN], want[HASH_LEN], got[HASH_LEN], cred[SALT_LEN + HASH_LEN];
+    size_t sl = sizeof(salt), hl = sizeof(want), cl = sizeof(cred);
+    bool ok;
+    if (hs_get_blob(h, NS, "adm_cred", cred, &cl) == ESP_OK && cl == sizeof(cred)) {   /* 암호를 바꾼 적이 있다 */
+        memcpy(salt, cred, SALT_LEN);
+        memcpy(want, cred + SALT_LEN, HASH_LEN);
+        ok = hash_pw(pw, salt, got) == ESP_OK;
+    } else {
+        ok = hs_get_blob(h, NS, "adm_salt", salt, &sl) == ESP_OK &&
+             hs_get_blob(h, NS, "adm_hash", want, &hl) == ESP_OK &&
+             sl == SALT_LEN && hl == HASH_LEN && hash_pw(pw, salt, got) == ESP_OK;
+    }
     nvs_close(h);
     if (!ok) {
         return false;
