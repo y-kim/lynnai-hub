@@ -17,7 +17,7 @@ local sent_cmds = {}   -- 허브로 보낸 명령 텍스트(순서대로)
 local function mk_cap(id, attrs, cmds)
   local c = { ID = id, commands = {}, attributes = {} }
   for _, a in ipairs(attrs or {}) do
-    c[a] = function(v, _opts) return { capability = c, attribute = { NAME = a }, value = v } end
+    c[a] = function(v, opts) return { capability = c, attribute = { NAME = a }, value = v, state_change = opts and opts.state_change } end
     c.attributes[a] = { NAME = a }
   end
   for _, cm in ipairs(cmds or {}) do
@@ -84,7 +84,7 @@ local function mk_device(key, label, profile, parent)
   function d:offline() self._online = false end
   function d:emit_component_event(comp, ev)
     emitted[#emitted + 1] = { key = self.parent_assigned_child_key or "hub", comp = comp.id,
-      cap = ev.capability.ID, attr = ev.attribute.NAME, value = ev.value }
+      cap = ev.capability.ID, attr = ev.attribute.NAME, value = ev.value, state_change = ev.state_change }
   end
   function d:supports_capability_by_id(id, comp)
     -- 프로필에서 optional 이 아닌 것(상태 글자·상태 카드·온도·새로고침 등)은 늘 지원 — 실제 라이브러리와 같게
@@ -614,6 +614,10 @@ check(room._online == false and gas._online == true, "온습도계 고장 → �
 core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 가스도: 난방 중인데 펄스 없음
 check(gas._online == false, "가스 고장 → 가스 계량기 오프라인")
 check(lastv("gas", "main", "status") == "펄스 없음 — 센서 확인", "가스 기기에 이유 표시")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 3, 2))            -- 가스는 사용자가 멈춘 것(셋째 바이트)
+check(driver._children["gas"]._online == false and lastv("gas", "main", "status") == "멈춤", "멈춘 센서 → 오프라인, 이유는 '멈춤'")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 다시 고장 상태(멈춤 아님)
+check(lastv("gas", "main", "status") == "펄스 없음 — 센서 확인", "멈춤이 풀리고 고장만 남으면 이유가 되돌아옴")
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 305, 0xFFFFFFFF, 0, 0, 0))
 check(gas._online == false, "고장 중 1분마다 오는 가스 값으로 온라인이 되지 않음")
 core.info_changed(nil, room)
@@ -717,6 +721,46 @@ check(table.concat(sent_cmds, " | "):find("f06@a1b2c3 b4=1", 1, true), "난방 �
 sent_cmds = {}
 core.capability_handlers["thermostatMode"]["setThermostatMode"](nil, driver._children["ba1b2c3"], { component = "heat", args = { mode = "cool" } })
 check(#sent_cmds == 0, "표준 목록의 다른 값(cool 등)은 무시")
+
+print("[29] 온도·습도는 값이 그대로여도 20분마다 다시 보낸다(그래프가 끊기지 않게)")
+reset()
+local function room_events(attr)
+  local n, forced = 0, 0
+  for _, e in ipairs(emitted) do
+    if e.key == "room" and e.attr == attr then n = n + 1; if e.state_change then forced = forced + 1 end end
+  end
+  return n, forced
+end
+local t0 = os.time()
+local real_time2 = os.time
+os.time = function() return t0 end
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
+core.info_changed(nil, driver._children["room"])                   -- 앞 시나리오의 중복 캐시를 비우고 지금 값으로
+local n0 = room_events("humidity")
+os.time = function() return t0 + 19 * 60 end
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
+check(room_events("humidity") == n0, "19분 뒤 같은 값 → 다시 보내지 않음")
+os.time = function() return t0 + 21 * 60 end
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
+local n1, f1 = room_events("humidity")
+check(n1 == n0 + 1 and f1 == 1, "21분 뒤 같은 값 → 한 번 다시 보냄(state_change)")
+local _, ft = room_events("temperature")
+check(ft == 1, "온도도 같이 다시 보냄")
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
+check(room_events("humidity") == n1, "바로 다음 값은 다시 보내지 않음(20분을 새로 센다)")
+os.time = function() return t0 + 30 * 60 end
+local nt = room_events("temperature")
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4100))
+local n2, f2 = room_events("humidity")
+check(n2 == n1 + 1 and f2 == 1, "값이 바뀌면 바로 보냄(보통 이벤트)")
+local nt2, ft2 = room_events("temperature")
+check(nt2 == nt + 1 and ft2 == 2, "습도만 바뀌어도 온도를 같이 보냄(state_change)")
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2310, 4100))
+local n3, f3 = room_events("humidity")
+check(n3 == n2 + 1 and f3 == 2 and room_events("temperature") == nt2 + 1, "온도만 바뀌어도 습도를 같이 보냄")
+core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2400, -32768))     -- 습도가 없는 센서(MPL3115A2)
+check(room_events("humidity") == n3 and room_events("temperature") == nt2 + 2, "습도 없는 센서 → 온도만 보냄")
+os.time = real_time2
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

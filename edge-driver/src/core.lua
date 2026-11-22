@@ -273,6 +273,36 @@ local function emit(device, comp, ev)
   device:emit_component_event(device.profile.components[comp], ev)
 end
 
+-- 측정값용: 묶음(items = { {attr_fn, payload}, … })을 같이 보낸다.
+--   · 하나라도 값이 바뀌면 나머지도 같이 다시 보낸다(온도·습도가 같은 시각의 기록으로 남는다).
+--   · 값이 다 그대로여도 KEEP_S 초마다 한 번은 다시 보낸다. 앱의 그래프는 한 시간 동안 기록이 하나도 없으면 그 시간대를
+--     빈칸으로 그린다 — 습도가 몇 시간 같은 값이면 그래프가 끊겨 보였다.
+-- 값이 그대로인 것은 state_change 를 붙여 보낸다(안 붙이면 같은 값은 기록에 안 남는다).
+local KEEP_S = 20 * 60
+local sent_at = {}
+local function emit_group(device, comp, items)
+  local now, changed, due, list = os.time(), false, false, {}
+  for _, it in ipairs(items) do
+    local ev = it[1](it[2])
+    if device:supports_capability_by_id(ev.capability.ID, comp) then
+      local key = table.concat({ device.id, comp, ev.capability.ID, ev.attribute.NAME }, "|")
+      local same = sent[key] == ser(ev.value)
+      if not same then changed = true end
+      if now - (sent_at[key] or 0) >= KEEP_S then due = true end
+      list[#list + 1] = { it = it, ev = ev, key = key, same = same }
+    end
+  end
+  if not (changed or due) then return end
+  for _, e in ipairs(list) do
+    if e.same then
+      sent[e.key] = nil
+      e.ev = e.it[1](e.it[2], { state_change = true })
+    end
+    sent_at[e.key] = now
+    emit(device, comp, e.ev)
+  end
+end
+
 local function deg(v) return tonumber(v) and string.format("%d°C", math.floor(tonumber(v) + 0.5)) or "?" end
 local function setpoint(v) return capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = v, unit = "C" }) end
 local function sp_range(r)
@@ -430,7 +460,7 @@ local function refresh_zone(parent, mac, id)
   emit(child, "main", heating and capabilities.switch.switch.on() or capabilities.switch.switch.off())
   emit(child, "main", sp_range({ 10, ZONES[id].max }))
   emit(child, "main", setpoint(z.target))
-  emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = z.current, unit = "C" }))
+  emit_group(child, "main", { { capabilities.temperatureMeasurement.temperature, { value = z.current, unit = "C" } } })
   emit(child, "outing", z.outing and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 외출(f09 stat bit 0x10)
   emit(child, "reserve", z.reserve and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 예약(stat 0x08)
   -- 예약 시간: 예약 중이면 기기 값(다음 바이트)을 기억해 두고, 꺼져 있으면 기억한 값(없으면 1시간)을 보여 준다
@@ -647,8 +677,11 @@ local function show_room(parent)
   local v = hub_state(parent).room
   if not child or not v then return end
   mark_online(child)
-  emit(child, "main", capabilities.temperatureMeasurement.temperature({ value = math.floor(v[1] / 10 + 0.5) / 10, unit = "C" }))
-  emit(child, "main", capabilities.relativeHumidityMeasurement.humidity({ value = math.floor(v[2] / 100 + 0.5) }))
+  local items = { { capabilities.temperatureMeasurement.temperature, { value = math.floor(v[1] / 10 + 0.5) / 10, unit = "C" } } }
+  if v[2] ~= -32768 then      -- 습도가 없는 센서(MPL3115A2 등)는 허브가 습도 자리에 -32768 을 보낸다 → 습도는 안 보낸다
+    items[2] = { capabilities.relativeHumidityMeasurement.humidity, { value = math.floor(v[2] / 100 + 0.5) } }
+  end
+  emit_group(child, "main", items)
 end
 
 local function on_room(parent, b)
@@ -747,7 +780,8 @@ end
 function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
   if child and faulty(parent, FAULT_GAS) then
-    emit(child, "main", status_cap.status("펄스 없음 — 센서 확인"))
+    local paused = ((hub_state(parent).plug_pause or 0) & FAULT_GAS) ~= 0
+    emit(child, "main", status_cap.status(paused and "멈춤" or "펄스 없음 — 센서 확인"))
     return go_offline(child, false, true)
   end
   local v = hub_state(parent).gas
@@ -834,7 +868,9 @@ local function on_plugins(parent, b)
   local m = b:byte(1) or 0
   local s = hub_state(parent)
   local was = s.plug_fault or 0
+  local was_pause = s.plug_pause or 0
   s.plug_fault = b:byte(2) or 0                      -- 옛 펌웨어는 첫 바이트만 보낸다 → 고장 없음
+  s.plug_pause = b:byte(3) or 0                      -- 그 가운데 사용자가 멈춘 것(관리 화면의 ⏸) — 이유 글자만 다르다
   for bit, p in pairs(PLUGIN_CHILD) do
     if (m & bit) == 0 then
       s[p.field] = nil
@@ -842,7 +878,7 @@ local function on_plugins(parent, b)
       if child then delete_child(child) end
     end
   end
-  if s.plug_fault ~= was then                        -- 바뀐 순간에만(5분마다 오는 알림으로 값을 다시 내보내지 않게)
+  if s.plug_fault ~= was or s.plug_pause ~= was_pause then                        -- 바뀐 순간에만(5분마다 오는 알림으로 값을 다시 내보내지 않게)
     show_room(parent)
     show_gas(parent)
   end
