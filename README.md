@@ -1,5 +1,7 @@
 # lynnai-hub
 
+<img src="docs/icon.svg" width="96" align="right" alt="LYNNAI Hub 아이콘">
+
 린나이(Rinnai) 프로토콜을 쓰는 보일러 조절기·각방 온도 조절기를 **집 안에서** 제어하고 SmartThings 에 붙이는 허브.
 ESP32-C6 보드 하나가 기기 입장에서의 "클라우드"가 되어, 기기를 자기 Wi-Fi(AP)로 받아 상태를 읽고 명령을 넣는다.
 린나이 클라우드로 그대로 이어 주거나(프록시 모드, 린나이 앱 계속 사용) 클라우드 없이 혼자 동작한다(단독 모드).

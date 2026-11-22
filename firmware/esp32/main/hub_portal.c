@@ -50,11 +50,14 @@ static hub_state_t *s_st;
 /* ---------- 공통 HTML (Pi 판 page() + 칸별 눈 아이콘) ---------- */
 static const char HEAD1[] =
     "<!doctype html><html lang=ko><head><meta charset=utf-8>"
-    "<meta name=viewport content='width=device-width,initial-scale=1'><title>";
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<link rel=icon type=image/svg+xml href=/icon.svg><title>";
 static const char HEAD2[] =
     "</title><style>"
     "body{font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:16px;background:#111;color:#eee}"
-    "h1{font-size:20px}label{display:block;margin:12px 0 4px;color:#bbb}"
+    "h1{font-size:20px;display:flex;align-items:center;gap:8px}"
+    "h1:before{content:'';flex:none;width:28px;height:28px;background:url(/icon.svg) center/contain no-repeat}"
+    "label{display:block;margin:12px 0 4px;color:#bbb}"
     "input,button,form>select{font-size:16px;padding:10px;width:100%;box-sizing:border-box;border-radius:8px;"
     "border:1px solid #444;background:#1c1c1c;color:#eee}"
     "button{background:#c33;border:0;margin-top:14px;font-weight:600}button:disabled{opacity:.45}"
@@ -1021,6 +1024,16 @@ static esp_err_t dbgkey_post(httpd_req_t *req)
     return admin_page(req, note, ok);
 }
 
+/* ---------- 아이콘: 탭 아이콘과 제목 옆 그림(원본은 docs/icon.svg 하나, 빌드 때 그대로 담는다) ---------- */
+extern const char icon_svg[] asm("_binary_icon_svg_start");
+
+static esp_err_t icon_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "image/svg+xml");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    return httpd_resp_send(req, icon_svg, strlen(icon_svg));
+}
+
 /* ---------- 캡티브: 모르는 주소는 전부 설정 페이지로 ---------- */
 static esp_err_t captive_get(httpd_req_t *req)
 {
@@ -1043,7 +1056,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 34;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
+    cfg.max_uri_handlers = 36;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
     cfg.stack_size = 8192;                /* 6144 에서: 암호 해시 계산 + 저장이 한 요청에 겹칠 때 여유 */
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
@@ -1057,6 +1070,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     const httpd_uri_t any = { .uri = "/*", .method = HTTP_GET, .handler = captive_get };
     httpd_register_uri_handler(srv, &root);
     httpd_register_uri_handler(srv, &prov);
+    const httpd_uri_t icon = { .uri = "/icon.svg", .method = HTTP_GET, .handler = icon_get };
+    httpd_register_uri_handler(srv, &icon);        /* 로그인 전·초기 설정 화면에서도 보이게 인증 없이 */
     const httpd_uri_t boot = { .uri = "/key/server", .method = HTTP_GET, .handler = hub_proxy_bootstrap_handler };
     httpd_register_uri_handler(srv, &boot);        /* 보일러 부트스트랩 중계(와일드카드보다 먼저) */
     const httpd_uri_t adm = { .uri = "/admin", .method = HTTP_GET, .handler = admin_get };
