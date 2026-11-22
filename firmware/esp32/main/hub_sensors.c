@@ -29,6 +29,7 @@
 #include "freertos/semphr.h"
 
 #include "hub_sensors.h"
+#include "hub_proxy.h"
 #include "hub_uplink.h"
 #include "hub_plugins.h"
 #include "hub_expose.h"
@@ -750,6 +751,7 @@ static void announce_task(void *arg)
             next = t + 300LL * 1000000;
             send_plugins();
             hub_expose_send_all();
+            hub_proxy_send_mode();
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

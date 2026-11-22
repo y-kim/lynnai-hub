@@ -13,6 +13,7 @@
 #include "hub_store.h"
 
 #include "hub_ota.h"
+#include "hub_proxy.h"
 #include "hub_uplink.h"
 #include "hub_zb_rinnai.h"
 #include "hub_zigbee.h"
@@ -224,6 +225,10 @@ void hub_uplink_on_request(uint8_t from, const char *text, int len)
         return;
     }
     ESP_LOGI(TAG, "요청: %.*s", len, text);
+    if (len > 4 && !memcmp(text, "hub ", 4)) {       /* 허브 자체에 대한 요청(동작 모드) — 기기 명령이 아니다 */
+        hub_proxy_request(text + 4, len - 4);
+        return;
+    }
     if (len == 7 && !memcmp(text, "refresh", 7)) {
         hub_sensors_refresh();
     }

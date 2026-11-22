@@ -11,6 +11,8 @@
  *   단독 모드   : 클라우드 없이 허브가 기기의 MQTT 상대(브로커)가 된다. 인터넷이 없어도 SmartThings 로 제어,
  *                 린나이 앱으로는 안 보이고 제어도 안 된다.
  * 바꾸면 지금 연결을 끊어 기기가 다시 접속할 때 새 모드로 붙는다.
+ * 자동 폴백(기본 켬, NVS "proxy"/"fb"): 프록시 모드인데 클라우드에 닿지 않으면 그동안만 단독처럼 동작하고,
+ * 다시 닿으면 스스로 프록시로 돌아간다(hub_proxy.c 의 FB_* 설명).
  */
 #define HUB_MODE_PROXY      0
 #define HUB_MODE_STANDALONE 1
@@ -18,10 +20,20 @@
 /* 8883 에서 보일러(TLS 1.1)를 받는다. 모드에 따라 클라우드로 중계하거나 직접 응답한다. */
 void hub_proxy_start(void);
 void hub_proxy_relink(void);     /* 지금 기기 연결들을 끊어 다시 받게 한다(기기 등록 직후 곧바로 알아보게) */
-uint8_t hub_proxy_mode(void);
+uint8_t hub_proxy_mode(void);                    /* 정해 둔 모드 */
+bool hub_proxy_local(void);                      /* 지금 허브가 기기를 직접 받는가(단독 모드이거나 폴백 중) */
+bool hub_proxy_fallback(void);                   /* 프록시 모드인데 클라우드에 닿지 않아 단독처럼 동작 중 */
+bool hub_proxy_fallback_on(void);                /* 자동 폴백 설정 */
+const char *hub_proxy_fallback_why(void);        /* 폴백의 까닭: wifi·connect·tls·refused·noreply·closed, 폴백 중이 아니면 "" */
+uint32_t hub_proxy_fallback_since(void);         /* 폴백이 시작된 시각(유닉스 초). 폴백 중이 아니거나 시각을 모르면 0 */
+void hub_proxy_send_mode(void);                  /* 스마트홈 쪽에 모드·폴백 상태를 알린다(HUB_RK_CMD_MODE) */
+void hub_proxy_request(const char *text, int len);   /* 스마트홈 쪽 요청: "mode=proxy|standalone", "fallback=0|1" */
+void hub_proxy_test_block(int on);               /* 시험(재부팅하면 풀림): 1 = 클라우드에 닿지 않는 것처럼, 2 = 서버가 로그인을 거절하는 것처럼, 0 = 풀기 */
+bool hub_proxy_test_blocked(void);
 bool hub_proxy_handshaking(void);                 /* 기기 연결이 TLS 핸드셰이크 중인가(메모리가 빠듯한 때) */
 void hub_proxy_stack_free(int *link, int *up);    /* 연결·클라우드 태스크 스택 최소 여유(바이트, 0 = 모름) */
 void hub_proxy_render(char *out, size_t cap);                     /* 관리 화면 '동작 모드' */
+void hub_proxy_now_html(char *out, size_t cap);                   /* 그 카드의 '현재 상태' 한 줄(GET /admin/mode-now) */
 bool hub_proxy_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/mode */
 
 /* 포털(:80)에 등록할 GET /key/server 처리기: 클라우드에 다시 물어 답을 돌려준다(못 하면 마지막 답을 재사용). */

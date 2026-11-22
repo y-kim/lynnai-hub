@@ -823,5 +823,61 @@ core.on_message(hub, CMD.TARIFF, string.pack("<I4I4I4I4I4", 993900, 42576000, 22
 check(gdev:get_field("gas_month_tag") == "2027-03", "허브가 검침일 = 말일로 알려 주면 그 값을 씀(3/20 → 3월 몫, 설정 8일이면 4월)")
 os.date = real_date
 
+print("[31] 허브의 동작 모드: 모드는 프록시·단독 둘, 지금 동작은 상태 글로")
+reset()
+local MODE = 0x0b
+local function mode_msg(m, fb, since, why, rc)
+  return string.char(m, fb, 1) .. string.pack("<I4", since or 0) .. (why and string.char(why, rc or 0) or "")
+end
+core.on_message(hub, MODE, mode_msg(0, 0))
+check(lastv("hub", "main", "mode") == "프록시", "프록시 모드로 보임")
+check(lastv("hub", "main", "status") == "프록시 모드", "상태 글 = 프록시 모드")
+local args = lastv("hub", "main", "supportedArguments")
+check(#args == 2 and args[1] == "프록시" and args[2] == "단독", "고를 수 있는 것은 프록시·단독 둘")
+check(#lastv("hub", "main", "supportedModes") == 2, "모드 값도 둘뿐")
+local function count_mode() local n = 0
+  for _, e in ipairs(emitted) do if e.key == "hub" and e.attr == "mode" then n = n + 1 end end
+  return n end
+local n_mode = count_mode()
+core.on_message(hub, MODE, mode_msg(0, 0))
+check(count_mode() == n_mode, "같은 값을 다시 받으면 모드 이벤트를 또 내지 않음")
+local real_time3 = os.time
+local noon = 1795316400                               -- 2026-11-22 12:00 KST
+os.time = function(t) if t then return real_time3(t) end return noon + 7 * 3600 end      -- 지금 = 같은 날 19:00
+core.on_message(hub, MODE, mode_msg(0, 1, noon + 6 * 3600 + 25 * 60))
+check(lastv("hub", "main", "mode") == "프록시", "폴백 중에도 모드는 정해 둔 대로 프록시")
+check(lastv("hub", "main", "status") == "임시 단독 모드", "기기 목록 글은 짧게(까닭 없이)")
+check(lastv("hub", "main", "roomStatus") == "단독 모드 (18:25부터 린나이 서버 접속 불가)", "상세 글에 언제부터 서버에 닿지 않는지")
+core.on_message(hub, MODE, mode_msg(0, 1, noon - 20 * 3600))
+check(lastv("hub", "main", "roomStatus") == "단독 모드 (11/21 16:00부터 린나이 서버 접속 불가)", "다른 날에 시작됐으면 날짜도")
+core.on_message(hub, MODE, mode_msg(0, 1, 0))
+check(lastv("hub", "main", "roomStatus") == "단독 모드 (린나이 서버 접속 불가)", "시각을 모르면 시각 없이")
+core.on_message(hub, MODE, string.char(0, 1, 1))
+check(lastv("hub", "main", "roomStatus") == "단독 모드 (린나이 서버 접속 불가)", "시각이 없는 짧은 메시지도 받음")
+-- 까닭을 구체적으로: 연결 안 됨 / 보안 연결 실패 / 로그인 거절(코드) / 응답 없음 / 서버가 끊음 / 집 Wi-Fi
+local when = noon + 6 * 3600 + 25 * 60
+local whys = { "집 Wi-Fi 끊김", "린나이 서버 연결 안 됨", "린나이 서버 보안 연결 실패", "린나이 서버 로그인 거절(코드 5)",
+  "린나이 서버 로그인 응답 없음", "린나이 서버가 연결을 끊음" }
+local why_ok = true
+for w, text in ipairs(whys) do
+  core.on_message(hub, MODE, mode_msg(0, 1, when, w, 5))
+  if lastv("hub", "main", "roomStatus") ~= "단독 모드 (18:25부터 " .. text .. ")" then why_ok = false end
+  if lastv("hub", "main", "status") ~= "임시 단독 모드" then why_ok = false end
+end
+check(why_ok, "상세 글에 닿지 않는 까닭을 구체적으로(목록 글은 그대로 짧게)")
+core.on_message(hub, MODE, mode_msg(0, 1, when, 0, 0))
+check(lastv("hub", "main", "roomStatus") == "단독 모드 (18:25부터 린나이 서버 접속 불가)", "까닭을 모르면 '접속 불가'")
+os.time = real_time3
+core.on_message(hub, MODE, mode_msg(1, 0))
+check(lastv("hub", "main", "mode") == "단독" and lastv("hub", "main", "status") == "단독 모드"
+  and lastv("hub", "main", "roomStatus") == "단독 모드", "단독 모드로 보임(목록·상세 같은 글)")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, hub, { component = "main", args = { mode = "프록시" } })
+check(last_cmd_has("hub mode=proxy"), "프록시를 고르면 hub mode=proxy")
+core.capability_handlers["mode"]["setMode"](nil, hub, { component = "main", args = { mode = "단독" } })
+check(last_cmd_has("hub mode=standalone"), "단독을 고르면 hub mode=standalone")
+core.on_message(hub, MODE, string.char(0))
+check(lastv("hub", "main", "mode") == "단독", "너무 짧은 메시지는 무시")
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

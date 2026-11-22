@@ -42,6 +42,7 @@
 #include "hub_proxy.h"
 #include "hub_rinnai.h"
 #include "hub_wifi.h"
+#include "hub_uplink.h"
 
 static const char *TAG = "HUB_PROXY";
 
@@ -121,6 +122,106 @@ static volatile uint8_t s_mode = HUB_MODE_PROXY;
 static volatile uint32_t s_mode_gen;          /* 모드가 바뀔 때마다 +1 → 지금 연결들이 알아채고 닫음 */
 
 uint8_t hub_proxy_mode(void) { return s_mode; }
+
+/* ---- 자동 폴백: 프록시 모드인데 린나이 클라우드에 닿지 않으면 그동안만 단독처럼 기기를 직접 받는다 ----
+ * 들어가기: 클라우드 쪽 연결이 FB_FAILS 번 연달아 실패하면(기기는 실패할 때마다 몇 초 뒤 다시 붙으므로 20~40초).
+ *           그 실패한 연결부터 바로 허브가 받아 준다(기기가 한 번 더 붙기를 기다리지 않는다).
+ * 나오기  : 폴백 중에는 주기적으로 클라우드의 포트를 두드려 보고, 두 번 연달아 열리면 연결을 끊어 기기가 프록시로
+ *           다시 붙게 한다. 돌아갔다가 또 실패하면 두드리는 간격을 두 배씩(최대 FB_PROBE_MAX_S) 늘려 들락거림을 줄인다.
+ * 폴백 중에는 린나이 앱에서 기기가 보이지 않는다(단독 모드와 같다). 스마트홈 쪽 제어는 그대로 된다. */
+#define FB_FAILS        2
+#define FB_PROBE_S      60
+#define FB_PROBE_MAX_S  600
+static volatile uint8_t s_fb_on = 1;          /* 자동 폴백 켬(NVS "proxy"/"fb", 기본 켬) */
+static volatile bool s_fb_active;             /* 지금 폴백 중 */
+static volatile uint8_t s_up_fails;           /* 클라우드 쪽 연결 연속 실패 횟수 */
+/* 실패한 까닭(상태 글에 그대로 보인다). 0 = 모름 */
+enum { FB_WHY_WIFI = 1,      /* 집 Wi-Fi 가 안 붙어 있음 */
+       FB_WHY_CONNECT,       /* 서버에 TCP 연결이 안 됨(인터넷 끊김·서버 죽음·막힘) */
+       FB_WHY_TLS,           /* 연결은 되는데 보안 연결(TLS·인증서) 실패 */
+       FB_WHY_REFUSED,       /* 서버가 기기의 로그인(MQTT CONNECT)을 거절 — s_fb_rc 에 거절 코드 */
+       FB_WHY_NOREPLY,       /* 로그인에 답이 없음 */
+       FB_WHY_CLOSED };      /* 로그인을 받아 주기 전에 서버가 끊음 */
+static volatile uint8_t s_fb_why, s_fb_rc;
+static atomic_int s_up_ok_links;              /* 서버가 로그인을 받아 준 채 이어져 있는 연결 수 */
+#define ACCEPT_WAIT_S   15                    /* 기기의 로그인을 넘긴 뒤 이만큼 답이 없으면 실패로 본다 */
+#define PROBE_MIN_FREE  40000                 /* 폴백 중 서버 확인(TLS 한 번)을 시작해도 되는 남은 힙 */
+static volatile uint16_t s_fb_probe_s = FB_PROBE_S;
+static int64_t s_fb_since_us;
+static volatile uint32_t s_fb_since_t;        /* 폴백이 시작된 시각(유닉스 초, 시계가 안 맞았으면 0) */
+static volatile uint32_t s_fb_epoch;         /* 폴백에 들어갈 때마다 +1 — 옛 두드리기 태스크가 알아채고 끝남 */
+static SemaphoreHandle_t s_fb_mx;
+static volatile uint8_t s_test_block;         /* 시험(재부팅하면 풀림): 1 = 클라우드에 닿지 않는 것처럼, 2 = 서버가 로그인을 거절하는 것처럼 */
+
+/* 폴백을 실제로 시험하려는 것(GET /api/v1/bootlog?cloudblock=1|0). 켜면 지금 연결도 끊어 기기가 다시 붙게 한다. */
+void hub_proxy_test_block(int on)
+{
+    on = on == 1 || on == 2 ? on : 0;
+    if (on != s_test_block) {
+        s_test_block = (uint8_t)on;
+        ESP_LOGW(TAG, "시험: 클라우드 막기 %s", on ? "켬" : "끔");
+        if (on) {
+            s_mode_gen++;
+        }
+    }
+}
+bool hub_proxy_test_blocked(void) { return s_test_block != 0; }
+
+bool hub_proxy_local(void) { return s_mode == HUB_MODE_STANDALONE || s_fb_active; }
+bool hub_proxy_fallback(void) { return s_fb_active; }
+bool hub_proxy_fallback_on(void) { return s_fb_on != 0; }
+
+uint32_t hub_proxy_fallback_since(void) { return s_fb_active ? s_fb_since_t : 0; }
+
+void hub_proxy_send_mode(void)
+{
+    uint32_t since = hub_proxy_fallback_since();
+    bool fb = s_fb_active;
+    uint8_t p[9] = { s_mode, fb ? 1 : 0, s_fb_on ? 1 : 0 };
+    memcpy(p + 3, &since, 4);
+    p[7] = fb ? s_fb_why : 0;                    /* 까닭(FB_WHY_*) */
+    p[8] = fb ? s_fb_rc : 0;                     /* 로그인 거절 코드(까닭이 거절일 때) */
+    hub_uplink_send(HUB_RK_CMD_MODE, p, sizeof(p));
+}
+
+/* 까닭을 사람 말로: 상태 글 "단독 모드 (18:25부터 <이 글>)" 에 들어간다. 드라이버·HA 통합도 같은 말을 쓴다 */
+static void fb_why_text(char *out, size_t cap)
+{
+    switch (s_fb_why) {
+    case FB_WHY_WIFI:    strlcpy(out, "집 Wi-Fi 끊김", cap); break;
+    case FB_WHY_CONNECT: strlcpy(out, "린나이 서버 연결 안 됨", cap); break;
+    case FB_WHY_TLS:     strlcpy(out, "린나이 서버 보안 연결 실패", cap); break;
+    case FB_WHY_REFUSED: snprintf(out, cap, "린나이 서버 로그인 거절(코드 %d)", s_fb_rc); break;
+    case FB_WHY_NOREPLY: strlcpy(out, "린나이 서버 로그인 응답 없음", cap); break;
+    case FB_WHY_CLOSED:  strlcpy(out, "린나이 서버가 연결을 끊음", cap); break;
+    default:             strlcpy(out, "린나이 서버 접속 불가", cap); break;
+    }
+}
+
+const char *hub_proxy_fallback_why(void)
+{
+    static const char *const n[] = { "", "wifi", "connect", "tls", "refused", "noreply", "closed" };
+    uint8_t w = s_fb_active ? s_fb_why : 0;
+    return w < sizeof(n) / sizeof(n[0]) ? n[w] : "";
+}
+
+/* "18:25" (오늘) 또는 "11/22 18:25" (다른 날). 시각을 모르면 빈 글 */
+static void fb_since_text(char *out, size_t cap)
+{
+    out[0] = 0;
+    time_t t = (time_t)s_fb_since_t, now = time(NULL);
+    if (!t) {
+        return;
+    }
+    struct tm a, b;
+    localtime_r(&t, &a);
+    localtime_r(&now, &b);
+    if (a.tm_year == b.tm_year && a.tm_yday == b.tm_yday) {
+        snprintf(out, cap, "%02d:%02d", a.tm_hour, a.tm_min);
+    } else {
+        snprintf(out, cap, "%d/%d %02d:%02d", a.tm_mon + 1, a.tm_mday, a.tm_hour, a.tm_min);
+    }
+}
 
 /* ---------------------------------------------------------------- 클라우드 주소 조회
  * 허브 자신의 리졸버를 쓰지 않는다: lwIP 의 DNS 서버는 전역이고 허브 AP 가 자기 자신을 DNS 로 내놓아서,
@@ -252,6 +353,9 @@ static void mode_load(void)
     uint8_t m = HUB_MODE_PROXY;
     if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {
         hs_get_u8(h, "proxy", "mode", &m);
+        uint8_t fb = 1;
+        hs_get_u8(h, "proxy", "fb", &fb);
+        s_fb_on = fb ? 1 : 0;
         hs_erase(h, "boot");                         /* 예전 공용 부트스트랩 캐시(이제 기기별 bt########) */
         size_t n = sizeof(s_up.ip);
         if (hs_get_str(h, "proxy", "up_ip", s_up.ip, &n) != ESP_OK || !s_up.ip[0]) {
@@ -396,54 +500,158 @@ static WOLFSSL *new_srv_ssl(void)
     return ssl;
 }
 
+/* '현재 상태' 한 줄 = 지금 실제로 어떻게 돌고 있나(스마트홈에 보내는 상태 글과 같은 말). 아래 선택(프록시/단독)은
+ * 설정이라 자동 폴백으로 실제 동작이 바뀌어도 그대로다. 관리 화면 카드와 /admin/mode-now(값만 갱신)가 같이 쓴다.
+ * data-m = 설정값(0 프록시 1 단독): 스마트홈에서 설정을 바꿨을 때 화면의 선택이 따라가게 */
+void hub_proxy_now_html(char *o, size_t cap)
+{
+    char w[300];
+    if (s_fb_active && s_mode == HUB_MODE_PROXY) {
+        char since[24], why[72];
+        fb_since_text(since, sizeof(since));
+        fb_why_text(why, sizeof(why));
+        snprintf(w, sizeof(w), "<div data-m=0>현재 상태: <b class=warn>단독 모드 (%s%s%s)</b></div>",
+                 since, since[0] ? "부터 " : "", why);
+    } else {
+        snprintf(w, sizeof(w), "<div data-m=%d>현재 상태: <b>%s</b></div>",
+                 s_mode == HUB_MODE_STANDALONE, s_mode == HUB_MODE_STANDALONE ? "단독 모드" : "프록시 모드");
+    }
+    strlcat(o, w, cap);
+}
+
 void hub_proxy_render(char *o, size_t cap)
 {
     bool sa = s_mode == HUB_MODE_STANDALONE;
-    strlcat(o, "<h2>동작 모드</h2><div class=card><form method=post action=/admin/mode id=modef>", cap);
+    strlcat(o, "<h2>동작 모드</h2><div class=card><form method=post action=/admin/mode id=modef><div id=mnow "
+               "style='margin-bottom:10px'>", cap);
+    hub_proxy_now_html(o, cap);
+    strlcat(o, "</div>", cap);
     strlcat(o, sa ? "<label class=chk><input type=radio name=mode value=proxy> <b>프록시 모드</b></label>"
                   : "<label class=chk><input type=radio name=mode value=proxy checked> <b>프록시 모드</b></label>", cap);
     strlcat(o, "<p class=muted style='margin:2px 0 10px 26px'>린나이 클라우드로 중계합니다. 린나이 앱을 그대로 쓰면서 "
                "SmartThings 로도 제어합니다. 인터넷이 필요합니다.</p>", cap);
+    strlcat(o, s_fb_on ? "<label class=chk style='margin:0 0 2px 26px'><input type=checkbox name=fb value=1 checked> "
+                         "린나이 서버에 닿지 않으면 자동으로 단독 동작</label>"
+                       : "<label class=chk style='margin:0 0 2px 26px'><input type=checkbox name=fb value=1> "
+                         "린나이 서버에 닿지 않으면 자동으로 단독 동작</label>", cap);
+    strlcat(o, "<p class=muted style='margin:2px 0 10px 50px'>인터넷이나 린나이 서버가 끊긴 동안에도 스마트홈에서 제어됩니다. "
+               "다시 닿으면 스스로 프록시로 돌아갑니다(그동안 린나이 앱에서는 기기가 안 보입니다).</p>", cap);
     strlcat(o, sa ? "<label class=chk><input type=radio name=mode value=standalone checked> <b>단독 모드</b></label>"
                   : "<label class=chk><input type=radio name=mode value=standalone> <b>단독 모드</b></label>", cap);
     strlcat(o, "<p class=muted style='margin:2px 0 10px 26px'>클라우드 없이 허브가 직접 기기를 받습니다. 인터넷이 끊겨도 "
                "SmartThings 로 제어되지만, 린나이 앱으로는 보이지도 제어되지도 않습니다.</p>", cap);
-    strlcat(o, "<button class=sv>저장</button></form></div>", cap);
+    strlcat(o, "<button class=sv>저장</button></form>"
+               /* 10초마다 현재 상태만 다시 받아 온다(스마트홈에서 바꾼 것·자동 폴백이 화면에 보이게). 폼을 건드리지
+                * 않았으면 선택도 따라간다. 화면이 가려져 있으면 쉰다 */
+               /* 저장하면 본문이 갈리고 이 스크립트가 다시 돈다 — 타이머는 하나만(_mnt) */
+               "<script>(function(){var f=document.getElementById('modef'),t=0;"
+               "f.addEventListener('change',function(){t=1});"
+               "clearInterval(window._mnt);window._mnt=setInterval(function(){if(document.hidden)return;"
+               "fetch('/admin/mode-now').then(function(r){return r.ok?r.text():''}).then(function(h){"
+               "if(!h)return;var n=document.getElementById('mnow');if(!n)return;n.innerHTML=h;"
+               "var d=n.firstChild,m=d&&d.getAttribute&&d.getAttribute('data-m');"
+               "if(m!==null&&!t){var r=f.querySelector('input[name=mode][value='+(m==='1'?'standalone':'proxy')+']');"
+               "if(r)r.checked=true}}).catch(function(){})},10000)})();</script></div>", cap);
+}
+
+/* 모드·자동 폴백 설정을 저장하고 적용한다. 바뀐 것이 없으면 아무것도 하지 않는다. 저장이 안 되면 바꾸지 않는다
+ * (재부팅 후 되돌아가지 않게). */
+static esp_err_t mode_set(uint8_t m, uint8_t fb)
+{
+    m = m == HUB_MODE_STANDALONE ? HUB_MODE_STANDALONE : HUB_MODE_PROXY;
+    fb = fb ? 1 : 0;
+    if (m == s_mode && fb == s_fb_on) {
+        return ESP_OK;
+    }
+    nvs_handle_t h;
+    esp_err_t e = nvs_open("proxy", NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    e = hs_set_u8(h, "mode", m);
+    if (e == ESP_OK) {
+        e = hs_set_u8(h, "fb", fb);
+    }
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "동작 모드 저장 실패: %s", esp_err_to_name(e));
+        return e;
+    }
+    bool relink = m != s_mode || (s_fb_active && (!fb || m == HUB_MODE_STANDALONE));
+    if (m != s_mode) {
+        ESP_LOGW(TAG, "동작 모드 → %s (연결 다시 맺음)", m ? "단독" : "프록시");
+    }
+    s_mode = m;
+    s_fb_on = fb;
+    s_up_fails = 0;
+    s_fb_probe_s = FB_PROBE_S;
+    if (s_fb_active && (!fb || m == HUB_MODE_STANDALONE)) {
+        s_fb_active = false;                         /* 폴백을 껐거나 아예 단독으로 정함: 폴백 상태는 끝 */
+    }
+    if (relink) {
+        s_mode_gen++;                                /* 지금 연결 끊기 → 기기가 다시 붙을 때 새 설정 */
+    }
+    hub_proxy_send_mode();
+    return ESP_OK;
 }
 
 bool hub_proxy_apply(const char *form, char *msg, size_t msglen)
 {
-    char v[16];
+    char v[16], f[4];
     if (httpd_query_key_value(form, "mode", v, sizeof(v)) != ESP_OK ||
         (strcmp(v, "proxy") && strcmp(v, "standalone"))) {
         snprintf(msg, msglen, "잘못된 요청");
         return false;
     }
     uint8_t m = !strcmp(v, "standalone") ? HUB_MODE_STANDALONE : HUB_MODE_PROXY;
-    if (m == s_mode) {
+    uint8_t fb = httpd_query_key_value(form, "fb", f, sizeof(f)) == ESP_OK ? 1 : 0;   /* 체크 안 하면 항목이 안 온다 */
+    if (m == s_mode && fb == s_fb_on) {
         snprintf(msg, msglen, "바뀐 것이 없습니다");
         return true;
     }
-    nvs_handle_t h;
-    if (nvs_open("proxy", NVS_READWRITE, &h) != ESP_OK) {
-        snprintf(msg, msglen, "저장소 열기 실패");
+    bool mode_changed = m != s_mode;
+    esp_err_t e = mode_set(m, fb);
+    if (e != ESP_OK) {
+        snprintf(msg, msglen, "저장하지 못했습니다(%s). 설정은 그대로입니다", esp_err_to_name(e));
         return false;
     }
-    esp_err_t e = hs_set_u8(h, "mode", m);
-    if (e == ESP_OK) {
-        e = nvs_commit(h);
+    if (mode_changed) {
+        snprintf(msg, msglen, "%s로 바꿨습니다. 기기가 다시 접속하면(수십 초) 적용됩니다", m ? "단독 모드" : "프록시 모드");
+    } else {
+        snprintf(msg, msglen, "자동 단독 동작을 %s", fb ? "켰습니다" : "껐습니다");
     }
-    nvs_close(h);
-    if (e != ESP_OK) {                               /* 저장이 안 되면 바꾸지 않는다(재부팅 후 되돌아가지 않게) */
-        ESP_LOGE(TAG, "동작 모드 저장 실패: %s", esp_err_to_name(e));
-        snprintf(msg, msglen, "저장하지 못했습니다(%s). 모드는 그대로입니다", esp_err_to_name(e));
-        return false;
-    }
-    s_mode = m;
-    s_mode_gen++;                                    /* 지금 연결 끊기 → 기기가 다시 붙을 때 새 모드 */
-    ESP_LOGW(TAG, "동작 모드 → %s (연결 다시 맺음)", m ? "단독" : "프록시");
-    snprintf(msg, msglen, "%s로 바꿨습니다. 기기가 다시 접속하면(수십 초) 적용됩니다", m ? "단독 모드" : "프록시 모드");
     return true;
+}
+
+/* 스마트홈 쪽 요청("hub mode=proxy" · "hub mode=standalone" · "hub fallback=0|1", 앞의 "hub " 는 뗀 것) */
+void hub_proxy_request(const char *text, int len)
+{
+    char t[32];
+    if (len <= 0 || len >= (int)sizeof(t)) {
+        return;
+    }
+    memcpy(t, text, len);
+    t[len] = 0;
+    uint8_t m = s_mode, fb = s_fb_on;
+    if (!strcmp(t, "mode=proxy")) {
+        m = HUB_MODE_PROXY;
+    } else if (!strcmp(t, "mode=standalone")) {
+        m = HUB_MODE_STANDALONE;
+    } else if (!strcmp(t, "fallback=1")) {
+        fb = 1;
+    } else if (!strcmp(t, "fallback=0")) {
+        fb = 0;
+    } else {
+        ESP_LOGW(TAG, "모르는 허브 요청: %s", t);
+        return;
+    }
+    bool same = m == s_mode && fb == s_fb_on;
+    if (mode_set(m, fb) != ESP_OK || same) {
+        hub_proxy_send_mode();                       /* 안 바뀌었거나 저장 실패: 지금 값을 다시 알려 화면을 맞춘다 */
+    }
 }
 
 /* 집 Wi-Fi IP 가 생길 때까지 최대 wait_s 초 기다린다(부팅 직후 기기가 먼저 붙는 경우). */
@@ -742,6 +950,7 @@ out:
     return closer;
 }
 
+/* 폴백 중: 클라우드가 다시 열렸는지 두드려 본다(TCP 만 — 메모리를 거의 안 쓴다). 두 번 연달아 열리면 프록시로 돌아간다. */
 /* 클라우드 쪽 연결(TCP+TLS)을 보일러 쪽 TLS 와 '동시에' 진행한다.
  * 순서대로 하면 보일러 TLS(~4초) 뒤 클라우드 TLS(~4.5초)가 이어져, 보일러가 CONNECT 후
  * CONNACK 을 못 받고 끊는다(실측: CONNECT 0.1초 뒤 Wi-Fi 해제). */
@@ -749,23 +958,184 @@ typedef struct {
     int fd;
     WOLFSSL *ssl;
     bool ok;
+    bool quiet;                 /* 폴백 중 서버 확인용: 이벤트·경고를 남기지 않는다 */
+    uint8_t why;                /* 실패한 까닭(FB_WHY_WIFI/CONNECT/TLS) */
     int dev;                    /* 기기 IP 끝자리(이벤트용) */
     SemaphoreHandle_t done;
 } up_job_t;
+
+static void up_task(void *arg);
+
+/* 폴백 중: 린나이 서버에 보안 연결(TLS)까지 되는지 한 번 해 본다. 1 = 됨, 0 = 안 됨(*why 에 까닭), -1 = 지금은 못 해 봄.
+ * 포트만 두드리면 "포트는 열리는데 보안 연결이 안 되는" 서버 때문에 프록시로 돌아갔다 다시 폴백하기를 되풀이한다.
+ * 기기 연결의 핸드셰이크와 겹치지 않게 같은 차례표(s_hs_mx)를 쓰고, 힙이 빠듯하면 미룬다. */
+static int probe_cloud(uint8_t *why)
+{
+    if (atomic_load(&s_hs_busy) > 0 || esp_get_free_heap_size() < PROBE_MIN_FREE) {
+        return -1;
+    }
+    if (s_hs_mx && xSemaphoreTake(s_hs_mx, pdMS_TO_TICKS(HS_WAIT_MS)) != pdTRUE) {
+        return -1;
+    }
+    atomic_fetch_add(&s_hs_busy, 1);
+    int r = -1;
+    up_job_t *j = calloc(1, sizeof(*j));
+    if (j) {
+        j->fd = -1;
+        j->quiet = true;
+        j->done = xSemaphoreCreateBinary();
+        if (j->done && xTaskCreate(up_task, "hub_up", UP_STACK, j, 4, NULL) == pdPASS) {
+            xSemaphoreTake(j->done, portMAX_DELAY);
+            r = j->ok ? 1 : 0;
+            *why = j->why;
+            if (j->ssl) {
+                wolfSSL_free(j->ssl);
+            }
+            if (j->fd >= 0) {
+                close(j->fd);
+            }
+        }
+        if (j->done) {
+            vSemaphoreDelete(j->done);
+        }
+        free(j);
+    }
+    atomic_fetch_sub(&s_hs_busy, 1);
+    if (s_hs_mx) {
+        xSemaphoreGive(s_hs_mx);
+    }
+    return r;
+}
+
+static void fb_probe_task(void *arg)
+{
+    uint32_t epoch = (uint32_t)(uintptr_t)arg;
+    int ok = 0;
+    for (;;) {
+        int wait = ok ? 10 : s_fb_probe_s;
+        for (int i = 0; i < wait && s_fb_active && s_fb_epoch == epoch; i++) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        if (!s_fb_active || s_fb_epoch != epoch) {   /* 설정이 바뀌어 폴백이 끝났거나, 새로 시작된 폴백의 태스크가 따로 있다 */
+            break;
+        }
+        uint8_t why = 0;
+        int r = probe_cloud(&why);
+        if (r < 0) {                                 /* 지금은 확인할 형편이 아님(기기가 붙는 중·메모리) — 조금 뒤에 */
+            for (int i = 0; i < 10 && s_fb_active && s_fb_epoch == epoch; i++) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+            continue;
+        }
+        if (r == 0) {
+            ok = 0;
+            /* 까닭이 달라졌으면(예: Wi-Fi 는 돌아왔는데 서버가 안 됨) 상태 글도 바꾼다. 로그인 단계의 까닭은
+             * 여기서 확인할 수 없으므로(기기의 로그인 정보가 필요) 연결·보안 연결 단계가 실패할 때만 덮는다 */
+            if (why && why != s_fb_why && s_fb_active && s_fb_epoch == epoch) {
+                s_fb_why = why;
+                s_fb_rc = 0;
+                hub_proxy_send_mode();
+            }
+            continue;
+        }
+        if (++ok < 2) {
+            continue;
+        }
+        xSemaphoreTake(s_fb_mx, portMAX_DELAY);
+        bool left = s_fb_active && s_fb_epoch == epoch;
+        if (left) {
+            s_fb_active = false;
+            s_up_fails = 0;
+            s_fb_probe_s = s_fb_probe_s * 2 > FB_PROBE_MAX_S ? FB_PROBE_MAX_S : s_fb_probe_s * 2;   /* 또 실패하면 더 천천히 */
+            s_mode_gen++;                            /* 허브가 직접 받던 연결을 끊는다 → 기기가 프록시로 다시 붙음 */
+        }
+        xSemaphoreGive(s_fb_mx);
+        if (left) {
+            ESP_LOGW(TAG, "폴백 끝: 린나이 서버가 다시 열림(%d분 만에) — 프록시로 돌아감",
+                     (int)((esp_timer_get_time() - s_fb_since_us) / 60000000));
+            hub_proxy_send_mode();
+        }
+        break;
+    }
+    vTaskDelete(NULL);
+}
+
+/* 모드·폴백이 바뀌어 연결들을 끊을 때 한꺼번에 끊지 않는다: 기기들이 동시에 다시 붙으면 TLS 핸드셰이크 네 개
+ * (기기 쪽 둘 + 클라우드 쪽 둘)가 겹쳐 남은 힙이 몇 KB 까지 내려간다(실측 2.7KB). 먼저 온 연결은 바로, 다음부터는
+ * REGEN_GAP_S 초씩 늦춰 닫는다. 기다리는 동안 그 기기는 아직 붙어 있다고 여기므로 손해가 없다. */
+#define REGEN_GAP_S 6
+static int64_t s_regen_next_us;
+
+static void regen_wait(void)
+{
+    int64_t wait = 0;
+    if (s_fb_mx) {
+        xSemaphoreTake(s_fb_mx, portMAX_DELAY);
+        int64_t now = esp_timer_get_time();
+        if (s_regen_next_us > now) {
+            wait = s_regen_next_us - now;
+        }
+        s_regen_next_us = (s_regen_next_us > now ? s_regen_next_us : now) + (int64_t)REGEN_GAP_S * 1000000;
+        xSemaphoreGive(s_fb_mx);
+    }
+    if (wait > 0) {
+        vTaskDelay(pdMS_TO_TICKS(wait / 1000));
+    }
+}
+
+/* 클라우드 쪽이 실패했을 때 부른다(연결·보안 연결 실패, 또는 로그인을 받아 주지 않음). why = FB_WHY_*, rc = 거절 코드.
+ * 이 연결을 허브가 직접 받아야 하면(폴백 시작 또는 이미 폴백 중) true. */
+static bool fb_on_up_fail(uint8_t why, uint8_t rc)
+{
+    if (s_mode != HUB_MODE_PROXY || !s_fb_on || !s_fb_mx) {
+        return false;
+    }
+    bool local = false, entered = false;
+    xSemaphoreTake(s_fb_mx, portMAX_DELAY);
+    if (s_fb_active) {
+        local = true;                                /* 다른 연결이 먼저 폴백을 시작함 */
+    } else if (++s_up_fails >= FB_FAILS) {
+        s_fb_why = why;
+        s_fb_rc = rc;
+        s_fb_active = true;
+        s_fb_since_us = esp_timer_get_time();
+        s_fb_since_t = time(NULL) > 1704067200 ? (uint32_t)time(NULL) : 0;   /* 2024-01-01 이전이면 시계가 아직 안 맞은 것 */
+        uint32_t epoch = ++s_fb_epoch;
+        s_mode_gen++;                                /* 아직 중계 중인 다른 연결이 있으면 끊어 같은 방식으로 다시 받는다 */
+        if (xTaskCreate(fb_probe_task, "hub_fb", 4096, (void *)(uintptr_t)epoch, 3, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "폴백 확인 작업 생성 실패 — 프록시로 스스로 돌아가지 못한다(동작 모드를 다시 저장하면 됨)");
+        }
+        local = entered = true;
+    }
+    xSemaphoreGive(s_fb_mx);
+    if (entered) {
+        char why_t[72];
+        fb_why_text(why_t, sizeof(why_t));
+        ESP_LOGW(TAG, "폴백 시작: %d번 연달아 실패(%s) — 허브가 기기를 직접 받는다(%d초마다 다시 확인)",
+                 FB_FAILS, why_t, (int)s_fb_probe_s);
+        hub_proxy_send_mode();
+    }
+    return local;
+}
+
 
 /* 우선순위는 link_task(5)보다 낮게(4): 각방 모듈은 TLS 가 ~4.5초를 넘으면 포기하므로(실측 4.87초 실패,
  * 4.15초 성공) 기기 쪽 핸드셰이크가 CPU 를 먼저 쓰고, 클라우드 쪽은 그 틈에 진행한다. */
 static void up_task(void *arg)
 {
     up_job_t *j = arg;
-    if (sta_ready(15)) {
+    bool sta = sta_ready(j->quiet ? 1 : 15);
+    if (sta) {
         resolve_up(false);                           /* 10분 지났으면 집 DNS 로 다시 조회 */
     }
-    j->fd = tcp_connect(s_up.ip, MQTT_PORT, 10);
+    j->fd = s_test_block == 1 ? -1 : tcp_connect(s_up.ip, MQTT_PORT, j->quiet ? 5 : 10);
     j->ssl = j->fd >= 0 ? wolfSSL_new(s_cli_ctx) : NULL;
     if (!j->ssl) {
-        ESP_LOGW(TAG, "클라우드 연결 실패 (집 Wi-Fi/인터넷 확인)");
-        hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, -2);
+        j->why = sta ? FB_WHY_CONNECT : FB_WHY_WIFI;
+        if (!j->quiet) {
+            ESP_LOGW(TAG, "클라우드 연결 실패 (%s)", sta ? "인터넷·린나이 서버 확인" : "집 Wi-Fi 가 안 붙어 있음");
+            hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, -2);
+        }
     } else {
         wolfSSL_set_fd(j->ssl, j->fd);
         wolfSSL_check_domain_name(j->ssl, CLOUD_CN);   /* 체인(사설 CA)에 더해 서버 이름까지 고정 */
@@ -775,11 +1145,16 @@ static void up_task(void *arg)
         int64_t t0 = esp_log_timestamp();
         if (wolfSSL_connect(j->ssl) == WOLFSSL_SUCCESS) {
             j->ok = true;
-            ESP_LOGI(TAG, "클라우드 쪽 TLS 성공 (%lld ms)", (long long)(esp_log_timestamp() - t0));
-            hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, (int32_t)(esp_log_timestamp() - t0));
+            if (!j->quiet) {
+                ESP_LOGI(TAG, "클라우드 쪽 TLS 성공 (%lld ms)", (long long)(esp_log_timestamp() - t0));
+                hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, (int32_t)(esp_log_timestamp() - t0));
+            }
         } else {
+            j->why = FB_WHY_TLS;
             ESP_LOGW(TAG, "클라우드 쪽 TLS 실패: err %d", wolfSSL_get_error(j->ssl, -1));
-            hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, wolfSSL_get_error(j->ssl, -1) < 0 ? wolfSSL_get_error(j->ssl, -1) : -1);
+            if (!j->quiet) {
+                hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, wolfSSL_get_error(j->ssl, -1) < 0 ? wolfSSL_get_error(j->ssl, -1) : -1);
+            }
         }
     }
     note_stack(&s_stk_up);
@@ -793,12 +1168,15 @@ static void link_task(void *arg)
     WOLFSSL *down = NULL, *up = NULL;
     char *buf = malloc(2048);
     up_job_t *job = calloc(1, sizeof(*job));
-    bool up_waited = false;
+    bool up_waited = false, accepted = false;       /* accepted = 서버가 이 기기의 로그인을 받아 줌 */
+    int64_t t_login = 0;                            /* 기기의 로그인(CONNECT)을 서버로 넘긴 때 */
+    uint8_t up_why = 0, up_rc = 0;
+    int pn;
     int dev = peer_octet(down_fd), closer = 0;
     int64_t t_up = 0;
     hub_link_tap_t *tap = NULL;
     uint32_t gen = s_mode_gen;
-    bool standalone = s_mode == HUB_MODE_STANDALONE;
+    bool standalone = hub_proxy_local();             /* 단독 모드이거나 폴백 중: 허브가 직접 받는다 */
     /* 핸드셰이크 차례를 기다린다(위 HS_WAIT_MS 설명). 못 잡아도 진행한다 */
     bool hs_held = s_hs_mx && xSemaphoreTake(s_hs_mx, pdMS_TO_TICKS(HS_WAIT_MS)) == pdTRUE;
     bool hs_open = true;
@@ -841,7 +1219,8 @@ static void link_task(void *arg)
     hub_event(EV_LINK_DEV_TLS, NULL, dev, (int32_t)(esp_log_timestamp() - t0));
 
     if (standalone) {
-        ESP_LOGI(TAG, "연결됨: 보일러(%s) <-> 허브(단독 모드)", wolfSSL_get_version(down));
+local:
+        ESP_LOGI(TAG, "연결됨: 보일러(%s) <-> 허브(%s)", wolfSSL_get_version(down), s_fb_active ? "폴백" : "단독 모드");
         hub_event(EV_LINK_UP, NULL, dev, 1);         /* b=1: 단독 */
         t_up = esp_timer_get_time();
         tv.tv_sec = RELAY_READ_SEC;
@@ -862,8 +1241,22 @@ static void link_task(void *arg)
     job->fd = -1;
     job->ssl = NULL;
     if (!job->ok) {
-        goto done;
+        if (!fb_on_up_fail(job->why, 0)) {
+            goto done;
+        }
+        if (up) {                                    /* 실패한 클라우드 쪽 세션은 지금 치운다(직접 받는 동안 메모리를 잡고 있지 않게) */
+            wolfSSL_free(up);
+            up = NULL;
+        }
+        if (up_fd >= 0) {
+            close(up_fd);
+            up_fd = -1;
+        }
+        gen = s_mode_gen;
+        goto local;
     }
+    /* 여기서는 아직 '성공'이 아니다: 서버가 기기의 로그인(CONNECT)을 받아 줘야(CONNACK 코드 0) 실패 횟수를 지운다.
+     * 보안 연결까지는 되는데 로그인을 거절하거나 답이 없거나 바로 끊는 서버도 '닿지 않는 것'으로 센다. */
     ESP_LOGI(TAG, "연결됨: 보일러(%s) <-> 클라우드(%s)", wolfSSL_get_version(down), wolfSSL_get_version(up));
     hub_event(EV_LINK_UP, NULL, dev, 0);
     t_up = esp_timer_get_time();
@@ -876,6 +1269,12 @@ static void link_task(void *arg)
     for (;;) {
         if (s_mode_gen != gen) {                     /* 단독 모드로 바뀜 → 끊고 다시 받기 */
             closer = 4;
+            break;
+        }
+        if (t_login && !accepted && esp_timer_get_time() - t_login > (int64_t)ACCEPT_WAIT_S * 1000000) {
+            ESP_LOGW(TAG, "서버가 로그인에 %d초째 답이 없음 — 닫음", ACCEPT_WAIT_S);
+            up_why = FB_WHY_NOREPLY;
+            closer = 5;
             break;
         }
         /* SmartThings 명령: 클라우드→기기 패킷 사이에만 끼워 넣는다 */
@@ -906,29 +1305,88 @@ static void link_task(void *arg)
                 continue;
             }
             last_io = esp_timer_get_time();
-            if (FD_ISSET(down_fd, &rd) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) < 0) {
+            pn = 0;
+            if (FD_ISSET(down_fd, &rd) && (pn = pump(down, up, "보일러→클라우드", buf, 2048, tap, true)) < 0) {
                 closer = 1;
                 break;
             }
-            if (FD_ISSET(up_fd, &rd) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) < 0) {
+            if (pn > 0 && !t_login && ((uint8_t)buf[0] >> 4) == 1) {   /* 기기가 로그인(CONNECT)을 보냄 */
+                t_login = esp_timer_get_time();
+            }
+            pn = 0;
+            if (FD_ISSET(up_fd, &rd) && (pn = pump(up, down, "클라우드→보일러", buf, 2048, tap, false)) < 0) {
                 closer = 2;
                 break;
+            }
+            if (pn >= 4 && !accepted && ((uint8_t)buf[0] >> 4) == 2) {   /* 서버의 답(CONNACK): 넷째 바이트가 코드 */
+                if (buf[3] == 0 && s_test_block != 2) {
+                    accepted = true;
+                    atomic_fetch_add(&s_up_ok_links, 1);
+                    s_up_fails = 0;
+                    s_fb_probe_s = FB_PROBE_S;
+                } else {
+                    up_why = FB_WHY_REFUSED;
+                    up_rc = buf[3] ? (uint8_t)buf[3] : 5;       /* 0 인데 여기 왔으면 시험(거절 흉내) */
+                    ESP_LOGW(TAG, "서버가 로그인을 거절함 (코드 %d)", up_rc);
+                    closer = 5;
+                    break;
+                }
             }
         } else {
             last_io = esp_timer_get_time();
-            if (wolfSSL_pending(down) && pump(down, up, "보일러→클라우드", buf, 2048, tap, true) < 0) {
+            pn = 0;
+            if (wolfSSL_pending(down) && (pn = pump(down, up, "보일러→클라우드", buf, 2048, tap, true)) < 0) {
                 closer = 1;
                 break;
             }
-            if (wolfSSL_pending(up) && pump(up, down, "클라우드→보일러", buf, 2048, tap, false) < 0) {
+            if (pn > 0 && !t_login && ((uint8_t)buf[0] >> 4) == 1) {   /* 기기가 로그인(CONNECT)을 보냄 */
+                t_login = esp_timer_get_time();
+            }
+            pn = 0;
+            if (wolfSSL_pending(up) && (pn = pump(up, down, "클라우드→보일러", buf, 2048, tap, false)) < 0) {
                 closer = 2;
                 break;
+            }
+            if (pn >= 4 && !accepted && ((uint8_t)buf[0] >> 4) == 2) {   /* 서버의 답(CONNACK): 넷째 바이트가 코드 */
+                if (buf[3] == 0 && s_test_block != 2) {
+                    accepted = true;
+                    atomic_fetch_add(&s_up_ok_links, 1);
+                    s_up_fails = 0;
+                    s_fb_probe_s = FB_PROBE_S;
+                } else {
+                    up_why = FB_WHY_REFUSED;
+                    up_rc = buf[3] ? (uint8_t)buf[3] : 5;       /* 0 인데 여기 왔으면 시험(거절 흉내) */
+                    ESP_LOGW(TAG, "서버가 로그인을 거절함 (코드 %d)", up_rc);
+                    closer = 5;
+                    break;
+                }
             }
         }
     }
 out:
+    if (closer == 4) {
+        regen_wait();
+    }
     ESP_LOGI(TAG, "연결 종료 (%s)", closer == 1 ? "기기가 닫음" : closer == 2 ? "클라우드가 닫음" : closer == 3 ? "유휴"
-                                   : closer == 4 ? "동작 모드 바뀜" : "오류");
+                                   : closer == 4 ? "동작 모드 바뀜" : closer == 5 ? "서버가 로그인을 받아 주지 않음" : "오류");
+    if (accepted) {
+        atomic_fetch_sub(&s_up_ok_links, 1);
+    } else if (closer != 4) {
+        /* 로그인을 받아 주기 전에 끝났다. 서버가 끊었으면 그대로 실패, 기기가 먼저 포기했으면 로그인을 보내고
+         * 3초 넘게 기다린 경우만 '답이 없음'으로 센다(기기 쪽 Wi-Fi 가 잠깐 끊긴 것까지 서버 탓으로 세지 않게). */
+        if (!up_why && closer == 2) {
+            up_why = FB_WHY_CLOSED;
+        } else if (!up_why && closer == 1 && t_login && esp_timer_get_time() - t_login > 3000000) {
+            up_why = FB_WHY_NOREPLY;
+        }
+        if (up_why && atomic_load(&s_up_ok_links) > 0) {
+            /* 다른 기기는 지금 서버에 로그인돼 있다 = 서버는 멀쩡하고 이 기기만의 문제(예: 계정에서 지워짐).
+             * 이걸로 폴백하면 멀쩡한 기기까지 끊겼다 붙었다를 되풀이한다 */
+            ESP_LOGW(TAG, "이 기기만 서버 로그인이 안 됨(다른 기기는 연결 중) — 폴백으로 세지 않음");
+        } else if (up_why) {
+            fb_on_up_fail(up_why, up_rc);           /* 이 연결은 이미 로그인을 넘겼으므로 닫는다. 기기가 다시 붙을 때 직접 받는다 */
+        }
+    }
 
 done:
     hub_rinnai_link_close(tap);
@@ -1061,8 +1519,10 @@ void hub_proxy_start(void)
     s_ctx_mx = xSemaphoreCreateMutex();
     s_hs_mx = xSemaphoreCreateMutex();
     s_dns_mx = xSemaphoreCreateMutex();
+    s_fb_mx = xSemaphoreCreateMutex();
     mode_load();
-    ESP_LOGI(TAG, "동작 모드: %s", s_mode == HUB_MODE_STANDALONE ? "단독" : "프록시");
+    ESP_LOGI(TAG, "동작 모드: %s%s", s_mode == HUB_MODE_STANDALONE ? "단독" : "프록시",
+             s_mode == HUB_MODE_PROXY && s_fb_on ? " (클라우드에 닿지 않으면 자동으로 단독 동작)" : "");
     xTaskCreate(listen_task, "hub_proxy", 6144, NULL, 5, NULL);
 }
 
@@ -1207,7 +1667,13 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
         return httpd_resp_send_500(req);
     }
     esp_err_t e;
-    if (!sa) {
+    if (!sa && s_fb_active) {
+        /* 폴백 중: 닿지 않는 클라우드에 다시 묻느라 기기를 기다리게 하지 않는다 — 이 기기의 저장된 답(없으면 허브가 만든 답) */
+        bool have = boot_cache_get(key, buf, BOOT_CAP);
+        ESP_LOGI(TAG, "부트스트랩(폴백): %s", have ? "이 기기의 저장된 답" : "허브가 만든 답");
+        hub_event(EV_BOOTSTRAP, NULL, dev, 1);
+        e = boot_send(req, 200, have ? buf : BOOT_LOCAL);
+    } else if (!sa) {
         char *body;
         int code = boot_fetch(svc, mac, buf, BOOT_CAP, &body);
         if (code == 200 && boot_valid(body)) {

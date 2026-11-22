@@ -6,6 +6,7 @@
 --              0x02 연결 ([종류][MAC끝3]) * n  (목록에 없으면 오프라인)
 --              0x03 온습도 int16 x2   0x04 가스 u32 x5   0x05 플러그인 비트(+고장 비트)   0x06 노출 u32
 --   ST → 허브  0x00 명령 "f06@<mac> b1=1" / "f09@<mac> a0=7,d4=10" / "refresh" (여러 개는 ";")
+--               "hub mode=proxy" / "hub mode=standalone" (허브의 동작 모드 — 이것만 단독으로 보낸다)
 --
 -- 자식 기기 키: 보일러 = "b"..mac, 존 = "t"..mac.."_"..slot. 센서는 "room"/"gas"(허브 1개당 하나).
 -- 짝(어느 f09가 어느 f06에 붙나)은 1단계에선 '보일러가 하나뿐이면 암묵 연동'. 2단계에서 관리 화면 수동 지정.
@@ -15,6 +16,7 @@ local log = require "log"
 local CMD_STATE, CMD_LINKS, CMD_ROOM, CMD_GAS, CMD_PLUGINS, CMD_EXPOSE, CMD_PAIRS = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
 local CMD_FORGET = 0x08
 local CMD_TARIFF = 0x09
+local CMD_MODE = 0x0b
 local KIND_F06, KIND_F09 = 6, 9
 
 -- 한 f09 안의 방 슬롯(7바이트, 슬롯 s 는 byte[7s]). 상태 0x02=켜짐, 0x40=난방 중. 명령 선택자 a0=슬롯+1.
@@ -1190,9 +1192,70 @@ local function on_tariff(parent, b)
   show_gas(parent)
 end
 
+-- 허브의 동작 모드(CMD 0x0b): [정해 둔 모드 0 프록시|1 단독][폴백 중 0|1][자동 폴백 설정 0|1][폴백 시작 시각 u32]
+--   [까닭][로그인 거절 코드]. 까닭: 1 집 Wi-Fi 끊김 · 2 서버 연결 안 됨 · 3 보안 연결 실패 · 4 로그인 거절 · 5 로그인 응답 없음
+--   · 6 서버가 끊음 (없거나 0 이면 "접속 불가"). 펌웨어 hub_proxy.c 의 fb_why_text 와 같은 말이어야 한다.
+-- 허브 기기의 "모드" 는 정해 둔 모드(프록시·단독 둘뿐)이고, 지금 어떻게 동작하는지는 "상태" 글로 보인다.
+--   기기 목록(boilerStatus): 프록시 모드 / 단독 모드 / 임시 단독 모드 ← 짧게, 까닭은 넣지 않는다
+--   상세 화면(roomStatus):   프록시 모드 / 단독 모드 / 단독 모드 (18:25부터 린나이 서버 연결 안 됨) ← 까닭까지(줄바꿈은 앱이 안 그려서 한 줄)
+--   "임시" = 프록시로 정해 뒀는데 서버에 닿지 않아 허브가 직접 받는 중(자동 폴백)
+local MODE_PROXY, MODE_STANDALONE = "프록시", "단독"
+local KST = 9 * 3600                         -- 허브는 한국 시각으로 동작한다(펌웨어도 KST 고정)
+local function since_text(since)
+  if not since or since == 0 then return "" end
+  local same_day = os.date("!%Y%m%d", since + KST) == os.date("!%Y%m%d", os.time() + KST)
+  local t = os.date("!*t", since + KST)
+  if same_day then return string.format("%02d:%02d부터 ", t.hour, t.min) end
+  return string.format("%d/%d %02d:%02d부터 ", t.month, t.day, t.hour, t.min)
+end
+local WHY = { "집 Wi-Fi 끊김", "린나이 서버 연결 안 됨", "린나이 서버 보안 연결 실패", "린나이 서버 로그인 거절",
+  "린나이 서버 로그인 응답 없음", "린나이 서버가 연결을 끊음" }
+local function why_text(why, rc)
+  local t = WHY[why]
+  if not t then return "린나이 서버 접속 불가" end
+  if why == 4 then return t .. "(코드 " .. rc .. ")" end
+  return t
+end
+local function on_mode(parent, b)
+  if #b < 3 then return end
+  local main = parent.profile.components.main
+  if not main then return end
+  local standalone, fallback = b:byte(1) == 1, b:byte(2) ~= 0
+  local since = #b >= 7 and string.unpack("<I4", b, 4) or 0
+  local why, rc = #b >= 9 and b:byte(8) or 0, #b >= 9 and b:byte(9) or 0
+  local value = standalone and MODE_STANDALONE or MODE_PROXY
+  if not parent:get_field("mode_lists") then   -- 목록은 한 번만(허브가 5분마다 다시 알려 준다)
+    parent:emit_component_event(main, capabilities.mode.supportedModes({ MODE_PROXY, MODE_STANDALONE }, { visibility = { displayed = false } }))
+    parent:emit_component_event(main, capabilities.mode.supportedArguments({ MODE_PROXY, MODE_STANDALONE }, { visibility = { displayed = false } }))
+    parent:set_field("mode_lists", true)
+  end
+  if parent:get_field("mode_shown") ~= value then
+    parent:emit_component_event(main, capabilities.mode.mode(value))
+    parent:set_field("mode_shown", value)
+  end
+  local short = standalone and "단독 모드" or (fallback and "임시 단독 모드" or "프록시 모드")
+  local long = (fallback and not standalone)
+    and ("단독 모드 (" .. since_text(since) .. why_text(why, rc) .. ")") or short
+  -- 상태 글은 받을 때마다 낸다(같은 글이면 SmartThings 가 새 이벤트로 치지 않는다). LAN 드라이버는 같은 자리에
+  -- "연결됨"·"연결 끊김" 을 쓰므로, 다시 붙은 뒤 허브가 알려 주는 이 글로 덮어야 한다.
+  parent:emit_component_event(main, status_cap.status(short))
+  parent:emit_component_event(main, room_cap.roomStatus(long))
+end
+
+local function set_hub_mode(_, device, cmd)
+  local parent = parent_of(device)
+  local want = cmd.args.mode
+  if want == MODE_PROXY then
+    send_text(parent, "hub mode=proxy")
+  elseif want == MODE_STANDALONE then
+    send_text(parent, "hub mode=standalone")
+  end
+  -- 표시는 허브가 새 모드를 알려 줄 때 바뀐다(허브가 저장에 실패하면 옛 값을 다시 보내 준다)
+end
+
 local HANDLERS = { [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
   [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
-  [CMD_TARIFF] = on_tariff }
+  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode }
 
 function M.info_changed(_, device)
   if not is_child(device) then return end
@@ -1251,6 +1314,9 @@ M.capability_handlers = {
   },
   [capabilities.refresh.ID] = {
     [capabilities.refresh.commands.refresh.NAME] = do_refresh,
+  },
+  [capabilities.mode.ID] = {
+    [capabilities.mode.commands.setMode.NAME] = set_hub_mode,
   },
 }
 

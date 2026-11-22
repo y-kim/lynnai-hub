@@ -34,6 +34,7 @@ class FakeHub:
         self.server: asyncio.AbstractServer | None = None
         self.port = 0
         self.on_hello: list[tuple[int, bytes]] = []     # sent to every client right after "ok"
+        self.mode = [0, 0, 1, 0, 0, 0, 0]               # [mode][fallback active][auto fallback][since u32] as in HUB_RK_CMD_MODE
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
@@ -64,7 +65,16 @@ class FakeHub:
         while raw := await reader.readline():
             cmd, _, body = raw.decode().strip().partition(" ")
             if cmd == "00":
-                self.requests.append(bytes.fromhex(body).decode())
+                text = bytes.fromhex(body).decode()
+                self.requests.append(text)
+                if text.startswith("hub "):         # mode requests are answered with the new mode, like the firmware
+                    key, _, value = text[4:].partition("=")
+                    if key == "mode":
+                        self.mode[0] = 1 if value == "standalone" else 0
+                    elif key == "fallback":
+                        self.mode[2] = 1 if value == "1" else 0
+                    for w in self.writers:
+                        w.write(f"0b {bytes(self.mode).hex()}\n".encode())
 
     async def push(self, cmd: int, payload: bytes) -> None:
         for w in self.writers:
@@ -86,6 +96,7 @@ class FakeHub:
             (0x01, bytes([9]) + bytes.fromhex(THERMO) + bytes.fromhex(f09())),
             (0x03, struct.pack("<hh", 2534, 3410)),
             (0x04, struct.pack("<5I", 1504, 0xFFFFFFFF, 210, 5190, 857)),
+            (0x0B, bytes(self.mode)),
         ]
 
 

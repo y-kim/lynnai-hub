@@ -16,6 +16,7 @@ local core = require "core"
 local SSDP_ST = "urn:lynnai-com:device:hub:1"
 local DNI_PREFIX = "lynnai-hub-"
 local status_cap = capabilities["connectbook02461.boilerStatus"]
+local room_cap = capabilities["connectbook02461.roomStatus"]
 
 local driver
 local conns = {}          -- [device.id] = { alive = bool, sock = tcp|nil }
@@ -106,8 +107,10 @@ local function token_of(device)
   return t
 end
 
+-- 기기 목록(boilerStatus)과 상세 화면(roomStatus) 두 곳에 같은 글
 local function show(device, text)
   device:emit_event(status_cap.status(text, { state_change = true }))
+  device:emit_event(room_cap.roomStatus(text, { state_change = true }))
 end
 
 local function run(device)

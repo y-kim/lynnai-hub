@@ -1,4 +1,4 @@
-"""Sensors wired to the hub: room temperature/humidity and the gas meter."""
+"""Sensors wired to the hub (room temperature/humidity, gas meter) and the hub's own status."""
 
 from __future__ import annotations
 
@@ -6,12 +6,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
-from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfVolume, UnitOfVolumeFlowRate
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTemperature, UnitOfVolume, UnitOfVolumeFlowRate
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from . import LynnaiConfigEntry, protocol as p
-from .entity import PluginEntity, setup_dynamic
+from .entity import HubModeEntity, PluginEntity, setup_dynamic
 from .hub import LynnaiHub
 
 
@@ -76,6 +77,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
             if d.key == "humidity" and hub.room.humidity is None:    # a sensor without humidity (e.g. MPL3115A2)
                 continue
             out.append(HubSensor(hass, hub, entry.entry_id, d))
+        if hub.mode is not None:
+            out.append(HubStatus(hass, hub, entry.entry_id))
         return out
 
     entry.async_on_unload(setup_dynamic(hass, entry.entry_id, async_add_entities, make))
@@ -91,3 +94,62 @@ class HubSensor(PluginEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         return self.entity_description.value(self.hub)
+
+
+# The status is a sentence with a time in it, which Home Assistant cannot translate; pick by the configured language.
+# The reason is what the hub found when it tried (protocol.FALLBACK_REASONS); None = an older hub that does not say.
+_STATUS = {
+    "ko": {"proxy": "프록시 모드", "standalone": "단독 모드",
+           "fallback": "단독 모드 ({since}부터 {reason})", "fallback_unknown": "단독 모드 ({reason})",
+           "reason": {None: "린나이 서버 접속 불가", "wifi": "집 Wi-Fi 끊김", "connect": "린나이 서버 연결 안 됨",
+                      "tls": "린나이 서버 보안 연결 실패", "refused": "린나이 서버 로그인 거절(코드 {code})",
+                      "noreply": "린나이 서버 로그인 응답 없음", "closed": "린나이 서버가 연결을 끊음"}},
+    "en": {"proxy": "Proxy", "standalone": "Standalone",
+           "fallback": "Standalone ({reason} since {since})", "fallback_unknown": "Standalone ({reason})",
+           "reason": {None: "Rinnai server unreachable", "wifi": "home Wi-Fi down",
+                      "connect": "cannot connect to the Rinnai server",
+                      "tls": "secure connection to the Rinnai server fails",
+                      "refused": "Rinnai server refuses the login (code {code})",
+                      "noreply": "Rinnai server does not answer the login",
+                      "closed": "Rinnai server closes the connection"}},
+}
+
+
+class HubStatus(HubModeEntity, SensorEntity):
+    """What the hub is doing right now. The mode select is what it is set to; this also shows when it had to
+    fall back to serving the devices itself because the Rinnai server cannot be reached, and since when."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass: HomeAssistant, hub: LynnaiHub, entry_id: str) -> None:
+        super().__init__(hub, entry_id, "hub_status")
+        self._text = _STATUS["ko"] if (hass.config.language or "").startswith("ko") else _STATUS["en"]
+
+    @property
+    def native_value(self) -> str | None:
+        mode = self.hub.mode
+        if mode is None:
+            return None
+        if mode.status != "fallback":
+            return self._text[mode.status]
+        reasons = self._text["reason"]
+        reason = reasons.get(mode.reason, reasons[None]).format(code=mode.code)
+        if mode.since is None:
+            return self._text["fallback_unknown"].format(reason=reason)
+        since = dt_util.as_local(dt_util.utc_from_timestamp(mode.since))
+        same_day = since.date() == dt_util.now().date()
+        return self._text["fallback"].format(since=since.strftime("%H:%M" if same_day else "%m/%d %H:%M"), reason=reason)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | int] | None:
+        mode = self.hub.mode
+        if mode is None or mode.status != "fallback":
+            return None
+        attrs: dict[str, str | int] = {}
+        if mode.since is not None:
+            attrs["unreachable_since"] = dt_util.utc_from_timestamp(mode.since).isoformat()
+        if mode.reason is not None:
+            attrs["reason"] = mode.reason
+            if mode.reason == "refused":
+                attrs["refusal_code"] = mode.code
+        return attrs or None

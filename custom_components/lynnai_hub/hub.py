@@ -29,6 +29,7 @@ class LynnaiHub:
         self.room: p.RoomSensorState | None = None
         self.gas: p.GasState | None = None
         self.plugins = p.PluginState()
+        self.mode: p.HubMode | None = None                      # None until the hub told us (older firmware never does)
         self._on_update: Callable[[], None] = lambda: None
         self._on_new: Callable[[], None] = lambda: None
 
@@ -79,6 +80,9 @@ class LynnaiHub:
             self.plugins = p.decode_plugins(payload)
         elif cmd == p.CMD_PAIRS:
             self.pairs = p.decode_pairs(payload)
+        elif cmd == p.CMD_MODE:
+            new = self.mode is None
+            self.mode = p.decode_mode(payload) or self.mode
         elif cmd == p.CMD_FORGET and len(payload) >= 4:
             kind, mac = payload[0], payload[1:4].hex()
             if kind == p.KIND_BOILER:
@@ -128,6 +132,12 @@ class LynnaiHub:
 
     async def refresh(self) -> None:
         await self._send(["refresh"])
+
+    async def set_hub_mode(self, mode: str) -> None:
+        await self._send([p.hub_mode_cmd(mode)])
+
+    async def set_auto_fallback(self, on: bool) -> None:
+        await self._send([p.hub_fallback_cmd(on)])
 
     async def set_boiler_switch(self, mac: str, name: str, on: bool) -> None:
         _pos, code = p.BOILER_SWITCHES[name]

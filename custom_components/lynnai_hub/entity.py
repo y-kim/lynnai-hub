@@ -115,6 +115,22 @@ class ZoneEntity(LynnaiEntity):
         return self.zone is not None and self.hub.device_online(p.KIND_THERMOSTAT, self.mac)
 
 
+class HubEntity(LynnaiEntity):
+    """Something about the hub itself; it lives on the hub device."""
+
+    def __init__(self, hub: LynnaiHub, entry_id: str, key: str) -> None:
+        super().__init__(hub, entry_id, "hub", key)
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub.hub_id)})
+
+
+class HubModeEntity(HubEntity):
+    """The hub's operating mode and what goes with it. Firmware before v0.6 does not report it."""
+
+    @property
+    def available(self) -> bool:
+        return self.hub.connected and self.hub.mode is not None
+
+
 class PluginEntity(LynnaiEntity):
     """A sensor wired to the hub itself (room sensor, gas meter)."""
 

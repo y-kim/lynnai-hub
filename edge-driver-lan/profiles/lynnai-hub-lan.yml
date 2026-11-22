@@ -1,8 +1,17 @@
 name: lynnai-hub-lan
+# 화면 구성(vid): 기기 목록에는 짧은 글(boilerStatus), 상세 화면 "상태" 칸에는 까닭까지 적은 글(roomStatus).
+# 원본은 ../edge-driver/presentations/lynnai-hub-lan.device-config.json (Zigbee 쪽 lynnai-hub 와 같이 고칠 것)
+metadata:
+  mnmn: SmartThingsCommunity
+  vid: 7a4c3276-855e-3b7e-865e-eb41038d03a1
 components:
   - id: main
     capabilities:
-      - id: connectbook02461.boilerStatus
+      - id: connectbook02461.boilerStatus   # 기기 목록 글
+        version: 1
+      - id: connectbook02461.roomStatus     # 상세 화면 글
+        version: 1
+      - id: mode                # 동작 모드: 프록시 / 단독 (허브가 알려 줄 때 채워진다, CMD 0x0b)
         version: 1
       - id: refresh
         version: 1

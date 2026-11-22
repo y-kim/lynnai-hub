@@ -40,6 +40,9 @@
       },
       "hot_water_burning": {
         "name": "온수 연소"
+      },
+      "cloud_fallback": {
+        "name": "클라우드 없이 동작 중"
       }
     },
     "number": {
@@ -56,6 +59,13 @@
         "state": {
           "ondol": "온돌",
           "room": "실내"
+        }
+      },
+      "hub_mode": {
+        "name": "동작 모드",
+        "state": {
+          "proxy": "프록시 (린나이 클라우드)",
+          "standalone": "단독 (클라우드 없이)"
         }
       }
     },
@@ -77,6 +87,9 @@
       },
       "gas_last_hour": {
         "name": "1시간 사용량"
+      },
+      "hub_status": {
+        "name": "상태"
       }
     },
     "switch": {
@@ -97,6 +110,9 @@
       },
       "reservation": {
         "name": "예약"
+      },
+      "auto_fallback": {
+        "name": "서버에 닿지 않으면 자동 단독 동작"
       }
     },
     "water_heater": {

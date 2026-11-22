@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import LynnaiConfigEntry
 from .const import DOMAIN
-from .entity import BoilerEntity, LynnaiEntity, setup_dynamic
+from .entity import BoilerEntity, HubModeEntity, LynnaiEntity, setup_dynamic
 
 BURNERS = {"heat_burning": "heat_burning", "hot_water_burning": "hot_water_burning"}
 
@@ -23,7 +23,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
             hass,
             entry.entry_id,
             async_add_entities,
-            lambda: [Burner(hass, hub, entry.entry_id, mac, key) for mac in hub.boilers for key in BURNERS],
+            lambda: [Burner(hass, hub, entry.entry_id, mac, key) for mac in hub.boilers for key in BURNERS]
+            + ([CloudFallback(hub, entry.entry_id)] if hub.mode is not None else []),
         )
     )
 
@@ -56,3 +57,17 @@ class HubConnected(LynnaiEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, str] | None:
         return {"problem": self.hub.problem} if self.hub.problem and not self.hub.connected else None
+
+
+class CloudFallback(HubModeEntity, BinarySensorEntity):
+    """On while the hub is set to proxy but cannot reach the Rinnai server and serves the devices itself."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hub, entry_id: str) -> None:
+        super().__init__(hub, entry_id, "cloud_fallback")
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.hub.mode.fallback if self.hub.mode else None

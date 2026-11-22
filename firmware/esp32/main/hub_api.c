@@ -422,6 +422,11 @@ static esp_err_t state_get(httpd_req_t *req)
         CHUNK("\"gas\":null");
     }
 
+    /* 동작 모드: set = 정해 둔 모드, fallback = 프록시인데 클라우드에 닿지 않아 지금 단독처럼 동작 중 */
+    CHUNK(",\"mode\":{\"set\":\"%s\",\"fallback\":%s,\"fallback_on\":%s,\"fallback_since\":%lu,\"fallback_why\":\"%s\"}",
+          hub_proxy_mode() == HUB_MODE_STANDALONE ? "standalone" : "proxy", hub_proxy_fallback() ? "true" : "false",
+          hub_proxy_fallback_on() ? "true" : "false", (unsigned long)hub_proxy_fallback_since(), hub_proxy_fallback_why());
+
     {
         int mode = 0, billday = 8;
         const char *region = "";

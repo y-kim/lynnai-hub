@@ -40,6 +40,9 @@
       },
       "hot_water_burning": {
         "name": "Hot water burner"
+      },
+      "cloud_fallback": {
+        "name": "Running without the cloud"
       }
     },
     "number": {
@@ -56,6 +59,13 @@
         "state": {
           "ondol": "Floor (water temperature)",
           "room": "Room temperature"
+        }
+      },
+      "hub_mode": {
+        "name": "Operating mode",
+        "state": {
+          "proxy": "Proxy (Rinnai cloud)",
+          "standalone": "Standalone (no cloud)"
         }
       }
     },
@@ -77,6 +87,9 @@
       },
       "gas_last_hour": {
         "name": "Last hour"
+      },
+      "hub_status": {
+        "name": "Status"
       }
     },
     "switch": {
@@ -97,6 +110,9 @@
       },
       "reservation": {
         "name": "Reservation"
+      },
+      "auto_fallback": {
+        "name": "Standalone while the cloud is unreachable"
       }
     },
     "water_heater": {

@@ -315,7 +315,7 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
             const char *slash = strrchr(topic, '/');
             if (slash && (!strcmp(slash, "/set") || !strcmp(slash, "/get"))) {
                 learn_base(t, topic, slash);
-                if (!strcmp(slash, "/get") && hub_proxy_mode() == HUB_MODE_STANDALONE) {
+                if (!strcmp(slash, "/get") && hub_proxy_local()) {
                     t->poll_now = true;              /* 클라우드는 접속 ~6초 뒤 fa 를 보냄 — 단독은 허브가 바로 */
                     kick();
                 }
@@ -340,7 +340,7 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
     const char *slash = strrchr(topic, '/');
     if (slash && !strcmp(slash, "/stg")) {
         learn_base(t, topic, slash);
-        if (t->kind && hub_proxy_mode() == HUB_MODE_STANDALONE) {
+        if (t->kind && hub_proxy_local()) {
             answer_time(t);
         }
         return;

@@ -979,6 +979,20 @@ static esp_err_t gasnow_get(httpd_req_t *req)
     return r;
 }
 
+/* 동작 모드 카드의 '현재 상태' 한 줄만 돌려준다(스마트홈에서 바꾼 것·자동 폴백이 새로 읽지 않아도 보이게). */
+static esp_err_t modenow_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (!authed(req)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        return httpd_resp_sendstr(req, "로그인이 필요합니다");
+    }
+    char b[320] = "";
+    hub_proxy_now_html(b, sizeof(b));
+    return httpd_resp_sendstr(req, b);
+}
+
 /* 원격 디버그 키 만들기/삭제 — 키는 관리자만 만든다(암호 필요). 디버그 키로는 또 못 만든다. */
 static esp_err_t dbgkey_post(httpd_req_t *req)
 {
@@ -1064,7 +1078,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 36;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
+    cfg.max_uri_handlers = 40;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
     cfg.stack_size = 8192;                /* 6144 에서: 암호 해시 계산 + 저장이 한 요청에 겹칠 때 여유 */
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
@@ -1122,6 +1136,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &dbgk);
     const httpd_uri_t gnow = { .uri = "/admin/gas-now", .method = HTTP_GET, .handler = gasnow_get };
     httpd_register_uri_handler(srv, &gnow);
+    const httpd_uri_t mnow = { .uri = "/admin/mode-now", .method = HTTP_GET, .handler = modenow_get };
+    httpd_register_uri_handler(srv, &mnow);
     hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
     httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */

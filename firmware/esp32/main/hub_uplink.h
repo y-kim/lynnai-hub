@@ -32,6 +32,7 @@
 #define HUB_RK_CMD_PAIRS    0x07    /* 보일러↔써머스탯 짝: ([f09 MAC끝3(3)][f06 MAC끝3(3)]) * n (관리 화면 수동) */
 #define HUB_RK_CMD_FORGET   0x08    /* 기기 삭제: [종류 6|9][MAC끝3바이트] — 드라이버가 그 기기 자식들을 지운다 */
 #define HUB_RK_CMD_ALIVE    0x0a    /* 살아 있음(1바이트 0). 20~30초마다 — 드라이버가 허브 끊김을 1~2분 안에 알아채게 */
+#define HUB_RK_CMD_MODE     0x0b    /* 동작 모드: [정해 둔 모드 0 프록시|1 단독][폴백 중 0|1][자동 폴백 설정 0|1][폴백 시작 시각 u32, 모르면 0] — 바뀔 때·새로고침 때 */
 #define HUB_RK_CMD_TARIFF   0x09    /* 가스 요금 요소: u32 x5 (보정계수·열량·단가 ×1e6, 기본료 원, 검침일 1~31|32=말일 — 다섯째는 v0.3 뒤에 추가) — hub_tariff.c */
 
 void hub_uplink_load(void);                    /* NVS 에서 고른 통로 읽기 */

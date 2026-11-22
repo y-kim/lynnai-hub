@@ -32,6 +32,7 @@ CMD_PAIRS = 0x07
 CMD_FORGET = 0x08
 CMD_TARIFF = 0x09
 CMD_ALIVE = 0x0A
+CMD_MODE = 0x0B
 
 KIND_BOILER = 6
 KIND_THERMOSTAT = 9
@@ -246,7 +247,56 @@ def snap(value: float, allowed: list[int], current: int | None = None) -> int:
     return min(allowed, key=lambda a: abs(a - v))
 
 
+# ---- hub operating mode ----
+
+HUB_MODE_PROXY = "proxy"            # relays the devices to the Rinnai cloud (the Rinnai app keeps working)
+HUB_MODE_STANDALONE = "standalone"  # the hub answers the devices itself, no cloud
+
+
+@dataclass(frozen=True)
+class HubMode:
+    mode: str               # what the hub is set to
+    fallback: bool          # set to proxy, but the cloud is unreachable so it is serving the devices itself for now
+    auto_fallback: bool     # whether it may do that on its own
+    since: int | None = None    # when the fallback began (unix seconds); None when not in fallback or unknown
+    reason: str | None = None   # why the server counts as unreachable (FALLBACK_REASONS); None when not in fallback or unknown
+    code: int = 0               # the server's refusal code when the reason is "refused"
+
+    @property
+    def status(self) -> str:
+        """What the hub is doing right now: 'proxy', 'standalone', or 'fallback' (set to proxy, serving locally)."""
+        if self.mode == HUB_MODE_STANDALONE:
+            return HUB_MODE_STANDALONE
+        return "fallback" if self.fallback else HUB_MODE_PROXY
+
+
+# Why the hub fell back, by the number it sends (hub_proxy.c FB_WHY_*): the home Wi-Fi is down, the server cannot be
+# connected to, the secure connection fails, the server refuses or does not answer the device's login, or it closes
+# the connection before accepting it.
+FALLBACK_REASONS = {1: "wifi", 2: "connect", 3: "tls", 4: "refused", 5: "noreply", 6: "closed"}
+
+
+def decode_mode(payload: bytes) -> HubMode | None:
+    """[mode 0 proxy | 1 standalone][fallback active][auto fallback setting][fallback start, u32 unix seconds or 0]
+    [reason][refusal code] - the last two only from newer hubs."""
+    if len(payload) < 3:
+        return None
+    fallback = payload[1] != 0
+    since = struct.unpack_from("<I", payload, 3)[0] if len(payload) >= 7 else 0
+    reason = FALLBACK_REASONS.get(payload[7]) if fallback and len(payload) >= 9 else None
+    return HubMode(HUB_MODE_STANDALONE if payload[0] == 1 else HUB_MODE_PROXY, fallback, payload[2] != 0,
+                   since if since and fallback else None, reason, payload[8] if reason == "refused" else 0)
+
+
 # ---- requests (text sent with CMD_REQUEST) ----
+
+def hub_mode_cmd(mode: str) -> str:
+    return f"hub mode={mode}"
+
+
+def hub_fallback_cmd(on: bool) -> str:
+    return f"hub fallback={onoff(on)}"
+
 
 def boiler_cmd(mac: str, code: str, value: str) -> str:
     return f"f06@{mac} {code}={value}"

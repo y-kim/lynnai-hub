@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
 from custom_components.lynnai_hub.const import DOMAIN
 from custom_components.lynnai_hub.entity import _VIA_DEVICE_ID
@@ -187,3 +188,64 @@ async def test_entities_survive_a_change_made_in_the_ui(hass: HomeAssistant, ent
     await hass.async_block_till_done()
     climates = [e.entity_id for e in er.async_entries_for_device(er.async_get(hass), room.id) if e.domain == "climate"]
     assert len(climates) == 1 and hass.states.get(climates[0]).state == "heat"
+
+
+async def test_hub_mode_can_be_seen_and_changed(hass: HomeAssistant, entry, fake_hub):
+    hub = f"lynnai_hub_{HUB_ID.lower()}"
+    mode, fallback, auto = f"select.{hub}_operating_mode", f"binary_sensor.{hub}_running_without_the_cloud", \
+        f"switch.{hub}_standalone_while_the_cloud_is_unreachable"
+    await _settle(hass, lambda: hass.states.get(mode) is not None)
+    assert hass.states.get(mode).state == "proxy"
+    assert hass.states.get(fallback).state == "off"
+    assert hass.states.get(auto).state == "on"
+
+    await hass.services.async_call("select", "select_option", {"entity_id": mode, "option": "standalone"}, blocking=True)
+    await _settle(hass, lambda: fake_hub.requests[-1:] == ["hub mode=standalone"])
+    await _settle(hass, lambda: hass.states.get(mode).state == "standalone")     # shown once the hub confirms it
+
+    await hass.services.async_call("switch", "turn_off", {"entity_id": auto}, blocking=True)
+    await _settle(hass, lambda: fake_hub.requests[-1:] == ["hub fallback=0"])
+    await _settle(hass, lambda: hass.states.get(auto).state == "off")
+
+    status = f"sensor.{hub}_status"
+    assert hass.states.get(status).state == "Standalone"
+
+    # set to proxy, but the Rinnai server has been unreachable since 18:25 local time: the mode stays what it is set to
+    await hass.config.async_set_time_zone("Asia/Seoul")
+    since = int(dt_util.now().replace(hour=18, minute=25, second=0, microsecond=0).timestamp())
+    await fake_hub.push(0x0B, bytes([0, 1, 1]) + struct.pack("<I", since))
+    await _settle(hass, lambda: hass.states.get(fallback).state == "on")
+    assert hass.states.get(mode).state == "proxy"
+    assert hass.states.get(status).state == "Standalone (Rinnai server unreachable since 18:25)"
+    await fake_hub.push(0x0B, bytes([0, 1, 1]))        # an older, shorter message: no time
+    await _settle(hass, lambda: hass.states.get(status).state == "Standalone (Rinnai server unreachable)")
+    # a newer hub also says what went wrong: [reason][refusal code] after the time
+    for reason, text in ((1, "home Wi-Fi down"), (2, "cannot connect to the Rinnai server"),
+                         (3, "secure connection to the Rinnai server fails"),
+                         (4, "Rinnai server refuses the login (code 5)"),
+                         (5, "Rinnai server does not answer the login"), (6, "Rinnai server closes the connection")):
+        await fake_hub.push(0x0B, bytes([0, 1, 1]) + struct.pack("<I", since) + bytes([reason, 5]))
+        await _settle(hass, lambda: hass.states.get(status).state == f"Standalone ({text} since 18:25)")
+    assert hass.states.get(status).attributes["reason"] == "closed"
+    await fake_hub.push(0x0B, bytes([0, 1, 1]) + struct.pack("<I", since) + bytes([4, 5]))
+    await _settle(hass, lambda: hass.states.get(status).attributes.get("refusal_code") == 5)
+    await fake_hub.push(0x0B, bytes([0, 0, 1, 0, 0, 0, 0]))
+    await _settle(hass, lambda: hass.states.get(status).state == "Proxy")
+    assert hass.states.get(fallback).state == "off"
+
+
+async def test_no_mode_entities_for_a_hub_that_does_not_report_it(hass: HomeAssistant, fake_hub):
+    """Firmware before the mode message: the hub device keeps just its connection entity."""
+    fake_hub.tokens.add(TOKEN)
+    fake_hub.seed()
+    fake_hub.on_hello = [m for m in fake_hub.on_hello if m[0] != 0x0B]
+    e = MockConfigEntry(domain=DOMAIN, unique_id=HUB_ID, title="LYNNAI Hub",
+                        data={"host": "127.0.0.1", "port": fake_hub.port, "token": TOKEN, "hub_id": HUB_ID})
+    e.add_to_hass(hass)
+    with patch("custom_components.lynnai_hub.discover", return_value={}):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await _settle(hass, lambda: hass.states.get("sensor.gas_meter_meter_reading") is not None)
+        assert hass.states.get(f"select.lynnai_hub_{HUB_ID.lower()}_operating_mode") is None
+        await hass.config_entries.async_unload(e.entry_id)
+        await hass.async_block_till_done()
+

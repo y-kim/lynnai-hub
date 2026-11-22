@@ -1,0 +1,71 @@
+{
+  "dashboard": {
+    "states": [
+      {
+        "component": "main",
+        "capability": "connectbook02461.boilerStatus",
+        "version": 1,
+        "idx": 0,
+        "group": "main",
+        "values": [],
+        "composite": false
+      }
+    ],
+    "actions": [],
+    "basicPlus": []
+  },
+  "detailView": [
+    {
+      "component": "main",
+      "capability": "connectbook02461.roomStatus",
+      "version": 1,
+      "values": [],
+      "patch": []
+    },
+    {
+      "component": "main",
+      "capability": "mode",
+      "version": 1,
+      "values": [],
+      "patch": []
+    },
+    {
+      "component": "main",
+      "capability": "refresh",
+      "version": 1,
+      "values": [],
+      "patch": []
+    }
+  ],
+  "automation": {
+    "conditions": [
+      {
+        "component": "main",
+        "capability": "connectbook02461.boilerStatus",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "main",
+        "capability": "mode",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      }
+    ],
+    "actions": [
+      {
+        "component": "main",
+        "capability": "mode",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      }
+    ]
+  },
+  "type": "profile"
+}
