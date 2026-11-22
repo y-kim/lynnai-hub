@@ -217,7 +217,13 @@ static esp_err_t zb_join_post(httpd_req_t *req)
     /* 가입 시도는 Wi-Fi 를 바로 멈추므로 응답을 먼저 보내고 시작한다(안 그러면 브라우저에 오류만 뜬다) */
     bool can = hub_zigbee_can_join();
     esp_err_t r;
-    if (admin) {                                     /* 관리 화면 버튼: 되돌아가지 않고 안내만(Wi-Fi 가 곧 멈춘다) */
+    if (admin && httpd_req_get_hdr_value_len(req, "X-Ajax") > 0) {   /* 관리 화면이 뒤에서 보냄: 화면에 띄울 글자만 */
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        r = httpd_resp_sendstr(req, can
+            ? "Zigbee 가입 시도를 시작합니다. 최대 3분 동안 허브의 Wi-Fi 가 멈췄다 돌아옵니다. "
+              "SmartThings 앱에서 '기기 추가 → 주변 기기 검색'을 해 두세요."
+            : "이미 Zigbee 망에 가입돼 있거나 Zigbee 를 쓰지 않습니다.");
+    } else if (admin) {                              /* 스크립트 없이 누른 경우: 되돌아가지 않고 안내만(Wi-Fi 가 곧 멈춘다) */
         httpd_resp_set_type(req, "text/html; charset=utf-8");
         r = httpd_resp_sendstr(req, can
             ? "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"

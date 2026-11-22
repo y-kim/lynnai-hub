@@ -421,20 +421,22 @@ static const char ADMIN_EXTRA[] =
      * 결과 문구는 아래쪽에 잠깐 띄운다. 로그아웃과, 자기 방식으로 보내는 폼(onsubmit 이 막은 것)은 그대로 둔다.
      * 본문을 갈아 끼우면 이 스크립트도 다시 돌므로, 문서에 거는 것은 한 번만(_ajx). */
     "function go(f){f.requestSubmit?f.requestSubmit():f.submit()}"
-    "function toast(t,k){var e=document.createElement('div');e.textContent=t;e.setAttribute('role','status');"
+    "function toast(t,k,ms){var e=document.createElement('div');e.textContent=t;e.setAttribute('role','status');"
     "e.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:88%;padding:10px 16px;"
     "border-radius:10px;color:#fff;z-index:9;box-shadow:0 4px 16px #000a;background:'+(k?'#1d5c2e':'#7a1f1f');"
-    "document.body.appendChild(e);setTimeout(function(){e.remove()},4500)}"
+    "document.body.appendChild(e);setTimeout(function(){e.remove()},ms||4500)}"
     "var am=document.getElementById('amsg');if(am&&window._ajx>1)toast(am.textContent,am.className=='ok');"
     "if(!window._ajx){window._ajx=1;var lb;"
     "document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button');if(b)lb=b},true);"
     "document.addEventListener('submit',function(e){var f=e.target,a=f.getAttribute('action')||'';"
-    "if(e.defaultPrevented||(f.method||'').toLowerCase()!='post'||a.indexOf('/admin')!=0)return;"
+    "var tz=f.hasAttribute('data-toast');"      /* 관리 화면을 돌려주지 않는 동작(예: Zigbee 가입 시도): 결과 글자만 띄운다 */
+    "if(e.defaultPrevented||(f.method||'').toLowerCase()!='post'||(a.indexOf('/admin')!=0&&!tz))return;"
     "e.preventDefault();var b=e.submitter||(lb&&lb.form===f?lb:null),d=new URLSearchParams(new FormData(f));"
     "if(b&&b.name)d.append(b.name,b.value);if(b){b.disabled=true;b.style.opacity=.5}"
     "var y=window.scrollY;"
-    "fetch(a,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
-    ".then(function(r){return r.text()}).then(function(t){"
+    "fetch(a,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Ajax':'1'},body:d.toString()})"
+    ".then(function(r){return r.text().then(function(t){return [r.ok,t]})}).then(function(x){var t=x[1];"
+    "if(tz){if(b){b.disabled=false;b.style.opacity=''}toast(t,x[0],9000);return}"
     "var n=new DOMParser().parseFromString(t,'text/html');"
     "if(!n.getElementById('adlg')){document.open();document.write(t);document.close();return}"   /* 로그인 화면 등: 그대로 보여 준다 */
     "window._ajx=2;document.body.innerHTML=n.body.innerHTML;"

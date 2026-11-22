@@ -163,7 +163,7 @@ void hub_uplink_render(char *o, size_t cap)
                 strlcat(o, t, cap);
             }
         }
-        strlcat(o, "<form method=post action=/api/zigbee/join><p class=muted>SmartThings 앱에서 '기기 추가 → 주변 기기 "
+        strlcat(o, "<form method=post action=/api/zigbee/join data-toast><p class=muted>SmartThings 앱에서 '기기 추가 → 주변 기기 "
                    "검색'을 누른 뒤: 가입 시도 중엔 허브 Wi-Fi 가 최대 3분 멈춰 이 화면이 잠시 끊깁니다.</p>"
                    "<button class=lnk>Zigbee 가입 시도</button></form>", cap);
     }
