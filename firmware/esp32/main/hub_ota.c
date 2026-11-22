@@ -15,6 +15,7 @@
 #include "esp_wifi.h"
 #include "esp_timer.h"
 
+#include "esp_app_desc.h"
 #include "hub_ota.h"
 #include "hub_bbox.h"
 #include "hub_sensors.h"
@@ -232,9 +233,10 @@ void hub_ota_render(char *out, size_t cap)
         strlcat(out, "<p class=muted>새 펌웨어를 시험하는 중입니다 — 집 Wi-Fi 에 붙어 45초가 지나면 확정됩니다.</p>", cap);
     }
 
+    const esp_app_desc_t *ad = esp_app_get_description();
     snprintf(ln, sizeof(ln),
-             "<p class=muted>지금 펌웨어: <b>%s</b> (%s 라디오용) · 반대 칸: %s</p>",
-             run ? run->label : "?", me ? "외부" : "내장",
+             "<p class=muted>지금 펌웨어: <b>%s</b> (빌드 %s %s) · 칸 %s (%s 라디오용) · 반대 칸: %s</p>",
+             ad->version, ad->date, ad->time, run ? run->label : "?", me ? "외부" : "내장",
              other == 0 ? "내장 라디오용" : other == 1 ? "외부 라디오용" : "비었음/모름");
     strlcat(out, ln, cap);
 

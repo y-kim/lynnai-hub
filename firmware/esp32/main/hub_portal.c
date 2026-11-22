@@ -31,6 +31,7 @@
 #include "hub_devs.h"
 #include "hub_zigbee.h"
 #include "hub_plugins.h"
+#include "esp_app_desc.h"
 #include "hub_expose.h"
 #include "hub_uplink.h"
 #include "hub_rinnai.h"
@@ -480,7 +481,9 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
 #define FLUSH() do { if (b[0]) { httpd_resp_sendstr_chunk(req, b); b[0] = '\0'; } } while (0)
     strlcat(b, "<h1>LYNNAI Hub 관리</h1><p class=muted>기기 ", cap);
     cat_esc(b, cap, s_st->device_id);
-    strlcat(b, " · <form method=post action=/logout style='display:inline'><button class=lnk>로그아웃</button></form></p>", cap);
+    strlcat(b, " · 펌웨어 <b>", cap);               /* 버전은 빌드할 때의 git 태그에서 온다(릴리즈 판이면 v0.3 처럼 딱 떨어진다) */
+    cat_esc(b, cap, esp_app_get_description()->version);
+    strlcat(b, "</b> · <form method=post action=/logout style='display:inline'><button class=lnk>로그아웃</button></form></p>", cap);
     if (msg) {
         strlcat(b, ok ? "<p id=amsg class=ok>" : "<p id=amsg class=warn>", cap); cat_esc(b, cap, msg); strlcat(b, "</p>", cap);
     }
