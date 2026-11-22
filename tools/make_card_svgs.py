@@ -104,19 +104,35 @@ class Screen:
         self.y += h + 10
 
     def tile(self, rows, blue=False):
-        """rows: (종류, 제목, 값, 단위, 비율) — 종류: list | value | meter | plain | heat | cool | cols
-        cols 는 값 자리에 [(칸 제목, 값, 단위), …] 를 준다. blue=True 면 파란 카드(구역의 요약 카드)."""
-        heights = {"list": 74, "value": 74, "meter": 74, "plain": 74, "heat": 108, "cool": 78, "cols": 100}
+        """rows: (종류, 제목, 값, 단위, 비율) — 종류: list | value | meter | plain | heat | cool | cols | gauge | gauge2
+        cols 는 값 자리에 [(칸 제목, 값, 단위), …] 를 준다. blue=True 면 파란 카드(구역의 요약 카드).
+        gauge 는 읽기 전용 숫자 + 범위 막대의 묶음 제목 줄(값 없음), gauge2 는 그 아래 한 칸:
+        제목 자리에 칸 제목, 값·단위, 비율 = 막대에서 값의 자리, 그리고 단위 자리에 (단위, 끝값 글자)를 준다."""
+        heights = {"list": 74, "value": 74, "meter": 74, "plain": 74, "heat": 108, "cool": 78, "cols": 100, "gauge": 40, "gauge2": 62}
         h = sum(heights[r[0]] for r in rows)
         self.o.append(f'<rect class="{"on" if blue else "card"}" x="{PAD}" y="{self.y}" width="{CW}" height="{h}" rx="22"/>')
         on = " t-on" if blue else ""
         y = self.y
         x0, x1 = PAD + 20, W - PAD - 20
         for i, (kind, name, val, unit, frac) in enumerate(rows):
-            if i:
+            if i and kind != "gauge2" or (kind == "gauge2" and rows[i - 1][0] == "gauge2"):
                 self.o.append(f'<path class="rule" d="M{x0} {y}H{x1}"/>')
+            if kind == "gauge2":        # 왼쪽: 작은 제목 + 큰 금액, 오른쪽: 0 ~ 끝값 글자와 굵은 파란 막대(값 자리에 흰 눈금)
+                u, top = unit
+                self.o.append(f'<text class="t-col" x="{x0 + 2}" y="{y + 16}" style="text-anchor:start">{name}</text>')
+                self.o.append(_value(x0 + 2, y + 44, val, u))
+                a, b = x0 + 150, x1
+                self.o.append(f'<text class="t-col" x="{a}" y="{y + 22}" style="text-anchor:start">0</text>'
+                              f'<text class="t-col" x="{b}" y="{y + 22}" style="text-anchor:end">{top}</text>')
+                self.o.append(f'<rect class="knob-c" x="{a}" y="{y + 30}" width="{b - a}" height="14" rx="7"/>')
+                k = a + (b - a) * frac
+                self.o.append(f'<rect class="card" x="{k - 2.500:.1f}" y="{y + 37}" width="5" height="7" rx="2" style="stroke:none"/>')
+                y += heights[kind]
+                continue
             self.o.append(f'<text class="t-name{on}" x="{x0}" y="{y + 27}">{name}</text>')
-            if kind == "cols":
+            if kind == "gauge":
+                pass
+            elif kind == "cols":
                 n = len(val)
                 for c, (cname, cval, cunit) in enumerate(val):
                     cx = x0 + (x1 - x0) * (c + 0.500) / n
@@ -211,12 +227,14 @@ def thermostat():
 def gas():
     s = Screen("가스 계량기", "집")
     s.y += 8
-    s.tile([("cols", "사용량", [("24시간 사용량", "1.54", "m³"), ("1시간 사용량", "1.13", "m³"), ("이번달 사용량", "5.19", "m³")], "", 0)], blue=True)
+    s.tile([("cols", "사용량", [("24시간 사용량", "4.78", ""), ("1시간 사용량", "0.69", ""), ("이번달 사용량", "9.97", "")], "", 0)], blue=True)
     s.tile([("meter", "계량기 지침", "1523.4", "m³", 0),
-            ("plain", "유량", "0.6", "m³/h", 0),
-            ("cols", "요금", [("이번달 예상 금액", "6840", "원"), ("지난 24시간 요금", "1622", "원")], "", 0)])
-    return s.svg("가스 계량기의 SmartThings 화면 그림: 사용량 카드에 24시간·1시간·이번달 사용량. 계량기 지침, 유량, "
-                 "그리고 요금 카드에 이번달 예상 금액과 지난 24시간 요금")
+            ("plain", "유량", "0.30", "", 0),
+            ("gauge", "요금", "", "", 0),
+            ("gauge2", "이번달 예상 금액", "11,878", ("원", "100,000"), 0.12),
+            ("gauge2", "지난 24시간 요금", "5,036", ("원", "10,000"), 0.50)])
+    return s.svg("가스 계량기의 SmartThings 화면 그림: 사용량 카드에 24시간·1시간·이번달 사용량(㎥, 소수 둘째 자리). 계량기 지침, 유량, "
+                 "그리고 요금에 이번달 예상 금액과 지난 24시간 요금 — 금액 옆의 막대는 0 부터 사용량 경고 기준까지이고 눈금이 지금 금액의 자리")
 
 
 def _dev_icon(kind, x, y, off=False):
