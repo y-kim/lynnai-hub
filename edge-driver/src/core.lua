@@ -60,9 +60,10 @@ local room_cap = capabilities["connectbook02461.roomStatus"]
 local tm_cap = capabilities.thermostatMode
 local hw_cap = capabilities.thermostatWaterHeatingSetpoint
 local TM_OF = { ["온돌"] = "ondol", ["실내"] = "heat" }
-local cost_cap = capabilities["connectbook02461.gasCost"]
-local usage_cap = capabilities["connectbook02461.gasUse"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
-local flow_cap = capabilities["connectbook02461.gasFlow"]     -- 지금 유량
+local cost_cap = capabilities["connectbook02461.gasBill"]
+local usage_cap = capabilities["connectbook02461.gasUsed"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
+local flow_cap = capabilities["connectbook02461.gasFlowRate"]     -- 지금 유량
+local alert_cap = capabilities["connectbook02461.gasAlert"]   -- 사용량 경고(normal/warning) — 루틴 조건용
 
 local driver
 
@@ -759,10 +760,14 @@ function show_gas(parent)
   -- 가스 기기는 구역(component)이 main 하나다 — 구역이 여럿이면 앱이 구역마다 제목 줄(main·유량·요금)을 붙인다.
   -- 글자 상태(1D · 1H)는 팝업·기기 카드용 요약이고, 상세 화면에는 아래 숫자 카드들이 나온다(화면 구성은 프로필의 vid).
   emit(child, "main", capabilities.gasMeter.gasMeterVolume({ value = m3, unit = "m^3" }))
-  emit(child, "main", status_cap.status("1D " .. f(day) .. " · 1H " .. f(hour)))
+  -- 숫자(day·hour·flow)는 루틴 조건용이고, 화면에는 두 자리로 맞춘 글자(…Text)를 보여 준다 — 숫자는 4.70 이 4.7 로 나온다.
+  local function t2(x) return string.format("%.2f", x) end
   emit(child, "main", usage_cap.day({ value = r2(day), unit = "m^3" }))
+  emit(child, "main", usage_cap.dayText(t2(r2(day))))
   emit(child, "main", usage_cap.hour({ value = r2(hour), unit = "m^3" }))
+  emit(child, "main", usage_cap.hourText(t2(r2(hour))))
   emit(child, "main", flow_cap.flow({ value = r2(flow), unit = "m³/h" }))
+  emit(child, "main", flow_cap.flowText(t2(r2(flow))))
 
   -- 요금: 이번 달(청구일 기준 리셋) + 지난 하루. 누적 계량값은 펌웨어 NVS 에 남아 재부팅해도 이어진다.
   local tag = period_tag(pref(child, GAS_PREF.billday))
@@ -778,9 +783,33 @@ function show_gas(parent)
   -- 금액은 숫자만 보낸다(서버가 capability 의 기본 단위 "원"을 붙인다). 단위를 같이 보내면 허브가 거부한다 — 허브가
   -- 들고 있는 capability 정의가 옛것(KRW 만)이라서다. 2026-11-22 에 두 번 확인: 정의를 고친 지 2시간이 지나고 드라이버를
   -- 다시 설치해도 "Given 원 for unit. Incorrect string given" 으로 그 뒤의 요금 갱신이 전부 멈췄다.
-  emit(child, "main", cost_cap.month(gas_won(child, month_m3, true)))
-  emit(child, "main", cost_cap.today(gas_won(child, day / 1000, false)))
+  local month_won = gas_won(child, month_m3, true)
+  local day_won = gas_won(child, day / 1000, false)
+  -- 사용량 경고: 이번달 예상 금액 또는 지난 24시간 요금이 설정한 기준(원) 이상이면. 기준 0 = 끔. 금액이 기준 아래로
+  -- 내려가면(새 청구 기간, 하루치가 줄어듦) 저절로 풀린다. 드라이버는 휴대폰 알림을 못 보낸다 — 요약 글자에 표시하고,
+  -- 알림은 루틴(조건: 사용량 경고 = 경고)으로 받는다.
+  local function limit(key) return tonumber(child.preferences and child.preferences[key]) or 0 end
+  local lim_m, lim_d = limit("gasWarnCost"), limit("gasWarnDayCost")
+  local warn = (lim_m > 0 and month_won >= lim_m) or (lim_d > 0 and day_won >= lim_d)
+  emit(child, "main", status_cap.status((warn and "⚠ 사용량 경고 · " or "") .. "1D " .. f(day) .. " · 1H " .. f(hour)))
+  emit(child, "main", alert_cap.alert(warn and "warning" or "normal"))
+  -- 요금 칸 막대의 끝값 = 경고 기준. 기준이 없으면 값이 들어가는 둥근 수(1·2·5×10ⁿ, 최소 off_min). 값이 끝값을 넘으면
+  -- 끝값을 값에 맞춘다(앱이 숫자를 끝값으로 잘라 보여 주지 않게).
+  local function top(won, lim, off_min)
+    if lim > 0 then return math.max(lim, won) end
+    local n = off_min
+    while n < won do
+      local lead = n / 10 ^ math.floor(math.log(n, 10) + 1e-9)
+      n = math.floor(n * (lead < 1.5 and 2 or lead < 3 and 2.5 or 2) + 0.5)
+    end
+    return n
+  end
+  emit(child, "main", cost_cap.monthRange({ value = { minimum = 0, maximum = top(month_won, lim_m, 50000) }, unit = "원" }))
+  emit(child, "main", cost_cap.todayRange({ value = { minimum = 0, maximum = top(day_won, lim_d, 5000) }, unit = "원" }))
+  emit(child, "main", cost_cap.month({ value = month_won, unit = "원" }))
+  emit(child, "main", cost_cap.today({ value = day_won, unit = "원" }))
   emit(child, "main", usage_cap.period({ value = month_m3, unit = "m^3" }))     -- 이번달 사용량은 사용량 카드에
+  emit(child, "main", usage_cap.periodText(t2(month_m3)))
 
   -- 요금 요소 자동 갱신(6시간마다, 비동기). 받으면 새 값으로 다시 그린다.
   -- 시도 시각으로 게이트 → 주소가 안 닿아도 매 업링크마다 재시도하지 않는다.

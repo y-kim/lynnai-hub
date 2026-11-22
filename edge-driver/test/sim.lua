@@ -59,9 +59,10 @@ cap("connectbook02461.boilerStatus", { "status" }, {})
 cap("connectbook02461.roomStatus", { "roomStatus" }, {})
 cap("thermostatWaterHeatingSetpoint", { "heatingSetpoint", "heatingSetpointRange" }, { "setHeatingSetpoint" })
 local htc = cap("thermostatMode", { "thermostatMode", "supportedThermostatModes" }, { "setThermostatMode" })
-cap("connectbook02461.gasCost", { "month", "today", "usage" }, {})
-cap("connectbook02461.gasUse", { "day", "hour", "period" }, {})
-cap("connectbook02461.gasFlow", { "flow" }, {})
+cap("connectbook02461.gasBill", { "month", "today", "monthRange", "todayRange" }, {})
+cap("connectbook02461.gasUsed", { "day", "hour", "period", "dayText", "hourText", "periodText" }, {})
+cap("connectbook02461.gasFlowRate", { "flow", "flowText" }, {})
+cap("connectbook02461.gasAlert", { "alert" }, {})
 
 package.loaded["st.capabilities"] = capabilities
 package.loaded["log"] = { info = function() end, warn = function() end, error = function() end }
@@ -643,18 +644,48 @@ end
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 50000, 0, 5000, 0))
 core.info_changed(nil, driver._children["gas"])   -- 설정변경 경로로 중복 캐시 비우고 다시 계산(앞 시나리오 값과 겹침 방지)
 check(lastv("gas", "main", "period").value == 0, "첫 값 → 이번 달 사용량 0(기준 설정)")
-check(lastv("gas", "main", "month") == won(0, true), "이번 달 = 기본료만 = " .. won(0, true) .. "원")
-check(lastv("gas", "main", "today") == won(5, false), "지난 하루(5㎥) = " .. won(5, false) .. "원")
+check(lastv("gas", "main", "month").value == won(0, true), "이번 달 = 기본료만 = " .. won(0, true) .. "원")
+check(lastv("gas", "main", "today").value == won(5, false), "지난 하루(5㎥) = " .. won(5, false) .. "원")
 check(lastv("gas", "main", "day").value == 5 and lastv("gas", "main", "hour").value == 0, "하루·한 시간 사용량은 숫자(㎥)로")
 check(lastv("gas", "main", "flow").value == 0, "유량은 숫자(㎥/h)로 — 안 쓰면 0")
+check(lastv("gas", "main", "dayText") == "5.00" and lastv("gas", "main", "hourText") == "0.00" and lastv("gas", "main", "flowText") == "0.00"
+  and lastv("gas", "main", "periodText") == "0.00", "화면용 글자는 소수 둘째 자리까지(5.00)")
+check(lastv("gas", "main", "month").unit == "원" and lastv("gas", "main", "monthRange").value.maximum == 50000
+  and lastv("gas", "main", "todayRange").value.maximum == 10000, "경고 기준이 없으면 막대 끝값은 값이 들어가는 둥근 수(5만원 · 1만원)")
 -- 둘째 메시지: 누적 53㎥ → 이번 달 3㎥, 지난 하루 2㎥
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 53000, 0, 2000, 0))
 check(lastv("gas", "main", "period").value == 3, "이번 달 사용량 = 53-50 = 3㎥")
-check(lastv("gas", "main", "month") == won(3, true), "이번 달 청구액 = 기본료+3㎥ = " .. won(3, true) .. "원")
-check(lastv("gas", "main", "today") == won(2, false), "지난 하루(2㎥)는 월 누적과 무관 = " .. won(2, false) .. "원")
+check(lastv("gas", "main", "month").value == won(3, true), "이번 달 청구액 = 기본료+3㎥ = " .. won(3, true) .. "원")
+check(lastv("gas", "main", "today").value == won(2, false), "지난 하루(2㎥)는 월 누적과 무관 = " .. won(2, false) .. "원")
 -- 계량기 교체/리셋(누적이 줄어듦) → 이번 달 기준 재설정, 음수 안 나옴
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 10000, 0, 0, 0))
 check(lastv("gas", "main", "period").value == 0, "누적이 줄면 기준 재설정 → 사용량 0(음수 아님)")
+-- 사용량 경고: 이번달 예상 금액이 설정 기준(원) 이상이면 경고. 기준 0(기본) = 끔
+check(lastv("gas", "main", "alert") == "normal", "경고 기준 없음(0) → 정상")
+local gasdev = driver._children["gas"]
+gasdev.preferences = gasdev.preferences or {}
+gasdev.preferences.gasWarnCost = won(3, true)                 -- 기준 = 3㎥ 썼을 때의 금액
+core.info_changed(nil, gasdev)
+check(lastv("gas", "main", "alert") == "normal", "기준 아래(사용량 0) → 정상")
+check(not (lastv("gas", "main", "status") or ""):find("경고", 1, true), "정상일 때 요약 글자에 경고 없음")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 13000, 0, 3000, 0))    -- 기준 10 → 이번 달 3㎥
+check(lastv("gas", "main", "alert") == "warning", "이번달 예상 금액이 기준에 닿음 → 경고")
+check((lastv("gas", "main", "status") or ""):find("⚠ 사용량 경고 · 1D 3.00㎥", 1, true), "요약 글자 앞에 경고 표시 (" .. tostring(lastv("gas", "main", "status")) .. ")")
+gasdev.preferences.gasWarnCost = won(3, true) + 1
+core.info_changed(nil, gasdev)
+check(lastv("gas", "main", "alert") == "normal", "기준을 올리면 → 정상으로 돌아옴")
+check(lastv("gas", "main", "monthRange").value.maximum == won(3, true) + 1, "막대 끝값 = 경고 기준")
+gasdev.preferences.gasWarnCost = 0
+gasdev.preferences.gasWarnDayCost = won(3, false)             -- 24시간 요금 기준: 지금 하루치(3㎥)와 같음
+core.info_changed(nil, gasdev)
+check(lastv("gas", "main", "alert") == "warning", "지난 24시간 요금이 기준에 닿음 → 경고")
+check(lastv("gas", "main", "todayRange").value.maximum == won(3, false), "24시간 요금 막대 끝값 = 그 기준")
+gasdev.preferences.gasWarnDayCost = won(3, false) - 100       -- 기준보다 많이 씀 → 끝값은 값에 맞춤
+core.info_changed(nil, gasdev)
+check(lastv("gas", "main", "todayRange").value.maximum == won(3, false), "기준을 넘으면 막대 끝값 = 지금 값")
+gasdev.preferences.gasWarnDayCost = 0
+core.info_changed(nil, gasdev)
+check(lastv("gas", "main", "alert") == "normal", "24시간 기준을 끄면 → 정상")
 
 print("[27] 허브가 중계한 요금 요소(CMD 0x09, 펌웨어 hub_tariff)로 계산")
 reset()
@@ -666,8 +697,8 @@ end
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 0, 100000, 0, 10000, 0))   -- 누적 100㎥, 하루 10㎥, 가스 기기 생성
 core.on_message(hub, CMD.TARIFF, string.pack("<I4I4I4I4", 990000, 43000000, 20000000, 1000))  -- ×1e6, 기본료 원
 core.info_changed(nil, driver._children["gas"])     -- 중복 캐시 비우고 중계값으로 다시 그림
-check(lastv("gas", "main", "month") == won2(0, true), "중계값으로 이번 달 = 기본료 " .. won2(0, true) .. "원(수동 1375 아님)")
-check(lastv("gas", "main", "today") == won2(10, false), "중계값으로 지난 하루(10㎥) = " .. won2(10, false) .. "원")
+check(lastv("gas", "main", "month").value == won2(0, true), "중계값으로 이번 달 = 기본료 " .. won2(0, true) .. "원(수동 1375 아님)")
+check(lastv("gas", "main", "today").value == won2(10, false), "중계값으로 지난 하루(10㎥) = " .. won2(10, false) .. "원")
 check(driver._children["gas"]._fields["api_heat"] == 43.0, "열량 중계값 캐시됨(42.576 수동 아님)")
 
 print("[28] 보일러의 난방 방식·수온 설정은 표준 항목(thermostatMode · thermostatWaterHeatingSetpoint)")

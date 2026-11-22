@@ -3,25 +3,32 @@ name: lynnai-gas
 #   - 팝업·기기 카드: 글자 요약(boilerStatus, "1D … · 1H …")
 #   - 상세 화면: 사용량(24시간·1시간·이번달) → 계량기 지침 → 유량 → 요금(이번달 예상 금액·지난 24시간 요금) → 새로고침. 글자 요약은 상세 화면에서 뺐다.
 #   - 표준 gasMeter 카드의 제목 "가스 계량기"를 "계량기 지침"으로 바꿨다(patch /0/label).
+#   - 요금 두 칸(gasBill)은 읽기 전용 숫자 + 막대(displayType slider, 명령 없음)다. 앱이 우리 capability 의 state 칸에는
+#     단위를 안 그려서다(표준 gasMeter 와 정의가 같아도). 막대의 끝값은 경고 기준(설정)이다(monthRange·todayRange).
+#   - 사용량·유량은 state 칸 그대로(단위는 안 보인다). slider 로 하면 소수점 아래가 안 나온다. 숫자는 "4.70" 처럼
+#     두 자리로 맞춘 글자(dayText 등)를 보여 주고, 숫자 값(day 등)은 루틴 조건용이다.
+#   - 사용량 경고(gasAlert)는 상세 화면에 없다 — 기기 카드 요약 글자의 "⚠ 사용량 경고" 와 루틴 조건으로만 쓴다.
 # 화면 구성은 만든 순간의 카드 모습이 그대로 굳는다 — 구역·capability 를 바꾸거나 capability 의 표시(presentation)를
 # 고치면 다시 만들어 vid 를 바꿔야 한다(안 그러면 앱이 옛 모습과 새 모습을 번갈아 보여 준다):
 #   smartthings presentation:device-config:create -i <구성 json>  → 나온 presentationId 를 아래 vid 에.
 metadata:
   mnmn: SmartThingsCommunity
-  vid: fa90aafc-c920-3321-adff-441e616cc436
+  vid: e193ce18-acdd-3d04-8a0a-7155f711986e
 components:
   # 구역은 main 하나(여럿이면 앱이 구역마다 제목 줄을 붙인다). 순서가 상세 화면의 타일 순서다.
   - id: main
     capabilities:
       - id: connectbook02461.boilerStatus   # 글자 요약(1D · 1H) — 팝업·기기 카드용. 상세 화면에서는 뺀다(vid)
         version: 1
-      - id: connectbook02461.gasUse         # 사용량: 24시간 · 1시간 · 이번달
+      - id: connectbook02461.gasUsed        # 사용량: 24시간 · 1시간 · 이번달
         version: 1
       - id: gasMeter                        # 계량기 지침
         version: 1
-      - id: connectbook02461.gasFlow        # 유량
+      - id: connectbook02461.gasFlowRate    # 유량
         version: 1
-      - id: connectbook02461.gasCost        # 요금: 이번달 예상 금액 · 지난 24시간 요금
+      - id: connectbook02461.gasBill        # 요금: 이번달 예상 금액 · 지난 24시간 요금
+        version: 1
+      - id: connectbook02461.gasAlert       # 사용량 경고(normal/warning) — 루틴 조건용. 상세 화면에서는 뺀다(vid)
         version: 1
       - id: refresh
         version: 1
@@ -93,6 +100,24 @@ preferences:
       minimum: 1
       maximum: 28
       default: 8
+  - name: gasWarnCost
+    title: 사용량 경고 - 이번달 예상 금액 (원)
+    description: 이번달 예상 금액이 이 값 이상이면 경고(기기 카드에 표시, 루틴 조건 '사용량 경고'). 0 = 끔
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 10000000
+      default: 0
+  - name: gasWarnDayCost
+    title: 사용량 경고 - 지난 24시간 요금 (원)
+    description: 지난 24시간 요금이 이 값 이상이면 경고. 0 = 끔
+    required: false
+    preferenceType: integer
+    definition:
+      minimum: 0
+      maximum: 1000000
+      default: 0
   - name: gasVat
     title: 부가세 10% 포함
     required: false

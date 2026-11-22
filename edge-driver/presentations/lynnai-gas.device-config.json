@@ -17,7 +17,7 @@
   "detailView": [
     {
       "component": "main",
-      "capability": "connectbook02461.gasUse",
+      "capability": "connectbook02461.gasUsed",
       "version": 1,
       "values": [],
       "patch": []
@@ -37,28 +37,17 @@
     },
     {
       "component": "main",
-      "capability": "connectbook02461.gasFlow",
+      "capability": "connectbook02461.gasFlowRate",
       "version": 1,
       "values": [],
       "patch": []
     },
     {
       "component": "main",
-      "capability": "connectbook02461.gasCost",
+      "capability": "connectbook02461.gasBill",
       "version": 1,
       "values": [],
-      "patch": [
-        {
-          "op": "replace",
-          "path": "/0/label",
-          "value": "이번달 예상 금액"
-        },
-        {
-          "op": "replace",
-          "path": "/1/label",
-          "value": "지난 24시간 요금"
-        }
-      ]
+      "patch": []
     },
     {
       "component": "main",
@@ -80,7 +69,7 @@
       },
       {
         "component": "main",
-        "capability": "connectbook02461.gasUse",
+        "capability": "connectbook02461.gasUsed",
         "version": 1,
         "values": [],
         "patch": [],
@@ -96,7 +85,7 @@
       },
       {
         "component": "main",
-        "capability": "connectbook02461.gasFlow",
+        "capability": "connectbook02461.gasFlowRate",
         "version": 1,
         "values": [],
         "patch": [],
@@ -104,7 +93,15 @@
       },
       {
         "component": "main",
-        "capability": "connectbook02461.gasCost",
+        "capability": "connectbook02461.gasBill",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "main",
+        "capability": "connectbook02461.gasAlert",
         "version": 1,
         "values": [],
         "patch": [],
