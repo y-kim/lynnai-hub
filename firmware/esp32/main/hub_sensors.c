@@ -70,7 +70,7 @@ static uint32_t s_base_count;
 static uint32_t s_ring[RING];
 static uint32_t s_ring_n, s_ring_head;
 static uint32_t s_last_s, s_gap_s;    /* 마지막 펄스 시각(부팅 후 초), 직전 간격 */
-static volatile bool s_gas_dirty, s_plug_dirty;
+static volatile bool s_gas_dirty, s_plug_dirty, s_room_dirty;
 static uint32_t s_count_unsaved;     /* 아직 NVS 에 안 쓴 펄스 수 */
 /* 센서마다 독립: 세대 번호가 바뀌면 그 센서 태스크만 스스로 종료한다(다른 센서는 안 건드림). */
 static volatile uint32_t s_gas_gen, s_room_gen;
@@ -681,12 +681,20 @@ static void room_task(void *arg)
     s_room_alive = true;
     bool sht_seen = false;
     int64_t next_sht = 0;
+    s_room_dirty = false;                              /* 곧 새로 읽어 보낸다 — 옛 값을 다시 보낼 일 없음 */
     for (;;) {
         if (gen != s_room_gen) {                       /* 온습도 설정이 바뀜 — 이 태스크만 종료 */
             s_room_alive = false;
             vTaskDelete(NULL);
         }
         int64_t t = esp_timer_get_time();
+        if (s_room_dirty) {                            /* 플랫폼이 새로 붙었거나 새로고침을 청함: 다음 읽기를 기다리지 않고 */
+            s_room_dirty = false;                      /* 마지막 값을 바로 다시 보낸다(안 그러면 기기가 읽기 간격만큼 늦게 뜬다) */
+            if (sht_seen && !s_room_fault && t < next_sht) {
+                int16_t p[2] = { s_room_t100, s_room_h100 };
+                hub_uplink_send(HUB_RK_CMD_ROOM, (uint8_t *)p, sizeof(p));
+            }
+        }
         if (t >= next_sht) {
             float tc = 0, rh = 0;
             bool has_h = true;
@@ -889,6 +897,7 @@ void hub_sensors_refresh(void)
 {
     s_gas_dirty = true;
     s_plug_dirty = true;
+    s_room_dirty = true;
 }
 
 /* 가스 플러그인의 '즉시 동작'(관리 화면): 지금 계량기 숫자에 맞춘다 */
