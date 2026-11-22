@@ -55,7 +55,7 @@ static const char HEAD2[] =
     "</title><style>"
     "body{font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:16px;background:#111;color:#eee}"
     "h1{font-size:20px}label{display:block;margin:12px 0 4px;color:#bbb}"
-    "input,button{font-size:16px;padding:10px;width:100%;box-sizing:border-box;border-radius:8px;"
+    "input,button,form>select{font-size:16px;padding:10px;width:100%;box-sizing:border-box;border-radius:8px;"
     "border:1px solid #444;background:#1c1c1c;color:#eee}"
     "button{background:#c33;border:0;margin-top:14px;font-weight:600}button:disabled{opacity:.45}"
     ".card{background:#191919;border:1px solid #333;border-radius:12px;padding:16px;margin:14px 0}"
@@ -391,7 +391,7 @@ static esp_err_t login_page(httpd_req_t *req, const char *msg)
     return send_page(req, "관리 화면", b, NULL);
 }
 
-/* 관리 화면 공통: 별명 팝업 + 변경 추적(바뀐 줄 옅은 테두리, 저장 버튼은 바뀐 게 있을 때만 강조).
+/* 관리 화면 공통: 별명 팝업 + 변경 추적(바뀐 줄 옅은 테두리, 저장 버튼은 바뀐 게 있을 때만 강조) + 버튼을 새로 열지 않고 보내기.
  * 저장 버튼은 class=sv 를 단다. 별명 칩은 editAlias('<mac>') 를 부르고, 팝업 [저장]은 숨은 a_<mac> 에 값을 넣고
  * 그 폼을 바로 제출한다(별도 저장 버튼을 또 누를 필요 없음). */
 static const char ADMIN_EXTRA[] =
@@ -413,10 +413,34 @@ static const char ADMIN_EXTRA[] =
     "function ok(){var m=D._m,i=document.querySelector('[name=a_'+m+']'),v=T.value.trim(),f=i.form;"
     "if(!v){if(!confirm('이름을 비우면 이 기기를 삭제합니다. 삭제할까요?'))return;"
     "D.close();var h=document.createElement('input');h.type='hidden';h.name='del';h.value=m;f.appendChild(h);"
-    "f.action='/admin/device-del';f.submit();return}"
-    "i.value=v;document.getElementById('al_'+m).textContent=v;D.close();f.submit()}"
+    "f.action='/admin/device-del';go(f);return}"
+    "i.value=v;document.getElementById('al_'+m).textContent=v;D.close();go(f)}"
     "document.getElementById('adok').onclick=ok;document.getElementById('adno').onclick=function(){D.close()};"
-    "T.addEventListener('keydown',function(e){if(e.key=='Enter'){e.preventDefault();ok()}})"
+    "T.addEventListener('keydown',function(e){if(e.key=='Enter'){e.preventDefault();ok()}});"
+    /* 버튼은 전부 화면을 새로 열지 않고 보낸다: 폼을 fetch 로 보내고, 돌아온 관리 화면으로 본문만 갈아 끼운다(스크롤 유지).
+     * 결과 문구는 아래쪽에 잠깐 띄운다. 로그아웃과, 자기 방식으로 보내는 폼(onsubmit 이 막은 것)은 그대로 둔다.
+     * 본문을 갈아 끼우면 이 스크립트도 다시 돌므로, 문서에 거는 것은 한 번만(_ajx). */
+    "function go(f){f.requestSubmit?f.requestSubmit():f.submit()}"
+    "function toast(t,k){var e=document.createElement('div');e.textContent=t;e.setAttribute('role','status');"
+    "e.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);max-width:88%;padding:10px 16px;"
+    "border-radius:10px;color:#fff;z-index:9;box-shadow:0 4px 16px #000a;background:'+(k?'#1d5c2e':'#7a1f1f');"
+    "document.body.appendChild(e);setTimeout(function(){e.remove()},4500)}"
+    "var am=document.getElementById('amsg');if(am&&window._ajx>1)toast(am.textContent,am.className=='ok');"
+    "if(!window._ajx){window._ajx=1;var lb;"
+    "document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('button');if(b)lb=b},true);"
+    "document.addEventListener('submit',function(e){var f=e.target,a=f.getAttribute('action')||'';"
+    "if(e.defaultPrevented||(f.method||'').toLowerCase()!='post'||a.indexOf('/admin')!=0)return;"
+    "e.preventDefault();var b=e.submitter||(lb&&lb.form===f?lb:null),d=new URLSearchParams(new FormData(f));"
+    "if(b&&b.name)d.append(b.name,b.value);if(b){b.disabled=true;b.style.opacity=.5}"
+    "var y=window.scrollY;"
+    "fetch(a,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:d.toString()})"
+    ".then(function(r){return r.text()}).then(function(t){"
+    "var n=new DOMParser().parseFromString(t,'text/html');"
+    "if(!n.getElementById('adlg')){document.open();document.write(t);document.close();return}"   /* 로그인 화면 등: 그대로 보여 준다 */
+    "window._ajx=2;document.body.innerHTML=n.body.innerHTML;"
+    "document.body.querySelectorAll('script').forEach(function(o){var s=document.createElement('script');"
+    "s.textContent=o.textContent;o.replaceWith(s)});window.scrollTo(0,y)})"
+    ".catch(function(){if(b){b.disabled=false;b.style.opacity=''}toast('허브에 닿지 않습니다 — 다시 눌러 보세요',false)})})}"
     "})();</script>";
 
 #define FORM_MAX 6144                    /* 연결된 기기 폼: 기기 6대 × 방 7개 × 통로별 숨김 + 별명(URL 인코딩 3배) */
@@ -453,7 +477,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     cat_esc(b, cap, s_st->device_id);
     strlcat(b, " · <form method=post action=/logout style='display:inline'><button class=lnk>로그아웃</button></form></p>", cap);
     if (msg) {
-        strlcat(b, ok ? "<p class=ok>" : "<p class=warn>", cap); cat_esc(b, cap, msg); strlcat(b, "</p>", cap);
+        strlcat(b, ok ? "<p id=amsg class=ok>" : "<p id=amsg class=warn>", cap); cat_esc(b, cap, msg); strlcat(b, "</p>", cap);
     }
     FLUSH();
     {
