@@ -1,0 +1,156 @@
+"""The integration inside Home Assistant, talking to the fake hub over a real socket."""
+
+from __future__ import annotations
+
+import asyncio
+import struct
+from unittest.mock import patch
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from homeassistant.core import HomeAssistant
+
+from custom_components.lynnai_hub.const import DOMAIN
+
+from .conftest import BOILER, F06_OFF, HUB_ID, THERMO, f09
+
+TOKEN = "ab" * 16
+
+
+@pytest.fixture(autouse=True)
+def _sockets(socket_enabled):
+    yield
+
+
+async def _settle(hass: HomeAssistant, done, timeout: float = 5.0) -> None:
+    """Wait until `done()` holds (the client and the fake hub run on real sockets)."""
+    for _ in range(int(timeout / 0.05)):
+        await hass.async_block_till_done()
+        if done():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("timed out waiting for the hub's data")
+
+
+@pytest.fixture
+async def entry(hass: HomeAssistant, fake_hub):
+    fake_hub.tokens.add(TOKEN)
+    fake_hub.seed()
+    e = MockConfigEntry(
+        domain=DOMAIN, unique_id=HUB_ID, title="LYNNAI Hub",
+        data={"host": "127.0.0.1", "port": fake_hub.port, "token": TOKEN, "hub_id": HUB_ID},
+    )
+    e.add_to_hass(hass)
+    with patch("custom_components.lynnai_hub.discover", return_value={}):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await _settle(hass, lambda: hass.states.get("sensor.gas_meter_meter_reading") is not None)
+        yield e
+        await hass.config_entries.async_unload(e.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_entities_show_the_hub_state(hass: HomeAssistant, entry, fake_hub):
+    s = hass.states
+    assert s.get(f"binary_sensor.lynnai_hub_{HUB_ID.lower()}_connection").state == "on"
+
+    assert s.get(f"switch.boiler_{BOILER}_power").state == "on"
+    assert s.get(f"switch.boiler_{BOILER}_heating").state == "on"
+    assert s.get(f"switch.boiler_{BOILER}_away").state == "off"
+    assert s.get(f"switch.boiler_{BOILER}_hot_water_preheat").state == "off"
+    assert s.get(f"select.boiler_{BOILER}_heating_control").state == "ondol"
+    assert s.get(f"number.boiler_{BOILER}_heating_temperature").state == "65"
+    hot = s.get(f"water_heater.boiler_{BOILER}_hot_water")
+    assert hot.state == "gas" and hot.attributes["temperature"] == 60
+    assert s.get(f"binary_sensor.boiler_{BOILER}_heating_burner").state == "off"
+
+    room1 = s.get("climate.room_1")
+    assert room1.state == "heat"
+    assert (room1.attributes["current_temperature"], room1.attributes["temperature"]) == (20, 23)
+    assert room1.attributes["hvac_action"] == "idle" and room1.attributes["preset_mode"] == "none"
+    assert s.get("climate.room_2").state == "off"
+    assert s.get("climate.living_room").state == "heat"
+    assert s.get("switch.living_room_reservation").state == "off"
+
+    assert s.get("sensor.room_sensor_temperature").state == "25.3"
+    assert s.get("sensor.room_sensor_humidity").state == "34"
+    total = s.get("sensor.gas_meter_meter_reading")
+    assert total.state == "15.04" and total.attributes["state_class"] == "total_increasing"
+    assert total.attributes["device_class"] == "gas"
+    assert s.get("sensor.gas_meter_flow").state == "0.86"
+    assert s.get("sensor.gas_meter_last_24_hours").state == "5.19"
+
+
+async def test_updates_are_pushed(hass: HomeAssistant, entry, fake_hub):
+    await fake_hub.push_state(9, THERMO, f09(z1=0x83 | 0x40, z2=0x83 | 0x10))
+    await _settle(hass, lambda: hass.states.get("climate.room_1").attributes["hvac_action"] == "heating")
+    room2 = hass.states.get("climate.room_2")
+    assert room2.state == "heat" and room2.attributes["preset_mode"] == "away"
+
+    # the boiler stops heating: rooms that are 'on' no longer count as heating
+    await fake_hub.push_state(6, BOILER, F06_OFF)
+    await _settle(hass, lambda: hass.states.get(f"switch.boiler_{BOILER}_power").state == "off")
+    assert hass.states.get("climate.room_1").state == "off"
+
+    await fake_hub.push(0x04, struct.pack("<5I", 1505, 0xFFFFFFFF, 220, 5200, 0))
+    await _settle(hass, lambda: hass.states.get("sensor.gas_meter_meter_reading").state == "15.05")
+
+
+async def test_commands_reach_the_hub(hass: HomeAssistant, entry, fake_hub):
+    async def call(domain: str, service: str, entity_id: str, **data) -> None:
+        await hass.services.async_call(domain, service, {"entity_id": entity_id, **data}, blocking=True)
+        await _settle(hass, lambda: bool(fake_hub.requests))
+
+    await call("climate", "set_temperature", "climate.living_room", temperature=25)
+    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,d4=19"
+
+    await call("climate", "set_preset_mode", "climate.room_1", preset_mode="away")
+    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=1,b3=1"
+
+    await call("climate", "set_hvac_mode", "climate.room_2", hvac_mode="heat")     # boiler already on: just the room
+    assert fake_hub.requests == [f"f09@{THERMO} a0=2,b1=1"]
+    fake_hub.requests.clear()
+
+    await call("switch", "turn_off", f"switch.boiler_{BOILER}_heating")
+    assert fake_hub.requests.pop() == f"f06@{BOILER} b1=0"
+
+    await call("switch", "turn_on", f"switch.boiler_{BOILER}_away")               # away is set room by room
+    assert sorted(fake_hub.requests) == [f"f09@{THERMO} a0={n},b3=1" for n in (1, 2, 7)]
+    fake_hub.requests.clear()
+
+    await call("select", "select_option", f"select.boiler_{BOILER}_heating_control", option="room")
+    assert fake_hub.requests.pop() == f"f06@{BOILER} b4=1"
+
+    await call("number", "set_value", f"number.boiler_{BOILER}_heating_temperature", value=62)
+    assert fake_hub.requests.pop() == f"f06@{BOILER} d2=3C"       # 62 is not allowed; below 65 it steps down to 60
+
+    await call("water_heater", "set_temperature", f"water_heater.boiler_{BOILER}_hot_water", temperature=45)
+    assert fake_hub.requests.pop() == f"f06@{BOILER} d1=2D,df=0"
+
+    await call("number", "set_value", "number.living_room_reservation_hours", value=5)
+    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,96=1,97=05"
+    await call("switch", "turn_off", "switch.living_room_reservation")
+    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,96=0"
+
+
+async def test_room_on_wakes_the_boiler(hass: HomeAssistant, entry, fake_hub):
+    await fake_hub.push_state(6, BOILER, F06_OFF)
+    await _settle(hass, lambda: hass.states.get(f"switch.boiler_{BOILER}_power").state == "off")
+    await hass.services.async_call("climate", "turn_on", {"entity_id": "climate.room_2"}, blocking=True)
+    await _settle(hass, lambda: len(fake_hub.requests) >= 3)
+    assert fake_hub.requests == [f"f06@{BOILER} 80=1", f"f06@{BOILER} b1=1", f"f09@{THERMO} a0=2,b1=1"]
+
+
+async def test_unavailable_when_the_device_or_hub_goes_away(hass: HomeAssistant, entry, fake_hub):
+    await fake_hub.push(0x02, bytes([6]) + bytes.fromhex(BOILER))          # the thermostat dropped off the hub
+    await _settle(hass, lambda: hass.states.get("climate.room_1").state == "unavailable")
+    assert hass.states.get(f"switch.boiler_{BOILER}_power").state == "on"
+
+    await fake_hub.push(0x05, bytes([3, 2, 2]))                            # gas meter paused on the hub
+    await _settle(hass, lambda: hass.states.get("sensor.gas_meter_flow").state == "unavailable")
+    assert hass.states.get("sensor.room_sensor_temperature").state == "25.3"
+
+    for w in fake_hub.writers:                                             # the hub itself goes away
+        w.close()
+    await _settle(hass, lambda: hass.states.get(f"switch.boiler_{BOILER}_power").state == "unavailable")
+    assert hass.states.get(f"binary_sensor.lynnai_hub_{HUB_ID.lower()}_connection").state == "off"

@@ -1,0 +1,108 @@
+{
+  "config": {
+    "flow_title": "LYNNAI Hub {hub_id}",
+    "step": {
+      "user": {
+        "title": "LYNNAI Hub",
+        "description": "Enter the hub's address. Hubs found on your network: {found}",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        },
+        "data_description": {
+          "host": "IP address of the hub (the one you open the admin page on).",
+          "port": "Leave at 8484 unless you changed it."
+        }
+      },
+      "pair": {
+        "title": "Pair with the hub",
+        "description": "Press the hub's button briefly (do not hold it), then submit within three minutes. The hub at {host} only accepts a new connection during that time."
+      }
+    },
+    "error": {
+      "denied": "The hub rejected the connection. Press its button briefly and submit again within three minutes.",
+      "busy": "The hub already serves two clients. Disconnect one (for example an unused SmartThings LAN driver) and try again.",
+      "cannot_connect": "Could not reach the hub. Check the address and that this machine is on the same network.",
+      "wrong_hub": "A different hub answered at this address."
+    },
+    "abort": {
+      "already_configured": "This hub is already set up.",
+      "not_lynnai_hub": "The device that answered is not a LYNNAI hub."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connection"
+      },
+      "heat_burning": {
+        "name": "Heating burner"
+      },
+      "hot_water_burning": {
+        "name": "Hot water burner"
+      }
+    },
+    "number": {
+      "heat_setpoint": {
+        "name": "Heating temperature"
+      },
+      "reservation_hours": {
+        "name": "Reservation hours"
+      }
+    },
+    "select": {
+      "heat_mode": {
+        "name": "Heating control",
+        "state": {
+          "ondol": "Floor (water temperature)",
+          "room": "Room temperature"
+        }
+      }
+    },
+    "sensor": {
+      "temperature": {
+        "name": "Temperature"
+      },
+      "humidity": {
+        "name": "Humidity"
+      },
+      "gas_total": {
+        "name": "Meter reading"
+      },
+      "gas_flow": {
+        "name": "Flow"
+      },
+      "gas_last_day": {
+        "name": "Last 24 hours"
+      },
+      "gas_last_hour": {
+        "name": "Last hour"
+      }
+    },
+    "switch": {
+      "power": {
+        "name": "Power"
+      },
+      "heat": {
+        "name": "Heating"
+      },
+      "away": {
+        "name": "Away"
+      },
+      "hotwater": {
+        "name": "Hot water"
+      },
+      "preheat": {
+        "name": "Hot water preheat"
+      },
+      "reservation": {
+        "name": "Reservation"
+      }
+    },
+    "water_heater": {
+      "hot_water": {
+        "name": "Hot water"
+      }
+    }
+  }
+}

@@ -1,0 +1,86 @@
+# Home Assistant 통합 (시험판)
+
+LYNNAI 허브(ESP32 또는 NAS)를 Home Assistant 에 붙이는 맞춤 통합입니다. 허브의 LAN 통로(SmartThings LAN 드라이버가
+쓰는 것과 같은 통로)에 직접 붙으므로 클라우드를 거치지 않고, 상태는 허브가 바뀔 때마다 밀어 줍니다.
+
+> **시험판입니다.** Home Assistant 2025.1 의 시험 환경에서 가짜 허브를 상대로 확인했고, 실제 허브는 네트워크에서 찾아
+> 지는 것까지만 봤습니다. 실제 Home Assistant 에서 기기를 조작해 본 적은 아직 없습니다. 써 보시고
+> [이슈](https://github.com/y-kim/lynnai-hub/issues)로 알려 주세요.
+
+## 준비
+
+- **허브의 LAN 통로를 켭니다.** 기본은 꺼져 있습니다. 허브 관리 화면 **연결 방식**에서 LAN 을 켜면 허브가 다시 시작하며
+  TCP 8484 를 엽니다. Zigbee(SmartThings)와 같이 써도 됩니다.
+- Home Assistant 는 2025.1 이상. 통합 아이콘은 2026.3 이상에서 보입니다.
+- 허브를 자동으로 찾으려면 Home Assistant 가 허브와 같은 네트워크에 있어야 합니다. Docker 로 돌린다면
+  `network_mode: host` 여야 합니다(아니면 허브 주소를 직접 넣으면 됩니다).
+
+## 설치
+
+맞춤 통합이므로 Home Assistant 의 통합 목록에는 설치한 뒤에야 나옵니다.
+
+**저장소에서 받기**: Home Assistant 설정 폴더(`configuration.yaml` 이 있는 곳)에서
+
+```sh
+mkdir -p custom_components
+curl -L https://github.com/y-kim/lynnai-hub/archive/refs/heads/main.tar.gz \
+  | tar xz --strip-components=2 -C custom_components --wildcards '*/custom_components/lynnai_hub'
+```
+
+`custom_components/lynnai_hub/manifest.json` 이 생겼는지 보고 Home Assistant 를 다시 시작합니다(설정 → 시스템 → 오른쪽 위
+전원 단추 → 다시 시작). 새 판으로 올릴 때도 같은 명령을 다시 돌리고 다시 시작합니다.
+
+**HACS**: HACS → 오른쪽 위 ⋮ → *Custom repositories* 에 `https://github.com/y-kim/lynnai-hub` 를 종류 *Integration* 으로
+추가한 뒤, 목록에서 **LYNNAI Hub** 를 설치하고 Home Assistant 를 다시 시작합니다.
+
+## 연결 (페어링)
+
+1. 설정 → 기기 및 서비스. 같은 네트워크에 허브가 있으면 맨 위 **발견됨**에 *LYNNAI Hub (허브 번호)* 가 뜹니다(다시 시작한
+   직후, 그 뒤로는 10분마다 찾습니다) — **구성**을 누릅니다. 안 뜨면 통합 추가 → **LYNNAI Hub** 에서 허브의 IP 를 직접
+   넣습니다(포트는 8484).
+2. **허브의 버튼을 짧게 누르고**(길게 누르면 다른 동작입니다) 3분 안에 아래 단추(*제출* 또는 *확인*)를 누릅니다. 허브는 그동안에만 새 연결을
+   받아들입니다.
+
+허브는 한 번에 두 곳까지 붙을 수 있습니다(예: SmartThings LAN 드라이버 + Home Assistant). Zigbee 로 붙은 SmartThings 는
+이 수에 들지 않습니다. 허브의 IP 가 바뀌면 통합이 네트워크에서 다시 찾습니다.
+
+## 생기는 기기와 항목
+
+기기는 허브가 알려 줄 때 생깁니다(연결 직후 몇 초). 이름은 Home Assistant 의 언어가 한국어면 한국어로 만들어집니다.
+
+| 기기 | 항목 |
+|---|---|
+| 방 (각방 온도 조절기의 방마다) | 온도 조절(climate): 끄기/난방, 현재·설정 온도(10~30°C), 외출 프리셋, 난방 중 표시 · 예약 스위치 · 예약 시간(1~24시간) |
+| 보일러 | 스위치: 전원, 난방, 외출, 온수, 온수 예열 · 온도조절 모드(온돌/실내) · 난방 온도 · 온수(water heater: 켜기/끄기, 35~60°C) · 난방 연소, 온수 연소 |
+| 온습도계 (허브에 꽂은 센서) | 온도, 습도(습도가 없는 센서면 온도만) |
+| 가스 계량기 (허브에 꽂은 리드 스위치) | 계량기 지침(㎥), 유량(㎥/h), 24시간·1시간 사용량 |
+| 허브 | 연결 상태 |
+
+- **에너지 대시보드**: 설정 → 대시보드 → 에너지 → 가스 소비에 "계량기 지침"을 고르면 일별·월별 사용량과 요금을 Home
+  Assistant 가 계산합니다. 허브에서 계량기 숫자를 맞추지 않았으면 펄스 수 × 0.01㎥ 로 나옵니다.
+- **방을 켜면** 그 방의 보일러(허브 관리 화면에서 지정한 것, 없으면 하나뿐인 보일러)가 꺼져 있을 때 전원·난방을 같이
+  켜고, 그 방의 외출을 풉니다.
+- **보일러의 외출**은 붙어 있는 방 전부에 외출을 거는 것입니다(보일러 자체의 외출 명령은 듣지 않습니다).
+- **난방 온도**는 보일러가 받는 값으로 맞춰집니다(온돌은 35·40·45~60·65·70·75·80·85°C).
+
+## 아직 없는 것
+
+- "모든 방이 꺼지면 보일러 난방을 끈다"는 자동화는 SmartThings 드라이버에만 있습니다. 필요하면 Home Assistant 자동화로
+  만드세요.
+- 허브 관리 화면의 **노출 설정**(어떤 기기·항목을 플랫폼에 보일지)은 따르지 않습니다. 필요 없는 항목은 Home Assistant
+  에서 비활성화하세요.
+- 보일러 없이 각방 온도 조절기만 쓰는 구성의 "가상 보일러", 가스 요금·사용량 경고는 없습니다(요금은 에너지 대시보드가
+  대신합니다).
+- 허브에서 삭제한 기기는 Home Assistant 에 "사용할 수 없음"으로 남습니다. 기기 화면에서 직접 지우면 됩니다.
+- 허브를 공장 초기화하면 페어링이 지워집니다. 통합을 지우고 다시 추가하세요.
+
+## 개발
+
+```sh
+pip install pytest-homeassistant-custom-component
+pytest                      # 저장소 루트에서. 가짜 허브(tests/ha/conftest.py)를 상대로 통합 전체를 돌립니다
+```
+
+프로토콜은 `custom_components/lynnai_hub/protocol.py` 맨 위에, 허브 쪽 구현은 `firmware/esp32/main/hub_lan.c` 와
+`server/lynnai-nas/hub_lan.py` 에 있습니다. 상태 해독과 명령은 SmartThings 드라이버(`edge-driver/src/core.lua`)와 같아야
+합니다 — 한쪽을 고치면 다른 쪽도 고칩니다.

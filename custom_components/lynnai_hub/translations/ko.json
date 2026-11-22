@@ -1,0 +1,108 @@
+{
+  "config": {
+    "flow_title": "LYNNAI Hub {hub_id}",
+    "step": {
+      "user": {
+        "title": "LYNNAI Hub",
+        "description": "허브의 주소를 넣으세요. 네트워크에서 찾은 허브: {found}",
+        "data": {
+          "host": "호스트",
+          "port": "포트"
+        },
+        "data_description": {
+          "host": "허브의 IP 주소(관리 화면을 여는 주소).",
+          "port": "바꾸지 않았다면 8484 그대로 둡니다."
+        }
+      },
+      "pair": {
+        "title": "허브와 페어링",
+        "description": "허브의 버튼을 짧게 누른 뒤(길게 누르지 마세요) 3분 안에 제출하세요. {host} 의 허브는 그동안에만 새 연결을 받습니다."
+      }
+    },
+    "error": {
+      "denied": "허브가 연결을 거절했습니다. 허브 버튼을 짧게 누르고 3분 안에 다시 제출하세요.",
+      "busy": "허브에 이미 두 곳이 붙어 있습니다. 하나(예: 안 쓰는 SmartThings LAN 드라이버)를 끊고 다시 하세요.",
+      "cannot_connect": "허브에 닿지 않습니다. 주소와, 이 기기가 같은 네트워크에 있는지 확인하세요.",
+      "wrong_hub": "이 주소에서 다른 허브가 답했습니다."
+    },
+    "abort": {
+      "already_configured": "이 허브는 이미 설정돼 있습니다.",
+      "not_lynnai_hub": "답한 기기가 LYNNAI 허브가 아닙니다."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "연결"
+      },
+      "heat_burning": {
+        "name": "난방 연소"
+      },
+      "hot_water_burning": {
+        "name": "온수 연소"
+      }
+    },
+    "number": {
+      "heat_setpoint": {
+        "name": "난방 온도"
+      },
+      "reservation_hours": {
+        "name": "예약 시간"
+      }
+    },
+    "select": {
+      "heat_mode": {
+        "name": "온도조절 모드",
+        "state": {
+          "ondol": "온돌",
+          "room": "실내"
+        }
+      }
+    },
+    "sensor": {
+      "temperature": {
+        "name": "온도"
+      },
+      "humidity": {
+        "name": "습도"
+      },
+      "gas_total": {
+        "name": "계량기 지침"
+      },
+      "gas_flow": {
+        "name": "유량"
+      },
+      "gas_last_day": {
+        "name": "24시간 사용량"
+      },
+      "gas_last_hour": {
+        "name": "1시간 사용량"
+      }
+    },
+    "switch": {
+      "power": {
+        "name": "전원"
+      },
+      "heat": {
+        "name": "난방"
+      },
+      "away": {
+        "name": "외출"
+      },
+      "hotwater": {
+        "name": "온수"
+      },
+      "preheat": {
+        "name": "온수 예열"
+      },
+      "reservation": {
+        "name": "예약"
+      }
+    },
+    "water_heater": {
+      "hot_water": {
+        "name": "온수"
+      }
+    }
+  }
+}

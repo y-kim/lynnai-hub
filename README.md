@@ -17,6 +17,8 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 
 ![NAS 허브 구성도: 집 안 기기는 공유기가 알려 준 DNS 서버(NAS 를 가리킴)에 주소를 묻는다. NAS 에 DNS 서버와 LYNNAI 허브가 Docker 로 돈다. 린나이 기기(보일러 제어기·각방 온도 조절기)의 rkiot.net 은 NAS 주소로 답해 LYNNAI 허브로, 스마트폰의 rkiot.net·google.com 은 진짜 주소 그대로 인터넷으로 간다. 허브 → LAN → SmartThings, 프록시 모드에서는 허브 → 린나이 클라우드](docs/overview-nas.svg)
 
+**Home Assistant** — [맞춤 통합(시험판)](docs/home-assistant.md): 허브의 LAN 통로에 붙어 방·보일러·센서·가스 계량기를 올립니다.
+
 ## 빠른 시작
 
 자세한 내용은 **[docs/esp32-hub.md](docs/esp32-hub.md)** (설치·연결·초기화·고장 분석, 빌드는 부록).
@@ -143,6 +145,8 @@ keeps working) or works on its own (standalone mode), and talks to SmartThings o
   Install via the channel invite <https://bestow-regional.api.smartthings.com/invite/Qrjp9gnaJbMq>.
 - `server/lynnai-nas/` — the same hub as a LAN‑only Docker container for a NAS; `server/lynnai-hub-watch/` records
   the hub API into SQLite.
+- `custom_components/lynnai_hub/` — Home Assistant custom integration (experimental, installable with HACS) that
+  talks to the hub's LAN channel: [docs/home-assistant.md](docs/home-assistant.md) (Korean).
 - `tools/hub_doctor.py` — diagnostics from a PC (API, SmartThings CLI, USB serial).
 
 Tested with: Rinnai **WF-S6000** boiler controller, Rinnai **RICH-WCR(N)** room thermostat, ESP32‑C6‑DevKitC‑1 v1.2,
