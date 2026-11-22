@@ -1140,6 +1140,9 @@ void hub_crypt_render(char *o, size_t cap)
                 cap);
     }
     for (int k = 0; k < 6; k++) {
+        if (s_on && k != s_key) {
+            continue;                               /* 켠 뒤에는 암호화에 쓰는 키 하나만 보여 준다(나머지는 고를 일이 없다) */
+        }
         esp_efuse_block_t b = EFUSE_BLK_KEY0 + k;
         bool unused = esp_efuse_key_block_unused(b);
         bool hmac = !unused && esp_efuse_get_key_purpose(b) == ESP_EFUSE_KEY_PURPOSE_HMAC_UP;

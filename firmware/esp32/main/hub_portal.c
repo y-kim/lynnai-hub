@@ -471,9 +471,9 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     if (!b) {
         return httpd_resp_send_500(req);
     }
-    page_begin(req, "허브 관리");
+    page_begin(req, "LYNNAI Hub 관리");
 #define FLUSH() do { if (b[0]) { httpd_resp_sendstr_chunk(req, b); b[0] = '\0'; } } while (0)
-    strlcat(b, "<h1>LYNNAI 허브 관리</h1><p class=muted>기기 ", cap);
+    strlcat(b, "<h1>LYNNAI Hub 관리</h1><p class=muted>기기 ", cap);
     cat_esc(b, cap, s_st->device_id);
     strlcat(b, " · <form method=post action=/logout style='display:inline'><button class=lnk>로그아웃</button></form></p>", cap);
     if (msg) {

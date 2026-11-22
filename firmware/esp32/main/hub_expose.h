@@ -11,7 +11,7 @@
  *   종류별 컨트롤(노출 설정): 통로마다 u32 마스크. 보일러 조절기 컨트롤 / 방 컨트롤은 그 종류 모든 기기에 같이 적용.
  *   기기별 노출(연결된 기기 아래): 통로마다 숨긴 기기 목록 — 기기(MAC끝3)마다 숨김 비트
  *       bit0 = 기기 자신(보일러 조절기), bit1~7 = 온도 조절기의 방 슬롯 z1~z7
- *   플러그인 기기(온습도계·가스)는 마스크의 29·30 비트(플러그인 카드에서).
+ *   플러그인 기기(온습도계·가스)는 마스크의 29·30 비트(노출 설정의 '센서' 묶음 — 설치된 것만 나온다).
  *
  * 전송(HUB_RK_CMD_EXPOSE, 통로마다 자기 것): [u32 마스크 LE] + ([종류][MAC끝3(3)][숨김 비트]) * n
  * 마스크 비트(드라이버 core.lua 의 BIT 표와 같아야 한다):
@@ -53,6 +53,3 @@ bool hub_expose_apply(const char *form, char *err, size_t errlen);   /* POST /ad
 void hub_expose_render_dev(char *out, size_t cap, uint8_t kind, const uint8_t mac3[3], int sub);
 void hub_expose_render_dev_marker(char *out, size_t cap, uint8_t kind, const uint8_t mac3[3], uint8_t subs);
 bool hub_expose_apply_devices(const char *form);   /* 저장 실패면 false */                /* 연결된 기기 폼 저장 때 같이 */
-/* 플러그인 카드: 한 비트의 통로 체크박스(폼은 호출부, 이름 b<비트>_<통로>) / 저장 */
-void hub_expose_render_bit(char *out, size_t cap, int bit);
-bool hub_expose_apply_bit(const char *form, int bit);   /* 저장 실패면 false */

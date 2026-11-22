@@ -833,26 +833,26 @@ void hub_sensors_room_test(char *out, size_t cap)
 /* 관리 화면 카드의 상태 줄 */
 static bool room_status(char *out, size_t cap)
 {
+    /* 두 줄: 선에 물려 응답하는 센서들 / 그 가운데 고른 센서와 그 값. 둘째 줄의 ● 는 여기서 붙인다(첫 줄은 그리는 쪽이 붙임) */
+    char fnd[40];
+    const char *name = RS_NAME[s_rtype];
+    found_text(fnd, sizeof(fnd));
     if (s_room_fault) {
-        char fnd[40];
-        found_text(fnd, sizeof(fnd));
-        snprintf(out, cap, "%s 센서가 응답하지 않습니다. 센서 종류와 배선(3V3·GND·SDA·SCL)을 확인하세요. 선에서 찾은 센서: %s",
-                 RS_NAME[s_rtype], fnd);
+        snprintf(out, cap, "연결된 센서: %s<br>● 선택된 센서: %s — 응답하지 않습니다. 센서 종류와 배선(3V3·GND·SDA·SCL)을 확인하세요.",
+                 fnd, name);
         return false;
     }
     if (!s_room_at_us) {
-        snprintf(out, cap, "확인 중…");
+        snprintf(out, cap, "연결된 센서: 확인 중…<br>● 선택된 센서: %s · 확인 중…", name);
         return true;
     }
     int age = (int)((esp_timer_get_time() - s_room_at_us) / 1000000);
-    char fnd[40];
-    found_text(fnd, sizeof(fnd));
     if (s_room_h100 == NO_HUM) {
-        snprintf(out, cap, "정상 · %s · %.1f°C · 습도 없음 (%d초 전) · 선에서 찾은 센서: %s", RS_NAME[s_rtype],
-                 s_room_t100 / 100.0f, age, fnd);
+        snprintf(out, cap, "연결된 센서: %s<br>● 선택된 센서: %s · %.1f°C · 습도 없음 (%d초 전)", fnd, name,
+                 s_room_t100 / 100.0f, age);
     } else {
-        snprintf(out, cap, "정상 · %s · %.1f°C · %.0f%% (%d초 전) · 선에서 찾은 센서: %s", RS_NAME[s_rtype],
-                 s_room_t100 / 100.0f, s_room_h100 / 100.0f, age, fnd);
+        snprintf(out, cap, "연결된 센서: %s<br>● 선택된 센서: %s · %.1f°C · %.0f%% (%d초 전)", fnd, name,
+                 s_room_t100 / 100.0f, s_room_h100 / 100.0f, age);
     }
     return true;
 }

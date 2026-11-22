@@ -12,6 +12,7 @@
 #include "hub_expose.h"
 #include "hub_uplink.h"
 #include "hub_rinnai.h"
+#include "hub_plugins.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -80,6 +81,12 @@ static const ctl_t BOILER_CTL[] = {
 };
 static const ctl_t ROOM_CTL[] = { { 8, "켜기/끄기" }, { 9, "설정 온도" }, { 10, "외출" }, { 12, "예약" } };
 static const ctl_t HUB_CTL[] = { { EXPOSE_HUB_TEMP, "허브 내부 온도 (칩 온도 — 방 온도와 다름)" } };
+/* 허브에 꽂은 센서(플러그인)의 기기: 설치된 것만 화면에 나오고, 화면에 나온 것만 저장 때 바뀐다 */
+static const struct {
+    ctl_t ctl;
+    const char *plugin;
+} PLUG_CTL[] = { { { EXPOSE_ROOM_DEV, "온습도계" }, "room" }, { { EXPOSE_GAS_DEV, "가스 계량기" }, "gas" } };
+#define NP (int)(sizeof(PLUG_CTL) / sizeof(PLUG_CTL[0]))
 #define NB (int)(sizeof(BOILER_CTL) / sizeof(BOILER_CTL[0]))
 #define NR (int)(sizeof(ROOM_CTL) / sizeof(ROOM_CTL[0]))
 #define NH (int)(sizeof(HUB_CTL) / sizeof(HUB_CTL[0]))
@@ -364,6 +371,18 @@ static void hub_expose_render_types_l(char *o, size_t cap)
     strlcat(o, "</div><div class=grpbox><h3 class=grp>📡 LYNNAI 허브</h3>"
                "<p class='muted sub'>SmartThings 의 'LYNNAI Hub' 기기 자체</p>", cap);
     ctl_rows(o, cap, HUB_CTL, NH);
+    bool any = false;
+    for (int i = 0; i < NP; i++) {
+        if (!hub_plugin_enabled(PLUG_CTL[i].plugin)) {
+            continue;
+        }
+        if (!any) {
+            strlcat(o, "</div><div class=grpbox><h3 class=grp>🧩 센서 (플러그인)</h3>"
+                       "<p class='muted sub'>허브에 꽂은 센서의 기기 — 끄면 플랫폼에서 숨김(센서는 계속 읽음)</p>", cap);
+            any = true;
+        }
+        ctl_rows(o, cap, &PLUG_CTL[i].ctl, 1);
+    }
     strlcat(o, "</div><button class=sv>저장</button></form></div>", cap);
 }
 
@@ -381,13 +400,6 @@ static void hub_expose_render_dev_marker_l(char *o, size_t cap, uint8_t kind, co
     char t[64];
     snprintf(t, sizeof(t), "<input type=hidden name=x%d_%02x%02x%02x value=%u>", kind, mac3[0], mac3[1], mac3[2], subs);
     strlcat(o, t, cap);
-}
-
-static void hub_expose_render_bit_l(char *o, size_t cap, int bit)
-{
-    char name[8];
-    snprintf(name, sizeof(name), "b%d", bit);
-    boxes(o, cap, name, bit_on, &bit);
 }
 
 /* ---------------------------------------------------------------- 적용 */
@@ -429,6 +441,11 @@ static bool hub_expose_apply_l(const char *form, char *err, size_t errlen)
     for (int i = 0; i < NH; i++) {
         scope |= 1u << HUB_CTL[i].bit;
     }
+    for (int i = 0; i < NP; i++) {                  /* 설치된(화면에 그린) 플러그인만 — 없는 것의 체크는 폼에 없다 */
+        if (hub_plugin_enabled(PLUG_CTL[i].plugin)) {
+            scope |= 1u << PLUG_CTL[i].ctl.bit;
+        }
+    }
     apply_bits(form, scope);
     esp_err_t e = save();
     ESP_LOGI(TAG, "컨트롤 노출 바뀜: Zigbee %08lx, LAN %08lx", (unsigned long)s_mask[0], (unsigned long)s_mask[1]);
@@ -438,17 +455,6 @@ static bool hub_expose_apply_l(const char *form, char *err, size_t errlen)
         return false;
     }
     return true;
-}
-
-static bool hub_expose_apply_bit_l(const char *form, int bit)
-{
-    if (bit != EXPOSE_ROOM_DEV && bit != EXPOSE_GAS_DEV) {
-        return true;
-    }
-    apply_bits(form, 1u << bit);
-    esp_err_t e = save();
-    hub_expose_send_all();
-    return e == ESP_OK;
 }
 
 static bool hub_expose_apply_devices_l(const char *form)
@@ -536,25 +542,10 @@ void hub_expose_render_dev_marker(char *o, size_t cap, uint8_t kind, const uint8
     UNLOCK();
 }
 
-void hub_expose_render_bit(char *o, size_t cap, int bit)
-{
-    LOCK();
-    hub_expose_render_bit_l(o, cap, bit);
-    UNLOCK();
-}
-
 bool hub_expose_apply(const char *form, char *err, size_t errlen)
 {
     LOCK();
     bool r = hub_expose_apply_l(form, err, errlen);
-    UNLOCK();
-    return r;
-}
-
-bool hub_expose_apply_bit(const char *form, int bit)
-{
-    LOCK();
-    bool r = hub_expose_apply_bit_l(form, bit);
     UNLOCK();
     return r;
 }

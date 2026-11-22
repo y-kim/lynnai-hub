@@ -11,7 +11,6 @@
 #include "hub_store.h"
 
 #include "hub_plugins.h"
-#include "hub_expose.h"
 
 static const char *TAG = "HUB_PLUGINS";
 
@@ -29,14 +28,13 @@ typedef struct {
     const char *name;
     const char *help;
     bool def_on;            /* 처음(설정 없음)에 켜져 있는지 */
-    int expose_bit;         /* hub_expose.h 의 '기기' 비트(노출 통로 고르기 = 숨기기) */
     field_t fields[4];
     int nfields;
 } plugin_t;
 
 static const plugin_t PLUGINS[] = {
     {
-        .id = "room", .bit = PLUG_ROOM, .name = "온습도계", .def_on = true, .expose_bit = EXPOSE_ROOM_DEV,
+        .id = "room", .bit = PLUG_ROOM, .name = "온습도계", .def_on = true,
         .help = "센서를 목록에서 고르면 어느 핀을 어디에 이을지 아래에 나옵니다. 세 센서는 같은 네 선에 나란히 이어도 "
                 "됩니다(읽는 것은 고른 하나). 선을 만질 때는 ⏸ 로 멈추고 하세요.",
         .fields = {
@@ -48,7 +46,7 @@ static const plugin_t PLUGINS[] = {
         .nfields = 4,
     },
     {
-        .id = "gas", .bit = PLUG_GAS, .name = "가스 계량기 (리드 스위치)", .def_on = true, .expose_bit = EXPOSE_GAS_DEV,
+        .id = "gas", .bit = PLUG_GAS, .name = "가스 계량기 (리드 스위치)", .def_on = true,
         .help = "스위치 한쪽 → 아래 핀, 다른 쪽 → GND (내부 풀업). 선이 길면 핀–3V3 사이 10k 저항 권장.",
         .fields = {
             { "pin", "스위치 핀", 10, 0, 30, true },
@@ -242,7 +240,7 @@ static void field_html(char *o, size_t cap, const field_t *fd, int val)
 void hub_plugins_render(char *o, size_t cap)
 {
     char t[768];             /* 제목 줄(삭제 확인 문구 포함) + 설명이 한 번에 들어가게 */
-    cat(o, cap, "<h2>설치된 플러그인</h2><p class=muted>노출을 모두 끄면 플랫폼에서 숨김(센서는 계속 읽음). "
+    cat(o, cap, "<h2>설치된 플러그인</h2><p class=muted>플랫폼에 보일지는 위 '노출 설정'의 센서 묶음에서 고릅니다. "
                 "⏸ = 멈춤(센서·배선을 바꿀 때, 기기는 남음). 🗑️ = 플러그인 제거.</p>");
     bool any = false;
     for (int i = 0; i < NPLUG; i++) {
@@ -290,9 +288,7 @@ void hub_plugins_render(char *o, size_t cap)
         for (int f = 0; f < p->nfields; f++) {
             field_html(o, cap, &p->fields[f], s_val[i][f]);
         }
-        cat(o, cap, "<div class=row><span>노출</span><span>");
-        hub_expose_render_bit(o, cap, p->expose_bit);
-        cat(o, cap, "</span></div><button name=op value=save class=sv>저장</button></form>");
+        cat(o, cap, "<button name=op value=save class=sv>저장</button></form>");
         if (s_act_fn[i]) {                          /* 즉시 동작(예: 계량기 숫자 맞추기)은 따로 */
             snprintf(t, sizeof(t), "<form method=post action=/admin/plugin-action><input type=hidden name=id value=%s>"
                      "<label>%s</label>", p->id, s_act_label[i]);
@@ -486,12 +482,6 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
         s_pz[idx] = false;
     }
     memcpy(s_val[idx], vals, sizeof(vals));
-    if (!strcmp(op, "save")) {
-        if (!hub_expose_apply_bit(form, p->expose_bit)) {   /* 같은 폼의 노출 체크(통로별) */
-            snprintf(err, errlen, "노출 설정을 저장하지 못했습니다");
-            return false;
-        }
-    }
     ESP_LOGI(TAG, "%s %s", p->name, !on ? "삭제" : !strcmp(op, "add") ? "추가" : "저장");
     return true;
 }
