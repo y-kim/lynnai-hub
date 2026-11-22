@@ -14,6 +14,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include <time.h>
 #include <sys/time.h>
 #include "esp_log.h"
@@ -391,9 +392,18 @@ static esp_err_t state_get(httpd_req_t *req)
     float tc, rh;
     int age;
     if (hub_sensors_room(&tc, &rh, &age)) {
-        CHUNK("\"room_sensor\":{\"temp\":%.2f,\"hum\":%.1f,\"age_s\":%d},", tc, rh, age);
+        if (isnan(rh)) {                            /* 습도가 없는 센서(MPL3115A2 등) */
+            CHUNK("\"room_sensor\":{\"temp\":%.2f,\"hum\":null,\"age_s\":%d},", tc, age);
+        } else {
+            CHUNK("\"room_sensor\":{\"temp\":%.2f,\"hum\":%.1f,\"age_s\":%d},", tc, rh, age);
+        }
     } else {
         CHUNK("\"room_sensor\":null,");
+    }
+    {
+        char ri[200];
+        hub_sensors_room_info(ri, sizeof(ri));
+        CHUNK("\"room_plugin\":%s,", ri);
     }
 
     gas_view_t g;
@@ -515,7 +525,9 @@ static esp_err_t metrics_get(httpd_req_t *req)
     int age;
     if (hub_sensors_room(&tc, &rh, &age) && age < 600) {
         CHUNK("# TYPE lynnai_room_temperature_celsius gauge\nlynnai_room_temperature_celsius %.2f\n", tc);
-        CHUNK("# TYPE lynnai_room_humidity_percent gauge\nlynnai_room_humidity_percent %.1f\n", rh);
+        if (!isnan(rh)) {
+            CHUNK("# TYPE lynnai_room_humidity_percent gauge\nlynnai_room_humidity_percent %.1f\n", rh);
+        }
     }
     gas_view_t g;
     uint32_t step;
@@ -599,6 +611,19 @@ static esp_err_t bootlog_get(httpd_req_t *req)
     return hub_bbox_http(req);
 }
 
+/* GET /api/v1/roomtest — 온습도 센서 시험: 세 종류를 한 번씩 읽어 본다(선을 나란히 이었을 때 전부 읽히는지) */
+static esp_err_t roomtest_get(httpd_req_t *req)
+{
+    if (!api_or_dbg(req)) {
+        return ESP_OK;
+    }
+    char out[360];
+    hub_sensors_room_test(out, sizeof(out));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, out);
+}
+
 /* GET /api/v1/zbscan — Zigbee 스캔 시험(hub_bbox). 라디오를 잠깐 쓰고 pause=1 이면 Wi-Fi 도 멈추므로 읽기 API 와 같은 인증 */
 static esp_err_t zbscan_get(httpd_req_t *req)
 {
@@ -611,6 +636,8 @@ static esp_err_t zbscan_get(httpd_req_t *req)
 void hub_api_register(httpd_handle_t srv)
 {
     const httpd_uri_t zs = { .uri = "/api/v1/zbscan", .method = HTTP_GET, .handler = zbscan_get };
+    const httpd_uri_t rt = { .uri = "/api/v1/roomtest", .method = HTTP_GET, .handler = roomtest_get };
+    httpd_register_uri_handler(srv, &rt);
     httpd_register_uri_handler(srv, &zs);
     const httpd_uri_t bl = { .uri = "/api/v1/bootlog", .method = HTTP_GET, .handler = bootlog_get };
     httpd_register_uri_handler(srv, &bl);

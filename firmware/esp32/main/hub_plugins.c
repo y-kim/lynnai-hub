@@ -20,6 +20,7 @@ typedef struct {
     const char *label;
     int def, min, max;
     bool pin;               /* GPIO 번호(허용 목록·겹침 검사) */
+    const char *opts;       /* 있으면 목록에서 고르기: "이름|이름|…" (값 = 순서, 0부터) */
 } field_t;
 
 typedef struct {
@@ -35,14 +36,16 @@ typedef struct {
 
 static const plugin_t PLUGINS[] = {
     {
-        .id = "room", .bit = PLUG_ROOM, .name = "온습도계 (SHT31)", .def_on = true, .expose_bit = EXPOSE_ROOM_DEV,
-        .help = "I2C 주소 0x44. VIN → 3V3, GND → GND, SDA·SCL → 아래 핀. 보드형 모듈은 저항이 이미 있습니다.",
+        .id = "room", .bit = PLUG_ROOM, .name = "온습도계", .def_on = true, .expose_bit = EXPOSE_ROOM_DEV,
+        .help = "센서를 목록에서 고르면 어느 핀을 어디에 이을지 아래에 나옵니다. 세 센서는 같은 네 선에 나란히 이어도 "
+                "됩니다(읽는 것은 고른 하나). 선을 만질 때는 ⏸ 로 멈추고 하세요.",
         .fields = {
+            { "type", "센서", 0, 0, 2, false, "SHT31|BME280|MPL3115A2" },    /* 순서 = hub_sensors.c 의 RS_* */
             { "sda", "SDA 핀", 6, 0, 30, true },
             { "scl", "SCL 핀", 7, 0, 30, true },
             { "every", "재는 간격 (초)", 60, 10, 3600, false },
         },
-        .nfields = 3,
+        .nfields = 4,
     },
     {
         .id = "gas", .bit = PLUG_GAS, .name = "가스 계량기 (리드 스위치)", .def_on = true, .expose_bit = EXPOSE_GAS_DEV,
@@ -61,6 +64,8 @@ static const plugin_t PLUGINS[] = {
 static const int FREE_PINS[] = { 0, 1, 4, 5, 6, 7, 10, 11, 15, 18, 19, 20, 21, 22, 23 };
 
 static bool s_on[NPLUG];
+extern const char room_wiring_js[] asm("_binary_room_wiring_js_start");   /* 온습도계 카드의 연결 안내(고른 센서에 맞춰 그림) */
+static bool s_pz[NPLUG];        /* 멈춤: 설치는 그대로(플랫폼의 기기도 그대로), 센서만 읽지 않는다 */
 static int s_val[NPLUG][4];
 static const char *s_act_label[NPLUG];
 static const char *s_act_hint[NPLUG];
@@ -113,6 +118,12 @@ void hub_plugins_load(void)
             hs_get_u8(h, "plug", k, &en);
         }
         s_on[i] = en;
+        uint8_t pz = 0;
+        nvs_key(k, sizeof(k), p->id, "pz");
+        if (have) {
+            hs_get_u8(h, "plug", k, &pz);
+        }
+        s_pz[i] = pz;
         for (int f = 0; f < p->nfields; f++) {
             int32_t v = p->fields[f].def;
             nvs_key(k, sizeof(k), p->id, p->fields[f].key);
@@ -121,7 +132,7 @@ void hub_plugins_load(void)
             }
             s_val[i][f] = v;
         }
-        ESP_LOGI(TAG, "%s: %s", p->name, s_on[i] ? "켜짐" : "꺼짐");
+        ESP_LOGI(TAG, "%s: %s", p->name, !s_on[i] ? "꺼짐" : s_pz[i] ? "멈춤" : "켜짐");
     }
     if (have) {
         nvs_close(h);
@@ -132,6 +143,23 @@ bool hub_plugin_enabled(const char *id)
 {
     int i;
     return find(id, &i) && s_on[i];
+}
+
+bool hub_plugin_paused(const char *id)
+{
+    int i;
+    return find(id, &i) && s_on[i] && s_pz[i];
+}
+
+uint8_t hub_plugins_paused_mask(void)
+{
+    uint8_t m = 0;
+    for (int i = 0; i < NPLUG; i++) {
+        if (s_on[i] && s_pz[i]) {
+            m |= PLUGINS[i].bit;
+        }
+    }
+    return m;
 }
 
 int hub_plugin_get(const char *id, const char *key)
@@ -164,11 +192,34 @@ uint8_t hub_plugins_mask(void)
 
 static void cat(char *o, size_t cap, const char *s) { strlcat(o, s, cap); }
 
+/* 설정 칸 하나: 숫자 입력, 또는 고를 것이 정해져 있으면 목록 */
+static void field_html(char *o, size_t cap, const field_t *fd, int val)
+{
+    char t[256];
+    if (!fd->opts) {
+        snprintf(t, sizeof(t), "<label>%s</label><input name=%s type=text inputmode=numeric pattern=\"[0-9]*\" "
+                 "data-min=%d data-max=%d value=%d>",   /* 숫자 전용, 위아래 스피너 없음(min/max 는 서버 검증) */
+                 fd->label, fd->key, fd->min, fd->max, val);
+        cat(o, cap, t);
+        return;
+    }
+    snprintf(t, sizeof(t), "<label>%s</label><select name=%s>", fd->label, fd->key);
+    cat(o, cap, t);
+    const char *p = fd->opts;
+    for (int n = 0; *p; n++) {
+        int len = (int)strcspn(p, "|");
+        snprintf(t, sizeof(t), "<option value=%d%s>%.*s</option>", n, n == val ? " selected" : "", len, p);
+        cat(o, cap, t);
+        p += len + (p[len] == '|');
+    }
+    cat(o, cap, "</select>");
+}
+
 void hub_plugins_render(char *o, size_t cap)
 {
     char t[768];             /* 제목 줄(삭제 확인 문구 포함) + 설명이 한 번에 들어가게 */
     cat(o, cap, "<h2>설치된 플러그인</h2><p class=muted>노출을 모두 끄면 플랫폼에서 숨김(센서는 계속 읽음). "
-                "🗑️ = 플러그인 제거.</p>");
+                "⏸ = 멈춤(센서·배선을 바꿀 때, 기기는 남음). 🗑️ = 플러그인 제거.</p>");
     bool any = false;
     for (int i = 0; i < NPLUG; i++) {
         const plugin_t *p = &PLUGINS[i];
@@ -176,15 +227,22 @@ void hub_plugins_render(char *o, size_t cap)
             continue;
         }
         any = true;
-        /* 제목 줄: 이름 + 오른쪽 끝 삭제(따로 된 작은 폼 — 설정 폼에서 Enter 가 삭제를 누르지 않게) */
-        snprintf(t, sizeof(t), "<div class=card><div class=ptitle><h3>%s</h3>"
+        /* 제목 줄: 이름 + 오른쪽 끝에 멈춤/다시 시작, 삭제(각각 따로 된 작은 폼 — 설정 폼에서 Enter 가 누르지 않게) */
+        snprintf(t, sizeof(t), "<div class=card><div class=ptitle><h3>%s</h3><span style=\"display:flex;gap:6px\">"
                  "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>"
+                 "<button name=op value=%s class=ic title=\"%s\">%s</button></form>", p->name, p->id,
+                 s_pz[i] ? "resume" : "pause", s_pz[i] ? "다시 시작" : "멈춤 (센서·배선을 바꿀 때)", s_pz[i] ? "▶" : "⏸");
+        cat(o, cap, t);
+        snprintf(t, sizeof(t), "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>"
                  "<button name=op value=del class=ic title=\"플러그인 삭제\" "
                  "onclick=\"return confirm('플러그인을 삭제할까요? 센서를 더 이상 읽지 않고, 모든 플랫폼에서 기기가 빠집니다.')\">"
-                 "\U0001f5d1️</button></form></div><p class=muted>%s</p>", p->name, p->id, p->help);
+                 "\U0001f5d1️</button></form></span></div><p class=muted>%s</p>", p->id, p->help);
         cat(o, cap, t);
-        if (s_stat_fn[i]) {                         /* 지금 상태: 정상(값) / 오프라인(이유) */
-            char st[200];
+        if (s_pz[i]) {                              /* 멈춤: 센서를 안 읽는다 — 상태 줄 대신 안내 */
+            cat(o, cap, "<p class=warn>⏸ 멈춤 — 센서를 읽지 않습니다. 플랫폼에는 기기가 남고 오프라인으로 보입니다. "
+                        "센서·배선을 바꾼 뒤 ▶ 를 누르면 다시 읽습니다.</p>");
+        } else if (s_stat_fn[i]) {                  /* 지금 상태: 정상(값) / 오프라인(이유) */
+            char st[360];                           /* 한글 문장 + 찾은 센서 목록이 들어가게 */
             st[0] = 0;
             bool ok = s_stat_fn[i](st, sizeof(st));
             snprintf(t, sizeof(t), "<p class=%s>%s %s</p>", ok ? "ok" : "warn", ok ? "●" : "● 오프라인 —", st);
@@ -194,10 +252,7 @@ void hub_plugins_render(char *o, size_t cap)
         snprintf(t, sizeof(t), "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->id);
         cat(o, cap, t);
         for (int f = 0; f < p->nfields; f++) {
-            snprintf(t, sizeof(t), "<label>%s</label><input name=%s type=text inputmode=numeric pattern=\"[0-9]*\" "
-                     "data-min=%d data-max=%d value=%d>",   /* 숫자 전용, 위아래 스피너 없음(min/max 는 서버 검증) */
-                     p->fields[f].label, p->fields[f].key, p->fields[f].min, p->fields[f].max, s_val[i][f]);
-            cat(o, cap, t);
+            field_html(o, cap, &p->fields[f], s_val[i][f]);
         }
         cat(o, cap, "<div class=row><span>노출</span><span>");
         hub_expose_render_bit(o, cap, p->expose_bit);
@@ -225,10 +280,7 @@ void hub_plugins_render(char *o, size_t cap)
                  "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->name, p->help, p->id);
         cat(o, cap, t);
         for (int f = 0; f < p->nfields; f++) {
-            snprintf(t, sizeof(t), "<label>%s</label><input name=%s type=text inputmode=numeric pattern=\"[0-9]*\" "
-                     "data-min=%d data-max=%d value=%d>",   /* 숫자 전용, 위아래 스피너 없음(min/max 는 서버 검증) */
-                     p->fields[f].label, p->fields[f].key, p->fields[f].min, p->fields[f].max, s_val[i][f]);
-            cat(o, cap, t);
+            field_html(o, cap, &p->fields[f], s_val[i][f]);
         }
         cat(o, cap, "<button name=op value=add>추가</button></form></div>");
     }
@@ -241,7 +293,9 @@ void hub_plugins_render(char *o, size_t cap)
         snprintf(t, sizeof(t), " %d", FREE_PINS[k]);
         cat(o, cap, t);
     }
-    cat(o, cap, " (보드에 인쇄된 숫자). 저장하면 센서만 다시 적용됩니다(보일러·각방 연결은 유지).</p>");
+    cat(o, cap, " (보드에 인쇄된 숫자). 저장하면 센서만 다시 적용됩니다(보일러·각방 연결은 유지).</p><script>");
+    cat(o, cap, room_wiring_js);
+    cat(o, cap, "</script>");
 }
 
 /* ---------------------------------------------------------------- 적용 */
@@ -281,6 +335,32 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
         return false;
     }
     const plugin_t *p = &PLUGINS[idx];
+    if (!strcmp(op, "pause") || !strcmp(op, "resume")) {    /* 멈춤/다시 시작: 설정은 안 건드린다 */
+        bool pz = op[0] == 'p';
+        nvs_handle_t ph;
+        char pk[16];
+        if (!s_on[idx]) {
+            snprintf(err, errlen, "설치되지 않은 플러그인");
+            return false;
+        }
+        nvs_key(pk, sizeof(pk), p->id, "pz");
+        if (nvs_open("plug", NVS_READWRITE, &ph) != ESP_OK) {
+            snprintf(err, errlen, "저장소 열기 실패");
+            return false;
+        }
+        esp_err_t pe = hs_set_u8(ph, pk, pz);
+        if (pe == ESP_OK) {
+            pe = nvs_commit(ph);
+        }
+        nvs_close(ph);
+        if (pe != ESP_OK) {
+            snprintf(err, errlen, "저장하지 못했습니다(%s)", esp_err_to_name(pe));
+            return false;
+        }
+        s_pz[idx] = pz;
+        ESP_LOGI(TAG, "%s %s", p->name, pz ? "멈춤" : "다시 시작");
+        return true;
+    }
     bool on = strcmp(op, "del") != 0;
     int vals[4];
     memcpy(vals, s_val[idx], sizeof(vals));
@@ -330,6 +410,11 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
     char k[16];
     nvs_key(k, sizeof(k), p->id, "en");
     esp_err_t e = hs_set_u8(h, k, on);
+    if (e == ESP_OK && (!on || !strcmp(op, "add"))) {       /* 지우거나 새로 넣으면 멈춤은 풀린 상태로 */
+        char pk[16];
+        nvs_key(pk, sizeof(pk), p->id, "pz");
+        e = hs_set_u8(h, pk, 0);
+    }
     for (int f = 0; e == ESP_OK && f < p->nfields; f++) {
         nvs_key(k, sizeof(k), p->id, p->fields[f].key);
         e = hs_set_i32(h, k, vals[f]);
@@ -343,6 +428,9 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
         return false;
     }
     s_on[idx] = on;
+    if (!on || !strcmp(op, "add")) {
+        s_pz[idx] = false;
+    }
     memcpy(s_val[idx], vals, sizeof(vals));
     if (!strcmp(op, "save")) {
         if (!hub_expose_apply_bit(form, p->expose_bit)) {   /* 같은 폼의 노출 체크(통로별) */

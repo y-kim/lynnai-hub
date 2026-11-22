@@ -1,9 +1,11 @@
 /*
- * hub_sensors.c -- 허브에 직접 꽂는 센서: 온습도계(SHT31) + 가스 계량기 펄스(리드 스위치).
+ * hub_sensors.c -- 허브에 직접 꽂는 센서: 온습도계(SHT31·BME280·MPL3115A2 중 하나) + 가스 계량기 펄스(리드 스위치).
  * Pi 의 roomsensor.py / gasmeter.py 를 옮긴 것. 값은 hub_uplink 로 SmartThings 에 보낸다(Zigbee/LAN).
  *
  * 각각 '플러그인'이라 관리 화면(/admin)에서 추가·삭제하고 핀을 바꾼다(hub_plugins.c, 기본값 아래).
- *   SHT31-D  : I2C 0x44, SDA = GPIO6, SCL = GPIO7, 3.3V. 1분마다 잰다.
+ *   온습도계  : 종류는 관리 화면에서 고른다. 모두 I2C — SDA = GPIO6, SCL = GPIO7, 3.3V. 1분마다 잰다.
+ *              SHT31 0x44 · BME280 0x76/0x77(BMP280 이면 온도만) · MPL3115A2 0x60(온도만, 습도 없음)
+ *              주소가 서로 달라 같은 네 선에 나란히 물려도 된다(읽는 것은 고른 하나).
  *   가스 계량기: 리드 스위치 한쪽 = GPIO10, 다른 쪽 = GND (내부 풀업). 1펄스 = 0.01 m³.
  *              닫힘 0.1초 이상 + 그 전에 열림 0.3초 이상이어야 1개로 센다(접점 떨림·자석 앞 정지 대비).
  *              누적 개수와 보정값(계량기 숫자)은 NVS 에 저장해 재부팅해도 이어진다.
@@ -32,6 +34,7 @@
 #include "hub_expose.h"
 #include "hub_events.h"
 #include "hub_api.h"
+#include "hub_room_calc.h"
 
 static const char *TAG = "HUB_SENSORS";
 
@@ -73,8 +76,8 @@ static volatile uint32_t s_gas_gen, s_room_gen;
 static volatile bool s_gas_alive, s_room_alive;
 /* 지금 돌고 있는 설정(바뀐 센서만 다시 적용하려고 비교용) */
 static bool s_run_gas_on, s_run_room_on;
-static int s_run_gas_pin = -1, s_run_sda = -1, s_run_scl = -1;
-static int16_t s_room_t100, s_room_h100;      /* 마지막 온습도(서버 API 용) */
+static int s_run_gas_pin = -1, s_run_sda = -1, s_run_scl = -1, s_run_rtype = -1;
+static int16_t s_room_t100, s_room_h100;      /* 마지막 온습도(서버 API 용). 습도가 없는 센서면 h100 = NO_HUM */
 static int64_t s_room_at_us;
 static volatile bool s_room_fault, s_gas_fault;
 static volatile int s_room_fails;             /* 연속 읽기 실패 */
@@ -83,14 +86,16 @@ static volatile bool s_heating_now;           /* 마지막으로 본 '난방 중
 
 uint8_t hub_sensors_faults(void)
 {
-    return (uint8_t)((s_room_fault && s_run_room_on ? PLUG_ROOM : 0) | (s_gas_fault && s_run_gas_on ? PLUG_GAS : 0));
+    return (uint8_t)((s_room_fault && s_run_room_on ? PLUG_ROOM : 0) | (s_gas_fault && s_run_gas_on ? PLUG_GAS : 0) |
+                     hub_plugins_paused_mask());     /* 멈춘 센서도 값이 안 오므로 오프라인으로 */
 }
 
 /* 플랫폼에 알림: [켜진 플러그인 비트][고장 비트]. 옛 드라이버는 첫 바이트만 본다 */
 static void send_plugins(void)
 {
-    uint8_t m[2] = { hub_plugins_mask(), hub_sensors_faults() };
-    hub_uplink_send(HUB_RK_CMD_PLUGINS, m, 2);
+    /* 켜진 플러그인 · 오프라인으로 볼 것(고장 + 멈춤) · 그 가운데 멈춤(드라이버가 이유를 "멈춤" 으로 적는다) */
+    uint8_t m[3] = { hub_plugins_mask(), hub_sensors_faults(), hub_plugins_paused_mask() };
+    hub_uplink_send(HUB_RK_CMD_PLUGINS, m, 3);
 }
 
 static uint32_t gas_fault_limit_s(void)
@@ -410,10 +415,18 @@ static uint8_t crc8(const uint8_t *d, int n)
     return c;
 }
 
-static i2c_master_dev_handle_t s_sht;
-static i2c_master_bus_handle_t s_bus;
+/* 센서 종류(관리 화면의 목록 순서 = 저장되는 숫자. 순서를 바꾸면 안 된다) */
+enum { RS_SHT31, RS_BME280, RS_MPL3115A2, RS_N };
+static const char *const RS_NAME[RS_N] = { "SHT31", "BME280", "MPL3115A2" };
+#define NO_HUM INT16_MIN                /* 습도가 없는 센서: 보고의 습도 자리에 이 값(드라이버가 습도를 건너뛴다) */
 
-static bool sht_init(void)
+static int s_rtype;                     /* 지금 도는 온습도 태스크가 쓰는 종류 */
+static i2c_master_bus_handle_t s_bus;
+static i2c_master_dev_handle_t s_dev;
+static bool s_dev_ready;                /* 칩 확인·보정값 읽기까지 끝났나(읽기가 실패하면 처음부터 다시) */
+
+/* I2C 버스를 열고 addrs 가운데 응답하는 주소에 붙는다. 주소가 하나면 묻지 않고 그 주소로(읽을 때 실패로 드러난다) */
+static bool i2c_open(const uint8_t *addrs, int n)
 {
     i2c_master_bus_config_t bc = {
         .i2c_port = -1,
@@ -427,26 +440,47 @@ static bool sht_init(void)
         s_bus = NULL;
         return false;
     }
-    if (s_sht) {
+    if (s_dev) {
         return true;
     }
-    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = SHT_ADDR, .scl_speed_hz = 100000 };
-    if (i2c_master_bus_add_device(s_bus, &dc, &s_sht) != ESP_OK) {
-        s_sht = NULL;
+    uint8_t addr = addrs[0];
+    if (n > 1) {
+        int i = 0;
+        while (i < n && i2c_master_probe(s_bus, addrs[i], 50) != ESP_OK) {
+            i++;
+        }
+        if (i == n) {
+            return false;
+        }
+        addr = addrs[i];
+    }
+    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = addr, .scl_speed_hz = 100000 };
+    if (i2c_master_bus_add_device(s_bus, &dc, &s_dev) != ESP_OK) {
+        s_dev = NULL;
         return false;
     }
+    s_dev_ready = false;
     return true;
 }
 
+static bool reg_rd(uint8_t reg, uint8_t *d, int n) { return i2c_master_transmit_receive(s_dev, &reg, 1, d, n, 100) == ESP_OK; }
+static bool reg_wr(uint8_t reg, uint8_t v)
+{
+    const uint8_t b[2] = { reg, v };
+    return i2c_master_transmit(s_dev, b, 2, 100) == ESP_OK;
+}
+
+/* ---- SHT31 ---- */
 static bool sht_read(float *t, float *h)
 {
+    static const uint8_t ADDR[] = { SHT_ADDR };
     const uint8_t cmd[2] = { 0x24, 0x00 };              /* 한 번 재기, 높은 정밀도, 클럭 늘이기 없음 */
     uint8_t d[6];
-    if (i2c_master_transmit(s_sht, cmd, 2, 100) != ESP_OK) {
+    if (!i2c_open(ADDR, 1) || i2c_master_transmit(s_dev, cmd, 2, 100) != ESP_OK) {
         return false;
     }
     vTaskDelay(pdMS_TO_TICKS(20));
-    if (i2c_master_receive(s_sht, d, 6, 100) != ESP_OK || crc8(d, 2) != d[2] || crc8(d + 3, 2) != d[5]) {
+    if (i2c_master_receive(s_dev, d, 6, 100) != ESP_OK || crc8(d, 2) != d[2] || crc8(d + 3, 2) != d[5]) {
         return false;
     }
     *t = -45 + 175 * ((d[0] << 8) | d[1]) / 65535.0f;
@@ -454,9 +488,142 @@ static bool sht_read(float *t, float *h)
     return true;
 }
 
+/* ---- BME280 (같은 자리의 BMP280 은 습도가 없다 — 온도만) ---- */
+static bme_cal_t s_bme;
+
+static bool bme_read(float *t, float *h, bool *has_h)
+{
+    static const uint8_t ADDR[] = { 0x76, 0x77 };
+    if (!i2c_open(ADDR, 2)) {
+        return false;
+    }
+    if (!s_dev_ready) {
+        uint8_t id = 0, c[6], h1 = 0, hb[7] = { 0 };
+        if (!reg_rd(0xD0, &id, 1) || (id != 0x60 && id != 0x58 && id != 0x57 && id != 0x56) || !reg_rd(0x88, c, 6)) {
+            return false;                           /* 0x60 = BME280, 0x56~0x58 = BMP280 */
+        }
+        s_bme.hum = id == 0x60;
+        if (s_bme.hum && (!reg_rd(0xA1, &h1, 1) || !reg_rd(0xE1, hb, 7))) {
+            return false;
+        }
+        bme280_unpack(&s_bme, c, h1, hb);
+        s_dev_ready = true;
+    }
+    uint8_t d[8] = { 0 };
+    bool ok = (!s_bme.hum || reg_wr(0xF2, 0x01)) && reg_wr(0xF4, 0x25);    /* 습도·온도·기압 1회씩, 한 번 재고 잠들기 */
+    if (ok) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        ok = reg_rd(0xF7, d, s_bme.hum ? 8 : 6);
+    }
+    int32_t adc_t = ((int32_t)d[3] << 12) | (d[4] << 4) | (d[5] >> 4);
+    if (!ok || adc_t == 0x80000) {                  /* 0x80000 = 재지 않음 */
+        s_dev_ready = false;
+        return false;
+    }
+    bme280_comp(&s_bme, adc_t, (d[6] << 8) | d[7], t, h);
+    *has_h = s_bme.hum;
+    return true;
+}
+
+/* ---- MPL3115A2 (기압·온도 센서 — 습도 없음) ---- */
+static bool mpl_read(float *t)
+{
+    static const uint8_t ADDR[] = { 0x60 };
+    if (!i2c_open(ADDR, 1)) {
+        return false;
+    }
+    if (!s_dev_ready) {
+        uint8_t id = 0;
+        if (!reg_rd(0x0C, &id, 1) || id != 0xC4 || !reg_wr(0x13, 0x07)) {   /* 칩 확인, 측정 완료 표시 켜기 */
+            return false;
+        }
+        s_dev_ready = true;
+    }
+    uint8_t ctl = 0x02, d[5];
+    bool ok = reg_wr(0x26, 0x18) && reg_wr(0x26, 0x1A);                    /* 8회 평균(약 34ms), 한 번 재기 */
+    for (int i = 0; ok && i < 30 && (ctl & 0x02); i++) {                    /* 다 재면 칩이 '재기' 비트를 내린다 */
+        vTaskDelay(pdMS_TO_TICKS(10));
+        ok = reg_rd(0x26, &ctl, 1);
+    }
+    if (!ok || (ctl & 0x02) || !reg_rd(0x01, d, 5)) {                       /* 기압 3바이트 + 온도 2바이트 */
+        s_dev_ready = false;
+        return false;
+    }
+    *t = mpl3115_temp(d[3], d[4]);
+    return true;
+}
+
+/* 선에 물려 응답하는 센서 찾기(주소만 불러 본다). 여러 개를 나란히 꽂았을 때 무엇이 붙어 있는지 관리 화면에 보여 준다 —
+ * 고른 종류가 응답이 없을 때 "선에는 다른 센서가 있다"를 알 수 있다. 0x76/0x77 은 BMP280 일 수도 있다. */
+static volatile uint8_t s_found;        /* 비트 = RS_* */
+static SemaphoreHandle_t s_room_mx;     /* 버스를 쓰는 동안: 온습도 태스크의 읽기 ↔ 시험(hub_sensors_room_test) */
+
+static void room_scan(void)
+{
+    if (!s_bus) {
+        return;
+    }
+    uint8_t m = 0;
+    if (i2c_master_probe(s_bus, SHT_ADDR, 20) == ESP_OK) {
+        m |= 1 << RS_SHT31;
+    }
+    if (i2c_master_probe(s_bus, 0x76, 20) == ESP_OK || i2c_master_probe(s_bus, 0x77, 20) == ESP_OK) {
+        m |= 1 << RS_BME280;
+    }
+    if (i2c_master_probe(s_bus, 0x60, 20) == ESP_OK) {
+        m |= 1 << RS_MPL3115A2;
+    }
+    s_found = m;
+}
+
+static void found_text(char *o, size_t cap)
+{
+    uint8_t m = s_found;
+    o[0] = 0;
+    for (int i = 0; i < RS_N; i++) {
+        if (m & (1 << i)) {
+            strlcat(o, o[0] ? ", " : "", cap);
+            strlcat(o, RS_NAME[i], cap);
+        }
+    }
+    if (!o[0]) {
+        strlcpy(o, "없음", cap);
+    }
+}
+
+/* 종류별 읽기. has_h = 습도가 있는 값인가 */
+static bool room_read(float *t, float *h, bool *has_h)
+{
+    *has_h = true;
+    *h = 0;
+    switch (s_rtype) {
+    case RS_BME280:
+        return bme_read(t, h, has_h);
+    case RS_MPL3115A2:
+        *has_h = false;
+        return mpl_read(t);
+    default:
+        return sht_read(t, h);
+    }
+}
+
+/* 옛 온습도 태스크가 끝난 뒤에만 부른다: I2C 버스 정리 */
+static void room_close(void)
+{
+    if (s_dev) {
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+    }
+    if (s_bus) {
+        i2c_del_master_bus(s_bus);
+        s_bus = NULL;
+    }
+    s_dev_ready = false;
+}
+
 /* ---------------------------------------------------------------- 보내기 */
 
-/* 온습도계 전용 태스크: SHT 초기화(자기 I2C 버스)·읽기·보고. 가스와 독립. */
+/* 온습도계 전용 태스크: 센서 초기화(자기 I2C 버스)·읽기·보고. 가스와 독립. */
 static void room_task(void *arg)
 {
     uint32_t gen = (uint32_t)(uintptr_t)arg;
@@ -470,11 +637,17 @@ static void room_task(void *arg)
         }
         int64_t t = esp_timer_get_time();
         if (t >= next_sht) {
-            float tc, rh;
-            if (sht_init() && sht_read(&tc, &rh)) {
+            float tc = 0, rh = 0;
+            bool has_h = true;
+            const char *name = RS_NAME[s_rtype];
+            xSemaphoreTake(s_room_mx, portMAX_DELAY);
+            bool got = room_read(&tc, &rh, &has_h);
+            room_scan();
+            xSemaphoreGive(s_room_mx);
+            if (got) {
                 next_sht = t + (int64_t)s_every_s * 1000000;   /* 간격은 매번 다시 읽음(재시작 불필요) */
                 if (!sht_seen || s_room_fault) {
-                    ESP_LOGI(TAG, "SHT31 %s: %.1f°C %.0f%%", s_room_fault ? "다시 응답" : "찾음", tc, rh);
+                    ESP_LOGI(TAG, "%s %s: %.1f°C %.0f%%%s", name, s_room_fault ? "다시 응답" : "찾음", tc, rh, has_h ? "" : " (습도 없음)");
                 }
                 sht_seen = true;
                 s_room_fails = 0;
@@ -482,7 +655,7 @@ static void room_task(void *arg)
                     s_room_fault = false;
                     send_plugins();
                 }
-                int16_t p[2] = { (int16_t)(tc * 100), (int16_t)(rh * 100) };
+                int16_t p[2] = { (int16_t)(tc * 100), has_h ? (int16_t)(rh * 100) : NO_HUM };
                 s_room_t100 = p[0];
                 s_room_h100 = p[1];
                 s_room_at_us = esp_timer_get_time();
@@ -495,11 +668,11 @@ static void room_task(void *arg)
                 next_sht = t + (int64_t)retry * 1000000;
                 if (s_room_fails < ROOM_FAIL_N && ++s_room_fails == ROOM_FAIL_N) {
                     s_room_fault = true;
-                    ESP_LOGW(TAG, "SHT31 이 %d번 연속 응답하지 않음 — 오프라인으로 알림(배선 3V3·GND·SDA %d·SCL %d 확인)",
-                             ROOM_FAIL_N, s_sda, s_scl);
+                    ESP_LOGW(TAG, "%s 이(가) %d번 연속 응답하지 않음 — 오프라인으로 알림(센서 종류, 배선 3V3·GND·SDA %d·SCL %d 확인)",
+                             name, ROOM_FAIL_N, s_sda, s_scl);
                     send_plugins();
                 } else if (sht_seen && s_room_fails == 1) {
-                    ESP_LOGW(TAG, "SHT31 읽기 실패 — %d초 뒤 다시", retry);
+                    ESP_LOGW(TAG, "%s 읽기 실패 — %d초 뒤 다시", name, retry);
                 }
             }
         }
@@ -529,7 +702,7 @@ bool hub_sensors_room(float *t, float *h, int *age_s)
         return false;
     }
     *t = s_room_t100 / 100.0f;
-    *h = s_room_h100 / 100.0f;
+    *h = s_room_h100 == NO_HUM ? NAN : s_room_h100 / 100.0f;     /* 습도가 없는 센서면 NAN */
     *age_s = (int)((esp_timer_get_time() - s_room_at_us) / 1000000);
     return true;
 }
@@ -544,19 +717,92 @@ bool hub_sensors_gas(gas_view_t *v, uint32_t *step_l)
     return true;
 }
 
+/* 서버 API(/api/v1/state)용: 온습도계 설정과 지금 상태를 JSON 한 덩이로 */
+void hub_sensors_room_info(char *out, size_t cap)
+{
+    char fnd[40];
+    found_text(fnd, sizeof(fnd));
+    bool on = hub_plugin_enabled("room"), pz = hub_plugin_paused("room");
+    snprintf(out, cap, "{\"installed\":%s,\"paused\":%s,\"type\":\"%s\",\"fault\":%s,\"fails\":%d,\"found\":\"%s\"}",
+             on ? "true" : "false", pz ? "true" : "false", RS_NAME[s_run_rtype >= 0 && s_run_rtype < RS_N ? s_run_rtype : 0],
+             s_room_fault ? "true" : "false", s_room_fails, s_run_room_on ? fnd : "");
+}
+
+/* 시험: 고른 종류와 상관없이 세 센서를 한 번씩 읽어 JSON 으로 돌려준다(GET /api/v1/roomtest).
+ * 여러 개를 나란히 꽂았을 때 "전부 읽히나"를 종류를 바꿔 가며 기다리지 않고 한 번에 본다. 멈춤 중이어도 된다 —
+ * 그때는 설정된 핀으로 버스를 잠깐 열었다 닫는다. 평소 읽기와 겹치지 않게 s_room_mx 로 막는다. */
+void hub_sensors_room_test(char *out, size_t cap)
+{
+    if (!s_room_mx || xSemaphoreTake(s_room_mx, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        snprintf(out, cap, "{\"error\":\"busy\"}");
+        return;
+    }
+    bool own_bus = !s_run_room_on;                  /* 태스크가 안 도는 중(멈춤·꺼짐) — 버스를 여기서 열고 닫는다 */
+    int keep_type = s_rtype;
+    if (own_bus) {
+        s_sda = hub_plugin_get("room", "sda");
+        s_scl = hub_plugin_get("room", "scl");
+    }
+    int o = snprintf(out, cap, "{\"sda\":%d,\"scl\":%d,\"paused\":%s", s_sda, s_scl, hub_plugin_paused("room") ? "true" : "false");
+    for (int i = 0; i < RS_N && o < (int)cap - 90; i++) {
+        float t = 0, h = 0;
+        bool has_h = true;
+        if (s_dev) {                                /* 종류마다 주소가 달라 장치 핸들을 새로 */
+            i2c_master_bus_rm_device(s_dev);
+            s_dev = NULL;
+        }
+        s_dev_ready = false;
+        s_rtype = i;
+        bool ok = room_read(&t, &h, &has_h) || room_read(&t, &h, &has_h);     /* 한 번은 다시 해 본다 */
+        if (!ok) {
+            o += snprintf(out + o, cap - (size_t)o, ",\"%s\":{\"ok\":false}", RS_NAME[i]);
+        } else if (has_h) {
+            o += snprintf(out + o, cap - (size_t)o, ",\"%s\":{\"ok\":true,\"temp\":%.2f,\"hum\":%.1f}", RS_NAME[i], t, h);
+        } else {
+            o += snprintf(out + o, cap - (size_t)o, ",\"%s\":{\"ok\":true,\"temp\":%.2f,\"hum\":null}", RS_NAME[i], t);
+        }
+    }
+    room_scan();
+    char fnd[40];
+    found_text(fnd, sizeof(fnd));
+    snprintf(out + o, cap - (size_t)o, ",\"found\":\"%s\"}", fnd);
+    s_rtype = keep_type;
+    if (s_dev) {                                    /* 평소 읽기가 자기 종류의 주소로 다시 붙게 */
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+    }
+    s_dev_ready = false;
+    if (own_bus) {
+        room_close();
+        s_found = 0;
+    }
+    xSemaphoreGive(s_room_mx);
+}
+
 /* 관리 화면 카드의 상태 줄 */
 static bool room_status(char *out, size_t cap)
 {
     if (s_room_fault) {
-        snprintf(out, cap, "센서가 응답하지 않습니다. 배선(3V3·GND·SDA·SCL)을 확인하세요.");
+        char fnd[40];
+        found_text(fnd, sizeof(fnd));
+        snprintf(out, cap, "%s 센서가 응답하지 않습니다. 센서 종류와 배선(3V3·GND·SDA·SCL)을 확인하세요. 선에서 찾은 센서: %s",
+                 RS_NAME[s_rtype], fnd);
         return false;
     }
     if (!s_room_at_us) {
         snprintf(out, cap, "확인 중…");
         return true;
     }
-    snprintf(out, cap, "정상 · %.1f°C · %.0f%% (%d초 전)", s_room_t100 / 100.0f, s_room_h100 / 100.0f,
-             (int)((esp_timer_get_time() - s_room_at_us) / 1000000));
+    int age = (int)((esp_timer_get_time() - s_room_at_us) / 1000000);
+    char fnd[40];
+    found_text(fnd, sizeof(fnd));
+    if (s_room_h100 == NO_HUM) {
+        snprintf(out, cap, "정상 · %s · %.1f°C · 습도 없음 (%d초 전) · 선에서 찾은 센서: %s", RS_NAME[s_rtype],
+                 s_room_t100 / 100.0f, age, fnd);
+    } else {
+        snprintf(out, cap, "정상 · %s · %.1f°C · %.0f%% (%d초 전) · 선에서 찾은 센서: %s", RS_NAME[s_rtype],
+                 s_room_t100 / 100.0f, s_room_h100 / 100.0f, age, fnd);
+    }
     return true;
 }
 
@@ -630,7 +876,7 @@ bool hub_sensors_set_reading(double m3)
 /* ---- 가스 센서: 자기 세대만 다룬다(온습도는 안 건드림) ---- */
 static void gas_apply(void)
 {
-    bool want = hub_plugin_enabled("gas");
+    bool want = hub_plugin_enabled("gas") && !hub_plugin_paused("gas");    /* 멈춤이면 태스크를 내리고 핀을 놓는다 */
     int pin = hub_plugin_get("gas", "pin");
     s_step_l = hub_plugin_get("gas", "step");       /* 펄스 양은 라이브로 읽히므로 재시작 불필요 */
     if (want == s_run_gas_on && (!want || pin == s_run_gas_pin)) {
@@ -642,6 +888,7 @@ static void gas_apply(void)
     for (int i = 0; i < 40 && s_gas_alive; i++) {
         vTaskDelay(pdMS_TO_TICKS(25));
     }
+    hub_sensors_flush();                            /* 내리기 전에 누적·사용량 칸을 플래시에(아직 s_run_gas_on 은 옛 값) */
     if (s_run_gas_on && s_run_gas_pin >= 0) {
         gpio_reset_pin(s_run_gas_pin);              /* 옛 핀 되돌림 */
     }
@@ -654,20 +901,21 @@ static void gas_apply(void)
         hub_plugin_register_status("gas", gas_status);
         xTaskCreate(gas_task, "hub_gas", 4096, (void *)(uintptr_t)s_gas_gen, 6, NULL);
     } else {
-        ESP_LOGI(TAG, "가스 계량기 꺼짐");
+        ESP_LOGI(TAG, "가스 계량기 %s", hub_plugin_paused("gas") ? "멈춤" : "꺼짐");
     }
 }
 
 /* ---- 온습도 센서: 자기 세대만 다룬다(가스는 안 건드림). 간격 변경은 라이브라 재시작 불필요 ---- */
 static void room_apply(void)
 {
-    bool want = hub_plugin_enabled("room");
-    int sda = hub_plugin_get("room", "sda"), scl = hub_plugin_get("room", "scl");
+    bool want = hub_plugin_enabled("room") && !hub_plugin_paused("room");  /* 멈춤이면 태스크를 내리고 버스·핀을 놓는다 */
+    int sda = hub_plugin_get("room", "sda"), scl = hub_plugin_get("room", "scl"), type = hub_plugin_get("room", "type");
+    if (type < 0 || type >= RS_N) {
+        type = RS_SHT31;
+    }
     s_every_s = hub_plugin_get("room", "every");
-    s_sda = sda;
-    s_scl = scl;
-    if (want == s_run_room_on && (!want || (sda == s_run_sda && scl == s_run_scl))) {
-        return;                                     /* 켜짐·핀 그대로면 온습도 태스크는 안 건드림 */
+    if (want == s_run_room_on && (!want || (sda == s_run_sda && scl == s_run_scl && type == s_run_rtype))) {
+        return;                                     /* 켜짐·종류·핀 그대로면 온습도 태스크는 안 건드림 */
     }
     s_room_gen++;
     for (int i = 0; i < 400 && s_room_alive; i++) {
@@ -677,26 +925,24 @@ static void room_apply(void)
         ESP_LOGE(TAG, "온습도계 태스크가 끝나지 않아 다시 적용 못 함(관리 화면에서 다시 저장)");
         return;
     }
-    if (s_sht) {                                    /* 옛 room_task 가 끝난 뒤에만 I2C 정리 */
-        i2c_master_bus_rm_device(s_sht);
-        s_sht = NULL;
-    }
-    if (s_bus) {
-        i2c_del_master_bus(s_bus);
-        s_bus = NULL;
-    }
+    room_close();                                   /* 옛 room_task 가 끝난 뒤에만 정리 */
+    s_sda = sda;                                    /* 태스크가 읽는 값은 옛 태스크가 끝난 뒤에 바꾼다 */
+    s_scl = scl;
+    s_rtype = type;
     s_run_room_on = want;
     s_run_sda = sda;
     s_run_scl = scl;
+    s_run_rtype = type;
     s_room_fault = false;                           /* 켜짐·핀이 바뀌면 처음부터 다시 본다 */
+    s_found = 0;
     s_room_fails = 0;
     s_room_at_us = 0;
     if (want) {
         hub_plugin_register_status("room", room_status);
-        ESP_LOGI(TAG, "온습도계: SDA %d, SCL %d, %d초마다", sda, scl, s_every_s);
-        xTaskCreate(room_task, "hub_room", 3072, (void *)(uintptr_t)s_room_gen, 3, NULL);
+        ESP_LOGI(TAG, "온습도계 %s: SDA %d, SCL %d, %d초마다", RS_NAME[type], sda, scl, s_every_s);
+        xTaskCreate(room_task, "hub_room", 4096, (void *)(uintptr_t)s_room_gen, 3, NULL);
     } else {
-        ESP_LOGI(TAG, "온습도계 꺼짐");
+        ESP_LOGI(TAG, "온습도계 %s", hub_plugin_paused("room") ? "멈춤" : "꺼짐");
     }
 }
 
@@ -718,6 +964,7 @@ void hub_sensors_reload(void)
 void hub_sensors_start(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    s_room_mx = xSemaphoreCreateMutex();
     gas_load();
     gas_apply();
     room_apply();

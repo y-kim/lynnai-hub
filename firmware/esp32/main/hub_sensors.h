@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "esp_http_server.h"
 
-/* 허브에 직접 꽂는 온습도계(SHT31) + 가스 계량기 펄스. 핀·형식은 hub_sensors.c 맨 위. */
+/* 허브에 직접 꽂는 온습도계(SHT31·BME280·MPL3115A2) + 가스 계량기 펄스. 핀·형식은 hub_sensors.c 맨 위. */
 void hub_sensors_start(void);
 void hub_sensors_flush(void);    /* 일부러 재시작하기 직전: 가스 누적·사용량 칸을 플래시에 쓴다 */
 void hub_sensors_reload(void);   /* 핀·설정 바뀜: 재부팅 없이 센서만 다시 적용 */
@@ -19,5 +19,7 @@ void hub_sensors_print(void);                   /* USB diag */
 typedef struct {
     uint32_t count, reading_l, hour_l, day_l, flow_lph;   /* reading_l = 0xFFFFFFFF 이면 계량기 숫자 미보정 */
 } gas_view_t;
-bool hub_sensors_room(float *t, float *h, int *age_s);  /* 마지막 온습도, 없으면 false */
+bool hub_sensors_room(float *t, float *h, int *age_s);  /* 마지막 온습도, 없으면 false. 습도가 없는 센서면 *h = NAN */
+void hub_sensors_room_test(char *out, size_t cap);      /* 세 센서를 한 번씩 읽어 본 결과(JSON) — 고른 종류·멈춤과 무관 */
+void hub_sensors_room_info(char *out, size_t cap);      /* 온습도계 설정·상태(JSON 한 덩이): 종류·멈춤·고장·선에서 찾은 센서 */
 bool hub_sensors_gas(gas_view_t *v, uint32_t *step_l);  /* 플러그인 꺼져 있으면 false */                   /* SmartThings refresh: 가스 값을 곧 다시 보낸다 */

@@ -11,7 +11,7 @@
  * 플랫폼(SmartThings)에는 켜진 플러그인 비트(HUB_RK_CMD_PLUGINS)를 보내, 꺼진 플러그인의 기기는 지운다.
  */
 
-#define PLUG_ROOM  0x01     /* 온습도계 SHT31 */
+#define PLUG_ROOM  0x01     /* 온습도계(센서 종류는 설정에서 고름) */
 #define PLUG_GAS   0x02     /* 가스 계량기 리드 스위치 */
 
 /* 플러그인이 등록하는 '즉시 동작'(재부팅 없음): 값 문자열 하나를 받아 처리. msg 에 결과 문구를 쓴다. */
@@ -24,10 +24,12 @@ void hub_plugin_register_status(const char *id, hub_plugin_status_fn fn);
 
 void hub_plugins_load(void);
 bool hub_plugin_enabled(const char *id);
+bool hub_plugin_paused(const char *id);         /* 설치돼 있지만 멈춤(센서를 읽지 않음, 플랫폼의 기기는 남음) */
+uint8_t hub_plugins_paused_mask(void);          /* 멈춘 플러그인 비트 */
 int hub_plugin_get(const char *id, const char *key);
 uint8_t hub_plugins_mask(void);                 /* 켜진 플러그인 비트 */
 
 /* 관리 화면 */
 void hub_plugins_render(char *out, size_t cap);  /* 카드들(HTML) */
-/* 폼 적용: op = "save"(설정+노출) | "add" | "del". 성공이면 true(호출부가 hub_sensors_reload), 실패면 err 에 이유 */
+/* 폼 적용: op = "save"(설정+노출) | "add" | "del" | "pause" | "resume". 성공이면 true(호출부가 hub_sensors_reload), 실패면 err 에 이유 */
 bool hub_plugins_apply(const char *form, char *err, size_t errlen);
