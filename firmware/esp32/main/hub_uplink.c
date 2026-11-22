@@ -12,6 +12,7 @@
 #include "nvs.h"
 #include "hub_store.h"
 
+#include "hub_ota.h"
 #include "hub_uplink.h"
 #include "hub_zb_rinnai.h"
 #include "hub_zigbee.h"
@@ -59,6 +60,7 @@ esp_err_t hub_uplink_set_mask(uint8_t mask)
 static void restart_task(void *arg)
 {
     vTaskDelay(pdMS_TO_TICKS(1500));                 /* 응답을 먼저 보내고 */
+    hub_ota_planned_reboot();                        /* 일부러 하는 재시작: 가스 누적·스위치 상태를 넘기고, 시험 부팅으로 세지 않게 */
     esp_restart();
 }
 
