@@ -21,8 +21,7 @@ LYNNAI 허브(ESP32 또는 NAS)를 Home Assistant 에 붙이는 맞춤 통합입
 
 **마켓플레이스** (Home Assistant 2026.11 이상): 설정 → 마켓플레이스 → 오른쪽 위 *링크로 추가* 에
 `https://github.com/y-kim/lynnai-hub` 를 넣고 추가합니다(처음이면 GitHub 연결을 먼저 묻습니다). 저장소 화면에서
-설치하고 Home Assistant 를 다시 시작합니다. 통합이 아직 사전 릴리즈에만 들어 있는 동안에는 저장소 화면의 *사전 릴리즈*
-스위치를 켜야 설치할 버전이 나옵니다. 새 판은 Home Assistant 의 업데이트 목록에 뜹니다.
+설치하고 Home Assistant 를 다시 시작합니다. 새 판은 Home Assistant 의 업데이트 목록에 뜹니다.
 
 **저장소에서 받기**: Home Assistant 설정 폴더(`configuration.yaml` 이 있는 곳)에서
 
