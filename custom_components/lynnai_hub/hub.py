@@ -18,6 +18,7 @@ class LynnaiHub:
 
     def __init__(self, hub_id: str) -> None:
         self.hub_id = hub_id
+        self.device_id: str | None = None      # device registry id of the hub device (parent of the others)
         self.client: HubClient | None = None
         self.connected = False
         self.problem: str | None = None

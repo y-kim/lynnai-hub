@@ -10,8 +10,10 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.core import HomeAssistant
+from homeassistant.setup import async_setup_component
 
 from custom_components.lynnai_hub.const import DOMAIN
+from custom_components.lynnai_hub.entity import _VIA_DEVICE_ID
 
 from .conftest import BOILER, F06_OFF, HUB_ID, THERMO, f09
 
@@ -154,3 +156,34 @@ async def test_unavailable_when_the_device_or_hub_goes_away(hass: HomeAssistant,
         w.close()
     await _settle(hass, lambda: hass.states.get(f"switch.boiler_{BOILER}_power").state == "unavailable")
     assert hass.states.get(f"binary_sensor.lynnai_hub_{HUB_ID.lower()}_connection").state == "off"
+
+
+@pytest.mark.skipif(not _VIA_DEVICE_ID,
+                    reason="needs the Home Assistant (2026.8+) where deprecated device info fails on this path")
+async def test_entities_survive_a_change_made_in_the_ui(hass: HomeAssistant, entry, fake_hub, hass_ws_client):
+    """Renaming an entity (or assigning an area, which renames it on newer versions) makes Home Assistant add the
+    entity again from inside its own `config` component. Deprecated device info is an error on that path — it once
+    cost every entity of a device as soon as the user picked an area."""
+    from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
+
+    await async_setup_component(hass, "config", {})
+    ws = await hass_ws_client(hass)
+    old, new = f"switch.boiler_{BOILER}_power", "switch.kitchen_boiler_power"
+    assert hass.states.get(old).state == "on"
+
+    await ws.send_json_auto_id({"type": "config/entity_registry/update", "entity_id": old, "new_entity_id": new})
+    assert (await ws.receive_json())["success"]
+    await hass.async_block_till_done()
+    assert hass.states.get(new).state == "on"          # still there under the new id, and still live
+
+    devices, areas = dr.async_get(hass), ar.async_get(hass)
+    by_ident = {i[1]: d for d in dr.async_entries_for_config_entry(devices, entry.entry_id)
+                for i in d.identifiers if i[0] == DOMAIN}
+    room, hub_device = by_ident[f"{HUB_ID}_t{THERMO}_z1"], by_ident[HUB_ID]
+    assert room.via_device_id == hub_device.id         # the rooms hang off the hub device
+    await ws.send_json_auto_id({"type": "config/device_registry/update", "device_id": room.id,
+                                "area_id": areas.async_create("Bedroom").id})
+    assert (await ws.receive_json())["success"]
+    await hass.async_block_till_done()
+    climates = [e.entity_id for e in er.async_entries_for_device(er.async_get(hass), room.id) if e.domain == "climate"]
+    assert len(climates) == 1 and hass.states.get(climates[0]).state == "heat"

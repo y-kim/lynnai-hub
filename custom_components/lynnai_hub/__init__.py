@@ -52,14 +52,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry) -> bo
     hub.set_callbacks(on_update, on_new)
     entry.runtime_data = hub
 
-    dr.async_get(hass).async_get_or_create(
+    hub.device_id = dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, hub.hub_id)},
         manufacturer=MANUFACTURER,
         model="LYNNAI Hub",
         name=f"LYNNAI Hub {hub.hub_id}",
         configuration_url=f"http://{entry.data[CONF_HOST]}/admin",
-    )
+    ).id
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Devices show up when the hub reports them, so entities are added after the connection is up.

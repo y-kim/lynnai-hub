@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterable
+from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -19,6 +21,21 @@ _NAMES = {
     "ko": {"boiler": "보일러", "room": "방{}", "living": "거실", "room_sensor": "온습도계", "gas": "가스 계량기"},
     "en": {"boiler": "Boiler", "room": "Room {}", "living": "Living room", "room_sensor": "Room sensor", "gas": "Gas meter"},
 }
+
+
+def _links_by_device_id() -> bool:
+    """Whether this Home Assistant links a device to its parent by registry id.
+
+    2026.8 turned DeviceInfo into a dataclass with `via_device_id` and deprecated `via_device` (the identifier pair).
+    The old field is not merely a warning there: when Home Assistant re-adds an entity on behalf of one of its own
+    components (renaming it after an area is assigned, say) the deprecation is raised as an error and the entity is lost.
+    """
+    if dataclasses.is_dataclass(DeviceInfo):
+        return any(f.name == "via_device_id" for f in dataclasses.fields(DeviceInfo))
+    return "via_device_id" in getattr(DeviceInfo, "__optional_keys__", ())
+
+
+_VIA_DEVICE_ID = _links_by_device_id()
 
 
 def _names(hass: HomeAssistant) -> dict[str, str]:
@@ -45,13 +62,17 @@ class LynnaiEntity(Entity):
         self._device_id = (DOMAIN, f"{hub.hub_id}_{device_key}")
 
     def _device(self, name: str, model: str) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={self._device_id},
-            manufacturer=MANUFACTURER,
-            model=model,
-            name=name,
-            via_device=(DOMAIN, self.hub.hub_id),
-        )
+        info: dict[str, Any] = {
+            "identifiers": {self._device_id},
+            "manufacturer": MANUFACTURER,
+            "model": model,
+            "name": name,
+        }
+        if not _VIA_DEVICE_ID:
+            info["via_device"] = (DOMAIN, self.hub.hub_id)
+        elif self.hub.device_id:
+            info["via_device_id"] = self.hub.device_id
+        return DeviceInfo(**info)
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
