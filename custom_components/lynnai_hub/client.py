@@ -232,6 +232,7 @@ class HubClient:
             msg = parse_line(raw.decode(errors="replace"))
             if msg is None:         # "ping" and anything we do not understand
                 continue
+            _LOGGER.debug("<- hub: %02x %s", msg[0], msg[1].hex())
             try:
                 self._on_message(*msg)
             except Exception:  # noqa: BLE001 - one bad message must not end the connection
