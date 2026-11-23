@@ -22,7 +22,7 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | 파일 | ESP32 대응 | 역할 |
 |---|---|---|
 | `hub_proxy.py` | `hub_proxy.c` (원본 Pi `bridge.py`) | :8883 기기 TLS 종단 → 클라우드 재연결 중계(proxy) 또는 직접 응답(standalone) |
-| `upstream.py` | `hub_proxy.c`(`resolve_up`) | 클라우드 주소: `UPSTREAM_IP` 또는 `www.rkiot.net` DNS 조회 |
+| `upstream.py` | `hub_proxy.c`(`resolve_up`) | 클라우드 주소: `UPSTREAM_IP` 또는 `www.rkiot.net` DNS 조회(답의 주소 전부, TTL 만큼), 연결 |
 | `hub_rinnai.py` | `hub_rinnai.c` + `hub_uplink.c` | 상태 스눕(EPC70)·명령 조립(J07 `sum`=rpc수)·내보내기 |
 | `hub_lan.py` | `hub_lan.c` | SSDP 찾기 + TCP 8484 통로(hello 토큰, 페어링 창, ping) |
 | `hub_api.py` | `hub_api.c`, `hub_proxy.c`(`/key/server`) | `/api/v1/state`·`/metrics`, 부트스트랩(기기별 저장·단독 응답), 기기 등록 페이지 `/devices`·`/api/v1/devices` |
@@ -30,6 +30,20 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | `hub_bootstrap.py` | `hub_proxy.c`(`boot_fetch`) | 부트스트랩을 진짜 클라우드에 다시 묻기 |
 | `nas_hub.py` | `hub_main.c`(`app_main`) | 위를 공용 코어 하나로 조립(두 모드의 진입점) |
 | `standalone/dns_hijack.py` | `hub_dns.c` | 등록된 기기의 rkiot.net(과 하위 이름)만 가로챔(등록부를 질의마다 물음 — `is_src_ok`), 등록 안 된 출발지가 물으면 후보로(`on_unregistered`) |
+
+### 린나이 서버가 안 될 때 (자동 단독 동작)
+
+ESP32 허브와 같은 규칙이다. proxy 모드에서 클라우드 쪽이 두 번 연달아 실패하면 그동안만 standalone 처럼 NAS 가 기기를
+직접 받고, 1분마다 서버에 보안 연결을 해 봐서 두 번 연달아 되면 proxy 로 돌아간다(다시 실패하면 간격을 10분까지 늘린다).
+"성공"은 서버가 기기의 로그인을 받아 준 것이다 — 연결은 되는데 로그인을 거절하거나 답이 없는 서버도 실패로 센다.
+스마트홈의 허브 기기에는 모드(설정)와 상태(`단독 모드 (18:25부터 린나이 서버 연결 안 됨)`)가 나오고, `/api/v1/state` 의
+`mode` 에도 같은 내용이 있다. 끄려면 `AUTO_FALLBACK=0`. 스마트홈에서 자동 단독 동작은 켜고 끌 수 있지만(다시 시작하면
+환경변수 값으로), 모드 자체(proxy/standalone)는 `MODE` 로만 정한다.
+
+서버 주소는 DNS 답만 따른다: 답에 든 주소들을 그 TTL 동안만 쓰고(30초~1시간), 지나면 다시 묻는다. `UPSTREAM_IP` 를
+주면 그 주소만 쓴다.
+
+시험: `python3 test_fallback.py` — 가짜 기기와 가짜 서버로 위 동작을 돌려 본다(openssl 필요).
 
 ## standalone 모드 (클라우드 없이 NAS 가 직접, ESP32 단독 모드와 동일)
 
@@ -138,7 +152,8 @@ DNS 도 모든 기기의 rkiot.net 질의를 가로챈다.
 | `MAX_CONN` | `:8883` 동시 연결 상한. 등록 안 된 출발지끼리 나눠 쓴다(출발지당 4). 등록된 기기는 이 상한과 따로 센다(출발지당 4) | `16` |
 | `FORWARD` | 목록 밖 질의를 넘길 상위 DNS. `none`=안 넘김 | 기본 게이트웨이 |
 | `MODE` | `proxy`(클라우드 중계) / `standalone`(클라우드 없이) | `proxy` |
-| `UPSTREAM_IP` | 진짜 클라우드 주소. 비우면 `www.rkiot.net` 을 DNS 로 조회(10분 재사용) | 비움 |
+| `AUTO_FALLBACK` | proxy 인데 린나이 서버가 안 되면 그동안 NAS 가 기기를 직접 받는다(자동 단독 동작). `0` 이면 끔 | `1` |
+| `UPSTREAM_IP` | 진짜 클라우드 주소(이것만 쓴다). 비우면 `www.rkiot.net` 을 DNS 로 조회해 답에 든 주소들을 그 TTL 동안 쓴다 | 비움 |
 | `GATE_TEST` | 값이 있으면 TLS 핸드셰이크 성사/거부만 확인 | 꺼짐 |
 | `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"), 컨테이너 안 경로(바꾸려면 `/data/…`). 파일이 없으면 클라우드에 붙지 않음 | `/app/lynnai-nas/cloud_ca.crt`(이 폴더) |
 | `UPSTREAM_CN` | 클라우드 인증서에 있어야 하는 이름(CN) | `dev2.ckpush.com` |

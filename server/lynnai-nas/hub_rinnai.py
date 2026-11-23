@@ -67,7 +67,9 @@ class Link:
 class HubCore:
     def __init__(self, log=print, standalone=False):
         self.log = log
-        self.standalone = standalone
+        self._standalone = standalone     # 참/거짓, 또는 지금 허브가 직접 받는 중인지 알려 주는 함수(자동 폴백)
+        self.hub_request = None           # "hub …" 요청을 받을 함수(nas_hub 가 hub_proxy.request 를 넣는다)
+        self.on_resend = None             # 새로고침 때 덧붙여 보낼 것(동작 모드)
         self.lock = threading.Lock()
         self.links = []
         self.state = {}       # (kind, mac3) -> blob(bytes)
@@ -75,6 +77,16 @@ class HubCore:
         self._last_mask = None
         threading.Thread(target=self._heartbeat, daemon=True).start()
         threading.Thread(target=self._poll_loop, daemon=True).start()   # 두 모드 다(ESP32 와 같음)
+
+    @property
+    def standalone(self):
+        """허브가 클라우드 노릇을 해야 하나(단독 모드, 또는 프록시인데 서버에 닿지 않아 직접 받는 중)."""
+        s = self._standalone
+        return bool(s() if callable(s) else s)
+
+    def emit(self, cmd, data):
+        """스마트홈으로 한 건 보낸다(동작 모드 알림용)."""
+        self._emit(cmd, data)
 
     # ---- 내보내기 대상 등록(LAN uplink) ----
     def add_sender(self, fn):
@@ -212,6 +224,12 @@ class HubCore:
         text = text.strip()
         if text == "refresh":
             self._resend()
+            if self.on_resend:
+                self.on_resend()
+            return
+        if text.startswith("hub "):              # 허브 자체에 대한 요청(동작 모드·자동 폴백) — 따로 온다
+            if self.hub_request:
+                self.hub_request(text[4:])
             return
         for one in text.split(";"):
             self._command_one(one.strip())

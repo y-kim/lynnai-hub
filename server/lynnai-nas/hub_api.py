@@ -170,6 +170,7 @@ def build_state(core, hub_id):
                 thermostats.append(d)
     return {"v": 1, "id": hub_id, "up_s": int(t - T0), "time": int(t),
             "links": {"boiler": linked_b, "rooms": linked_r},
+            "mode": hub_proxy.mode_json(),                   # set = 정해 둔 모드, fallback = 서버에 닿지 않아 직접 받는 중
             "boilers": boilers, "thermostats": thermostats,
             "boiler": boilers[0] if boilers else None,       # 하위호환(기록기)
             "rooms": thermostats[0] if thermostats else None}
@@ -446,6 +447,9 @@ def serve(core, hub_id, port, token, log=print):
             if STANDALONE:
                 log("[api] /key/server(단독): 허브가 만든 답")
                 return self._send_xml(200, BOOT_LOCAL)
+            if hub_proxy.FB.active and cached:   # 서버에 닿지 않아 직접 받는 중: 묻지 않고 받아 둔 답(돌아갈 때 그대로 쓰인다)
+                log("[api] /key/server(폴백 중): 이 기기의 저장된 답")
+                return self._send_xml(200, cached)
             status = body = None
             try:
                 import hub_bootstrap

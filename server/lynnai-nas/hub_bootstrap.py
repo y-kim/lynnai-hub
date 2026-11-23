@@ -29,6 +29,7 @@ def fetch_real_bootstrap(req_headers_txt):
                 extra[k] = v.strip()
     extra["Host"] = REAL_SNI
     conn = http.client.HTTPConnection(upstream.ip(log), 80, timeout=8)
+    conn.sock = upstream.connect(80, timeout=8, log=log)      # DNS 가 준 주소를 차례로(안 되는 주소는 뒤로)
     try:
         conn.request("GET", "/key/server", headers=extra)
         r = conn.getresponse()
