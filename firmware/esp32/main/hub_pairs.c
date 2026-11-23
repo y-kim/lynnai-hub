@@ -317,6 +317,7 @@ static void hub_pairs_render_l(char *o, size_t cap)
     }
     cat(o, cap, "<form method=post action=/admin/devices>");
     char t[512], ea[ALIAS_LEN * 6];
+    bool mode_shown = false;
     for (int i = 0; i < nd; i++) {
         char mac[7];
         mac_hex(dev[i].mac3, mac);
@@ -350,6 +351,20 @@ static void hub_pairs_render_l(char *o, size_t cap)
             hub_expose_render_dev(o, cap, dev[i].kind, dev[i].mac3, 0);
             cat(o, cap, "</span></div>");
             subs = 1;
+            if (dev[i].kind == HUB_KIND_F06 && !mode_shown) {
+                /* 보일러 모드(허브에 하나): 보일러 Wi-Fi 만 달린 집은 유선 조절기가 있는지 알 수 없어 사람이 정한다.
+                 * 저장은 이 폼(/admin/devices)과 같이 — hub_portal.c pairs_post 가 bmode 를 처리한다 */
+                uint8_t bm = hub_rinnai_boil_mode();
+                mode_shown = true;
+                cat(o, cap, "<div class=row style='padding-left:18px'><span class=muted>↳ 보일러 모드</span><span><select name=bmode>");
+                if (!bm) {
+                    cat(o, cap, "<option value=0 selected>정하지 않음 (조절기 연결로 짐작)</option>");
+                }
+                cat(o, cap, bm == 1 ? "<option value=1 selected>" : "<option value=1>");
+                cat(o, cap, "난방수 — 방마다 온도 조절기</option>");
+                cat(o, cap, bm == 2 ? "<option value=2 selected>" : "<option value=2>");
+                cat(o, cap, "온돌·실내 — 보일러 조절기 하나</option></select></span></div>");
+            }
         } else {
             const char *cur = paired_f06(mac);
             bool solo = cur && !strcmp(cur, "000000");

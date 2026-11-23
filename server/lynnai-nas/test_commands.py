@@ -121,6 +121,15 @@ def main():
     core2.command("refresh")
     check(any(c == 0x0C for c, _ in emitted2[-4:]), "새로고침 때도 설정을 알림")
 
+    print("[7] 보일러 모드(BOILER_MODE)")
+    core3 = hub_rinnai.HubCore(log=lambda *a: None, data_dir=tmp, boiler_mode="water")
+    out3 = []
+    core3.add_sender(lambda c, d: out3.append((c, d)))
+    core3.command("refresh")
+    check((0x0C, bytes([30, 1, 0])) in out3, "water → 0x0c 둘째 바이트 1")
+    check(hub_rinnai.HubCore(log=lambda *a: None, boiler_mode="room").boiler_mode == 2, "room → 2")
+    check(hub_rinnai.HubCore(log=lambda *a: None, boiler_mode="x").boiler_mode == 0, "모르는 값 → 정하지 않음(0)")
+
     print(f"\n== {'실패 %d' % fails if fails else '모두 통과'} ==")
     sys.exit(1 if fails else 0)
 

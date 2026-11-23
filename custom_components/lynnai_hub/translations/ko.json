@@ -51,6 +51,9 @@
       },
       "reservation_hours": {
         "name": "예약 시간"
+      },
+      "heating_water_setpoint": {
+        "name": "난방수 온도"
       }
     },
     "select": {

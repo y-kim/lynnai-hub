@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "esp_err.h"
 
 /*
  * hub_rinnai -- 중계 중인 MQTT 를 엿봐 보일러(f06)·각방(f09) 상태를 뽑고, SmartThings 명령을 기기 쪽에 넣는다.
@@ -55,10 +56,14 @@ typedef struct {
     uint8_t preheat_off_min;            /* 온수 예열 자동 끄기(분, 0 = 무제한) */
     uint32_t preheat_on_s;              /* 예열이 켜진 지 몇 초(꺼져 있으면 0) */
     uint32_t preheat_left_s;            /* 자동으로 꺼지기까지 남은 초(꺼져 있으면 0, 무제한이면 UINT32_MAX) */
+    uint8_t boil_mode;                  /* 보일러 모드 0 정하지 않음 / 1 난방수 / 2 온돌·실내 */
     char last_fail[48];
 } hub_cmd_info_t;
 void hub_rinnai_cmd_info(hub_cmd_info_t *out);
 void hub_rinnai_render(char *o, size_t cap);                          /* 관리 화면 카드 "보일러 명령" */
+bool hub_rinnai_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/boiler (bmode=1 난방수 / 2 온돌·실내) */
+esp_err_t hub_rinnai_set_boil_mode(uint8_t m);                      /* 1 난방수 / 2 온돌·실내(초기 설정·관리 화면) */
+uint8_t hub_rinnai_boil_mode(void);
 void hub_rinnai_request(const char *text, int len);                /* 스마트홈 쪽 요청 "preoff=<분>"(앞의 "hub " 는 뗀 것) */
 /* 시험용(GET /api/v1/bootlog?cmddrop=<n> · preoff=<초>, 재부팅하면 풀림) */
 void hub_rinnai_test_drop(int n);      /* 다음 명령 n 개를 기기로 보내지 않는다(보낸 것으로 치고 답을 기다린다) */

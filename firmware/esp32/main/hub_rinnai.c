@@ -27,6 +27,7 @@
 #include "hub_trace.h"
 #include "hub_main.h"
 #include "hub_store.h"
+#include "esp_http_server.h"
 
 static const char *TAG = "HUB_RINNAI";
 
@@ -153,6 +154,7 @@ static uint16_t s_pend_gen;
 static uint32_t s_cmd_tracked, s_cmd_resent, s_cmd_failed;
 static char s_cmd_last_fail[48];    /* 끝내 반영되지 않은 마지막 명령(관리 화면용) */
 static uint8_t s_pre_off_min;       /* 온수 예열 자동 끄기(분, 0 = 끄지 않음) */
+static uint8_t s_boil_mode;         /* 보일러 모드: 0 정하지 않음(드라이버가 조절기 연결로 짐작), 1 난방수, 2 온돌·실내 */
 static volatile uint8_t s_test_drop; /* 시험: 다음 명령 n 개를 기기로 안 보냄 */
 static volatile uint32_t s_test_preoff_s;   /* 시험: 자동 끄기 시간(초, 0 = 설정대로) */
 static volatile bool s_boilcfg_dirty;       /* 예열이 켜지거나 꺼짐 → 남은 시간을 바로 알린다 */
@@ -1307,6 +1309,7 @@ void hub_rinnai_cmd_info(hub_cmd_info_t *o)
 {
     memset(o, 0, sizeof(*o));
     o->preheat_off_min = s_pre_off_min;
+    o->boil_mode = s_boil_mode;
     if (!s_lock) {
         return;
     }
@@ -1328,11 +1331,14 @@ void hub_rinnai_cmd_info(hub_cmd_info_t *o)
     unlock();
 }
 
+static const char *const BOIL_MODE_NAME[] = { "정하지 않음", "난방수 모드", "온돌·실내 모드" };
+
 void hub_rinnai_render(char *o, size_t cap)
 {
     hub_cmd_info_t ci;
     hub_rinnai_cmd_info(&ci);
-    /* 온수 예열 자동 끄기는 스마트싱스·HA 의 보일러 기기에서만 정한다(관리 화면에서는 뺌 — 사용자 결정 2026-11-23). */
+    /* 보일러 모드는 '연결된 기기'의 보일러 조절기 줄 아래(hub_pairs.c)에서 바꾼다(사용자 결정 2026-11-23).
+     * 온수 예열 자동 끄기는 스마트싱스·HA 의 보일러 기기에서만 정한다(관리 화면에서는 뺌 — 사용자 결정 2026-11-23). */
     strlcat(o, "<h2>보일러 명령</h2><div class=card><p class=muted>", cap);
     char line[200];
     snprintf(line, sizeof(line), "명령 확인: 보낸 명령이 2.5초 안에 상태에 나타나지 않으면 다시 보냅니다(3번까지). "
@@ -1346,10 +1352,10 @@ void hub_rinnai_render(char *o, size_t cap)
     strlcat(o, "</p></div>", cap);
 }
 
-/* [자동 끄기 기본값(분, 0 = 무제한)][0 — 비워 둔 자리][지금: 0 예열 꺼짐, 1~60 남은 분, 255 켜짐·무제한] */
+/* [자동 끄기 기본값(분, 0 = 무제한)][보일러 모드 0 정하지 않음/1 난방수/2 온돌·실내][지금: 0 예열 꺼짐, 1~60 남은 분, 255 켜짐·무제한] */
 static void send_boilcfg(void)
 {
-    uint8_t p[3] = { s_pre_off_min, 0, 0 };
+    uint8_t p[3] = { s_pre_off_min, s_boil_mode, 0 };
     if (s_lock) {
         lock();
         p[2] = preheat_left_locked(hub_trace_now_ms(), NULL);
@@ -1390,6 +1396,27 @@ static esp_err_t pre_off_set(uint8_t m)
     return ESP_OK;
 }
 
+/* 보일러 모드(1 난방수 / 2 온돌·실내). 초기 설정 화면과 관리 화면에서 부른다 */
+esp_err_t hub_rinnai_set_boil_mode(uint8_t m)
+{
+    if (m < 1 || m > 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (m == s_boil_mode) {
+        return ESP_OK;
+    }
+    esp_err_t e = save_u8("boil_mode", m);
+    if (e != ESP_OK) {
+        return e;
+    }
+    s_boil_mode = m;
+    ESP_LOGI(TAG, "보일러 모드 → %s", BOIL_MODE_NAME[m]);
+    send_boilcfg();
+    return ESP_OK;
+}
+
+uint8_t hub_rinnai_boil_mode(void) { return s_boil_mode; }
+
 /* 스마트홈 쪽 요청 "preoff=<분>". 바뀌었든 아니든 지금 값을 다시 알려 화면을 맞춘다(잘못된 값이면 되돌아간다). */
 void hub_rinnai_request(const char *text, int len)
 {
@@ -1427,6 +1454,27 @@ void hub_rinnai_request(const char *text, int len)
     send_boilcfg();
 }
 
+bool hub_rinnai_apply(const char *form, char *msg, size_t msglen)
+{
+    char v[8] = "";
+    if (httpd_query_key_value(form, "bmode", v, sizeof(v)) != ESP_OK || (strcmp(v, "1") && strcmp(v, "2"))) {
+        snprintf(msg, msglen, strcmp(v, "0") ? "잘못된 요청" : "보일러 모드를 골라 주세요");
+        return false;
+    }
+    uint8_t m = (uint8_t)atoi(v);
+    if (m == s_boil_mode) {
+        snprintf(msg, msglen, "바뀐 것이 없습니다");
+        return true;
+    }
+    esp_err_t e = hub_rinnai_set_boil_mode(m);
+    if (e != ESP_OK) {
+        snprintf(msg, msglen, "저장하지 못했습니다(%s). 설정은 그대로입니다", esp_err_to_name(e));
+        return false;
+    }
+    snprintf(msg, msglen, "보일러 모드: %s", BOIL_MODE_NAME[m]);
+    return true;
+}
+
 void hub_rinnai_start(void)
 {
     if (!s_lock) {
@@ -1435,6 +1483,9 @@ void hub_rinnai_start(void)
             uint8_t m = 0;
             if (hs_get_u8(h, "rinnai", "pre_off", &m) == ESP_OK && pre_off_valid(m)) {
                 s_pre_off_min = m;
+            }
+            if (hs_get_u8(h, "rinnai", "boil_mode", &m) == ESP_OK && m <= 2) {
+                s_boil_mode = m;
             }
             nvs_close(h);
         }

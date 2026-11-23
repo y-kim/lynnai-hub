@@ -91,15 +91,17 @@ class FakeHub:
     async def push_state(self, kind: int, mac: str, blob_hex: str) -> None:
         await self.push(0x01, bytes([kind]) + bytes.fromhex(mac) + bytes.fromhex(blob_hex))
 
-    def seed(self) -> None:
-        """What a hub with one boiler, one thermostat (three rooms), a room sensor and a gas meter sends on connect."""
+    def seed(self, thermostat: bool = True) -> None:
+        """What a hub with one boiler, one thermostat (three rooms), a room sensor and a gas meter sends on connect.
+        thermostat=False: the boiler alone (its own controller regulates the room: floor/room control is offered)."""
         import struct
 
+        links = bytes([6]) + bytes.fromhex(BOILER) + (bytes([9]) + bytes.fromhex(THERMO) if thermostat else b"")
         self.on_hello = [
-            (0x02, bytes([6]) + bytes.fromhex(BOILER) + bytes([9]) + bytes.fromhex(THERMO)),
+            (0x02, links),
             (0x05, bytes([3, 0, 0])),
             (0x01, bytes([6]) + bytes.fromhex(BOILER) + bytes.fromhex(F06_ON)),
-            (0x01, bytes([9]) + bytes.fromhex(THERMO) + bytes.fromhex(f09())),
+            *([(0x01, bytes([9]) + bytes.fromhex(THERMO) + bytes.fromhex(f09()))] if thermostat else []),
             (0x03, struct.pack("<hh", 2534, 3410)),
             (0x04, struct.pack("<5I", 1504, 0xFFFFFFFF, 210, 5190, 857)),
             (0x0B, bytes(self.mode)),

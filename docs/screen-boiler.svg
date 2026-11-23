@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 872" width="360" role="img" aria-label="보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 온도조절 모드 온돌, 난방 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 수온 설정 60도. 온수 예열 꺼짐">
-  <title>보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 온도조절 모드 온돌, 난방 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 수온 설정 60도. 온수 예열 꺼짐</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 798" width="360" role="img" aria-label="보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐">
+  <title>보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐</title>
   <style>
     .screen { fill: #f1f1f4; stroke: #d5d8de; }
     .card   { fill: #fcfcfd; }
@@ -63,7 +63,7 @@
       .ic-box { fill: #4a4d55; }
     }
   </style>
-  <rect class="screen" x="0.5" y="0.5" width="359" height="871" rx="26"/>
+  <rect class="screen" x="0.5" y="0.5" width="359" height="797" rx="26"/>
   <text class="t-title" x="48" y="34">보일러 컨트롤러</text>
   <text class="t-sub" x="48" y="52">집</text>
   <path class="icon" d="M28 30 l-7 8 l7 8"/>
@@ -79,38 +79,34 @@
   <text class="t-pill t-on" x="36" y="231">켜짐</text>
   <circle class="btn-on" cx="316" cy="224" r="19"/>
   <path class="icon" style="stroke:#14161a" d="M316 216v8M311.2 218.8a7 7 0 1 0 9.600 0"/>
-  <rect class="card" x="14" y="262" width="332" height="182" rx="22"/>
-  <text class="t-name" x="34" y="289">온도조절 모드</text>
-  <text class="t-val" x="34" y="319">온돌</text>
-  <path class="ink" d="M88 307h9l-4.500 6z"/>
-  <path class="rule" d="M34 336H326"/>
-  <text class="t-name" x="34" y="363">난방 온도 설정</text>
-  <text class="t-val" x="34" y="393">70.0</text><text class="t-unit" x="84" y="393">°C</text>
-  <circle class="knob-h" cx="44" cy="420" r="10"/><text class="t-pm" x="44" y="425">−</text>
-  <path class="track" d="M64 420H296"/><path class="heat" d="M64 420H226"/><circle class="knob-h" cx="226" cy="420" r="12"/>
-  <g class=""><circle class="knob-h" cx="316" cy="420" r="10"/><text class="t-pm" x="316" y="425">+</text></g>
-  <text class="t-sec" x="22" y="472">외출</text>
-  <path class="icon-m" transform="translate(326 460)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
-  <rect class="idle" x="14" y="484" width="332" height="56" rx="28"/>
-  <text class="t-pill" x="36" y="519">꺼짐</text>
-  <circle class="btn" cx="316" cy="512" r="19"/>
-  <path class="icon" d="M316 504v8M311.2 506.8a7 7 0 1 0 9.600 0"/>
-  <text class="t-sec" x="22" y="568">온수</text>
-  <path class="icon-m" transform="translate(326 556)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
-  <rect class="on" x="14" y="580" width="332" height="56" rx="28"/>
-  <text class="t-pill t-on" x="36" y="615">켜짐</text>
-  <circle class="btn-on" cx="316" cy="608" r="19"/>
-  <path class="icon" style="stroke:#14161a" d="M316 600v8M311.2 602.8a7 7 0 1 0 9.600 0"/>
-  <rect class="card" x="14" y="646" width="332" height="108" rx="22"/>
-  <text class="t-name" x="34" y="673">수온 설정</text>
-  <text class="t-val" x="34" y="703">60.0</text><text class="t-unit" x="84" y="703">°C</text>
-  <circle class="knob-h" cx="44" cy="730" r="10"/><text class="t-pm" x="44" y="735">−</text>
-  <path class="track" d="M64 730H296"/><path class="heat" d="M64 730H296"/><circle class="knob-h" cx="296" cy="730" r="12"/>
-  <g class="dim"><circle class="knob-h" cx="316" cy="730" r="10"/><text class="t-pm" x="316" y="735">+</text></g>
-  <text class="t-sec" x="22" y="782">온수 예열</text>
-  <path class="icon-m" transform="translate(326 770)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
-  <rect class="idle" x="14" y="794" width="332" height="56" rx="28"/>
-  <text class="t-pill" x="36" y="829">꺼짐</text>
-  <circle class="btn" cx="316" cy="822" r="19"/>
-  <path class="icon" d="M316 814v8M311.2 816.8a7 7 0 1 0 9.600 0"/>
+  <rect class="card" x="14" y="262" width="332" height="108" rx="22"/>
+  <text class="t-name" x="34" y="289">난방수 온도 설정</text>
+  <text class="t-val" x="34" y="319">70.0</text><text class="t-unit" x="84" y="319">°C</text>
+  <circle class="knob-h" cx="44" cy="346" r="10"/><text class="t-pm" x="44" y="351">−</text>
+  <path class="track" d="M64 346H296"/><path class="heat" d="M64 346H219"/><circle class="knob-h" cx="219" cy="346" r="12"/>
+  <g class=""><circle class="knob-h" cx="316" cy="346" r="10"/><text class="t-pm" x="316" y="351">+</text></g>
+  <text class="t-sec" x="22" y="398">외출</text>
+  <path class="icon-m" transform="translate(326 386)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
+  <rect class="idle" x="14" y="410" width="332" height="56" rx="28"/>
+  <text class="t-pill" x="36" y="445">꺼짐</text>
+  <circle class="btn" cx="316" cy="438" r="19"/>
+  <path class="icon" d="M316 430v8M311.2 432.8a7 7 0 1 0 9.600 0"/>
+  <text class="t-sec" x="22" y="494">온수</text>
+  <path class="icon-m" transform="translate(326 482)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
+  <rect class="on" x="14" y="506" width="332" height="56" rx="28"/>
+  <text class="t-pill t-on" x="36" y="541">켜짐</text>
+  <circle class="btn-on" cx="316" cy="534" r="19"/>
+  <path class="icon" style="stroke:#14161a" d="M316 526v8M311.2 528.8a7 7 0 1 0 9.600 0"/>
+  <rect class="card" x="14" y="572" width="332" height="108" rx="22"/>
+  <text class="t-name" x="34" y="599">온수 온도 설정</text>
+  <text class="t-val" x="34" y="629">60.0</text><text class="t-unit" x="84" y="629">°C</text>
+  <circle class="knob-h" cx="44" cy="656" r="10"/><text class="t-pm" x="44" y="661">−</text>
+  <path class="track" d="M64 656H296"/><path class="heat" d="M64 656H296"/><circle class="knob-h" cx="296" cy="656" r="12"/>
+  <g class="dim"><circle class="knob-h" cx="316" cy="656" r="10"/><text class="t-pm" x="316" y="661">+</text></g>
+  <text class="t-sec" x="22" y="708">온수 예열</text>
+  <path class="icon-m" transform="translate(326 696)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
+  <rect class="idle" x="14" y="720" width="332" height="56" rx="28"/>
+  <text class="t-pill" x="36" y="755">꺼짐</text>
+  <circle class="btn" cx="316" cy="748" r="19"/>
+  <path class="icon" d="M316 740v8M311.2 742.8a7 7 0 1 0 9.600 0"/>
 </svg>

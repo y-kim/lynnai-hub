@@ -2,6 +2,8 @@ name: lynnai-boiler
 # optional: true 인 것은 허브 관리 화면에서 숨길 수 있다(드라이버가 try_update_metadata 로 켜고 끈다)
 # 화면 구성(vid): 글자 요약(boilerStatus, "온돌 70°C · 온수 60°C")은 팝업·기기 카드에만 쓰고 상세 화면에서는 뺐다.
 # 상세 화면은 표준 항목만: 구역마다 스위치 + 온도조절 모드 · 난방 온도 설정 · 온수 온도 설정(제목은 device-config patch).
+# 각방 온도 조절기가 붙은 보일러(난방수 모드)는 lynnai-boiler-water 를 쓴다 — 온도조절 모드가 없고 "난방수 온도 설정"으로
+# 나온다. 두 yml 은 name·vid·머리말만 다르다(같이 고칠 것). 드라이버가 try_update_metadata 로 고른다(core.lua wanted_caps).
 # 원본은 presentations/lynnai-boiler.device-config.json. 구역·capability 나 그 표시를 바꾸면
 # presentation:device-config:create 로 다시 만들고 vid 를 바꾼다.
 metadata:

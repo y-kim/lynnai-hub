@@ -194,28 +194,32 @@ static esp_err_t setup_form(httpd_req_t *req, const char *msg)
 {
     char def_ap[HUB_SSID_MAX + 1];
     hub_state_default_ap_ssid(s_st, def_ap, sizeof(def_ap));
-    char *b = calloc(1, 3072);
+    char *b = calloc(1, 4096);
     if (!b) {
         return httpd_resp_send_500(req);
     }
-    strlcat(b, "<h1>초기 설정</h1>", 3072);
+    strlcat(b, "<h1>초기 설정</h1>", 4096);
     if (msg) {
-        strlcat(b, "<p class=warn>", 3072); cat_esc(b, 3072, msg); strlcat(b, "</p>", 3072);
+        strlcat(b, "<p class=warn>", 4096); cat_esc(b, 3072, msg); strlcat(b, "</p>", 4096);
     }
     strlcat(b, "<div class=card><p>허브를 처음 설정합니다. 저장하면 허브가 <b>집 Wi-Fi</b>에 연결되고, "
                "이 설정용 네트워크는 닫히며 <b>허브 전용 네트워크</b>가 뜹니다.</p>"
                "<form method=post action=/provision>"
                "<label>집 Wi-Fi 이름 (SSID)</label><input name=sta_ssid maxlength=32 autocapitalize=off>"
                "<label>집 Wi-Fi 암호</label><input name=sta_pass type=password maxlength=63>"
-               "<label>허브 네트워크 이름</label><input name=ap_ssid maxlength=32 value=\"", 3072);
+               "<label>허브 네트워크 이름</label><input name=ap_ssid maxlength=32 value=\"", 4096);
     cat_esc(b, 3072, def_ap);
     strlcat(b, "\"><label>허브 Wi-Fi 암호 (8자 이상)</label>"
                "<input name=appw id=appw type=password maxlength=63 oninput=_chk()>"
                "<label>관리자 암호 (8자 이상)</label><input name=pw id=pw type=password oninput=_chk()>"
                "<label>관리자 암호 확인</label><input name=pw2 id=pw2 type=password oninput=_chk()>"
                "<div id=pwmsg class=muted></div>"
+               "<label>보일러 모드</label>"
+               "<label class=muted><input type=radio name=bmode value=1 required> 난방수 모드 — 방마다 온도 조절기가 있음</label>"
+               "<label class=muted><input type=radio name=bmode value=2> 온돌·실내 모드 — 보일러 조절기 하나로 난방</label>"
+               "<p class=muted>나중에 관리 화면에서 바꿀 수 있습니다.</p>"
                "<button id=btn disabled>저장하고 전환</button></form>"
-               "<p class=muted>지금은 공개 설정용 네트워크입니다. 설정을 마치면 닫힙니다.</p></div>", 3072);
+               "<p class=muted>지금은 공개 설정용 네트워크입니다. 설정을 마치면 닫힙니다.</p></div>", 4096);
     char title[32] = "초기 설정";
     esp_err_t r = send_page(req, title, b, CHK_JS);
     free(b);
@@ -296,8 +300,9 @@ static esp_err_t provision_post(httpd_req_t *req)
     }
     char sta_ssid[HUB_SSID_MAX * 3 + 1], sta_pass[HUB_PASS_MAX * 3 + 1];
     char ap_ssid[HUB_SSID_MAX * 3 + 1], appw[HUB_PASS_MAX * 3 + 1];
-    char pw[HUB_PASS_MAX * 3 + 1], pw2[HUB_PASS_MAX * 3 + 1];
+    char pw[HUB_PASS_MAX * 3 + 1], pw2[HUB_PASS_MAX * 3 + 1], bmode[4];
     form_get(body, "sta_ssid", sta_ssid, sizeof(sta_ssid));
+    form_get(body, "bmode", bmode, sizeof(bmode));
     form_get(body, "sta_pass", sta_pass, sizeof(sta_pass));
     form_get(body, "ap_ssid", ap_ssid, sizeof(ap_ssid));
     form_get(body, "appw", appw, sizeof(appw));
@@ -310,6 +315,9 @@ static esp_err_t provision_post(httpd_req_t *req)
     if (strcmp(pw, pw2) != 0) {
         r = ESP_ERR_INVALID_ARG;
         strlcpy(err, "관리자 암호 확인이 일치하지 않습니다", sizeof(err));
+    } else if (strcmp(bmode, "1") && strcmp(bmode, "2")) {
+        r = ESP_ERR_INVALID_ARG;
+        strlcpy(err, "보일러 모드를 골라 주세요", sizeof(err));
     } else {
         r = hub_state_provision(s_st, sta_ssid, sta_pass, ap_ssid, appw, pw, err, sizeof(err));
     }
@@ -318,6 +326,7 @@ static esp_err_t provision_post(httpd_req_t *req)
     if (r != ESP_OK) {
         return setup_form(req, err);
     }
+    hub_rinnai_set_boil_mode((uint8_t)atoi(bmode));   /* 실패해도 설정은 계속(관리 화면에서 다시 정할 수 있다) */
 
     char b[768] = "<h1>설정 완료</h1><div class=card><p>허브가 집 Wi-Fi <b>";
     cat_esc(b, sizeof(b), s_st->sta_ssid);
@@ -499,7 +508,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_proxy_render(b, cap); FLUSH();     /* 동작 모드(프록시/단독) */
     hub_uplink_render(b, cap); FLUSH();    /* 연결 방식(통로) */
     hub_pairs_render(b, cap); FLUSH();     /* 연결된 기기 */
-    hub_rinnai_render(b, cap); FLUSH();    /* 보일러 명령(명령 확인 누계) */
+    hub_rinnai_render(b, cap); FLUSH();    /* 보일러 명령(명령 확인 누계) — 보일러 모드는 연결된 기기의 보일러 조절기 줄 아래 */
     hub_devs_render(b, cap); FLUSH();      /* 등록 대기 */
     hub_expose_render_types(b, cap); FLUSH();  /* 노출 설정 */
     hub_plugins_render(b, cap); FLUSH();
@@ -722,6 +731,18 @@ static esp_err_t pairs_post(httpd_req_t *req)
         return httpd_resp_send_500(req);
     }
     bool ok = read_body(req, body, FORM_MAX) >= 0 && hub_pairs_apply(body, msg, sizeof(msg));
+    char bm[4];                                       /* 보일러 조절기 줄 아래의 보일러 모드(1 난방수 / 2 온돌·실내) */
+    if (ok && httpd_query_key_value(body, "bmode", bm, sizeof(bm)) == ESP_OK && (!strcmp(bm, "1") || !strcmp(bm, "2")) &&
+        atoi(bm) != hub_rinnai_boil_mode()) {
+        esp_err_t e = hub_rinnai_set_boil_mode((uint8_t)atoi(bm));
+        if (e != ESP_OK) {
+            ok = false;
+            snprintf(msg, sizeof(msg), "보일러 모드를 저장하지 못했습니다(%s)", esp_err_to_name(e));
+        } else {
+            strlcat(msg, msg[0] ? " · 보일러 모드: " : "보일러 모드: ", sizeof(msg));
+            strlcat(msg, bm[0] == '1' ? "난방수" : "온돌·실내", sizeof(msg));
+        }
+    }
     free(body);
     return admin_page(req, ok ? msg : (msg[0] ? msg : "잘못된 요청"), ok);
 }
@@ -786,6 +807,17 @@ static esp_err_t mode_post(httpd_req_t *req)
     }
     char body[64], msg[160] = "";
     bool ok = read_body(req, body, sizeof(body)) >= 0 && hub_proxy_apply(body, msg, sizeof(msg));
+    return admin_page(req, msg[0] ? msg : "잘못된 요청", ok);
+}
+
+static esp_err_t boiler_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[64], msg[160] = "";
+    bool ok = read_body(req, body, sizeof(body)) >= 0 && hub_rinnai_apply(body, msg, sizeof(msg));
     return admin_page(req, msg[0] ? msg : "잘못된 요청", ok);
 }
 
@@ -1123,6 +1155,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &trns);
     const httpd_uri_t mode = { .uri = "/admin/mode", .method = HTTP_POST, .handler = mode_post };
     httpd_register_uri_handler(srv, &mode);
+    const httpd_uri_t boil = { .uri = "/admin/boiler", .method = HTTP_POST, .handler = boiler_post };
+    httpd_register_uri_handler(srv, &boil);
     const httpd_uri_t gasc = { .uri = "/admin/gas", .method = HTTP_POST, .handler = gas_post };
     httpd_register_uri_handler(srv, &gasc);
     const httpd_uri_t crypt = { .uri = "/admin/crypt", .method = HTTP_POST, .handler = crypt_post };

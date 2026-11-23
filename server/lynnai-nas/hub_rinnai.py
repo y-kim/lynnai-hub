@@ -25,7 +25,8 @@ import threading
 import time
 
 CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_PAIRS = 0x00, 0x01, 0x02, 0x07
-CMD_BOILCFG = 0x0C              # 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)][0][지금 남은 분]
+CMD_BOILCFG = 0x0C              # 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)][보일러 모드 0 정하지 않음/1 난방수/2 온돌·실내]
+BOILER_MODES = {"": 0, "water": 1, "room": 2}   # 환경변수 BOILER_MODE (ESP32 는 초기 설정·관리 화면에서 고름)
 OK_CODES = {"80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97"}   # ESP32 code_allowed 와 같게
 PREOFF_CHOICES = (*range(1, 61), 0)        # 1~60분, 0 = 무제한
 PEND_WAIT_S, PEND_TRIES, PEND_ANY_S = 2.5, 3, 0.3
@@ -116,8 +117,11 @@ class Link:
 
 
 class HubCore:
-    def __init__(self, log=print, standalone=False, data_dir=None):
+    def __init__(self, log=print, standalone=False, data_dir=None, boiler_mode=""):
         self.log = log
+        self.boiler_mode = BOILER_MODES.get(boiler_mode, 0)   # 보일러 Wi-Fi 하나만 달린 집은 조절기가 있는지 알 길이 없어 설치 때 정한다
+        if boiler_mode not in BOILER_MODES:
+            log(f"[core] 모르는 BOILER_MODE={boiler_mode!r} — water/room 중 하나. 정하지 않음으로")
         self.data_dir = data_dir
         self.pending = []                 # 확인을 기다리는 명령(Pending)
         self.counts = {"tracked": 0, "resent": 0, "failed": 0}
@@ -457,8 +461,8 @@ class HubCore:
         return 0
 
     def _boilcfg(self):
-        """[자동 끄기 기본값(분)][0 — 비워 둔 자리][지금: 0 꺼짐 / 남은 분 / 255 무제한]"""
-        return bytes([self.preheat_off, 0, self.preheat_left()])
+        """[자동 끄기 기본값(분)][보일러 모드][지금: 0 꺼짐 / 남은 분 / 255 무제한]"""
+        return bytes([self.preheat_off, self.boiler_mode, self.preheat_left()])
 
     def _send_boilcfg(self):
         self._emit(CMD_BOILCFG, self._boilcfg())
@@ -495,7 +499,7 @@ class HubCore:
         with self.lock:
             on = [now - t for k, t in self.pre_on.items() if k[0] == KIND_F06]
             return {**self.counts, "pending": len(self.pending), "preheat_off_min": self.preheat_off,
-                    "preheat_on_s": int(max(on)) + 1 if on else 0,
+                    "preheat_on_s": int(max(on)) + 1 if on else 0, "boiler_mode": self.boiler_mode,
                     "preheat_left_s": self._left_s(now)}
 
     def _left_s(self, now):
@@ -519,7 +523,7 @@ class HubCore:
             live = {(ln.kind, bytes(ln.mac3)) for ln in self.links if ln.kind}
             items = [(k, blob) for k, blob in self.state.items() if k in live and blob]
         self._send_links()
-        self._send_boilcfg()                                               # 보일러 설정(자동 끄기·남은 시간)
+        self._send_boilcfg()                                               # 보일러 설정(자동 끄기·보일러 모드·남은 시간)
         for (kind, mac), blob in items:
             self._emit(CMD_STATE, bytes([kind]) + mac + blob)
 

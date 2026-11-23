@@ -65,7 +65,7 @@ local RANGE = { ["온돌"] = { 40, 85 }, ["실내"] = { 5, 40 } }
 local status_cap = capabilities["connectbook02461.boilerStatus"]
 local room_cap = capabilities["connectbook02461.roomStatus"]
 -- 보일러의 조작 항목은 표준 capability 를 쓴다(앱이 표준 항목 전용 모양으로 그린다 — 린나이 공식 연동과 같은 구성):
---   난방 방식 = thermostatMode("ondol" 온돌 / "heat" 실내), 수온 설정 = thermostatWaterHeatingSetpoint
+--   난방 방식 = thermostatMode("ondol" 온돌 / "heat" 실내, 난방수 모드에서는 숨김), 온수 온도 설정 = thermostatWaterHeatingSetpoint
 local tm_cap = capabilities.thermostatMode
 local hw_cap = capabilities.thermostatWaterHeatingSetpoint
 local TM_OF = { ["온돌"] = "ondol", ["실내"] = "heat" }
@@ -221,6 +221,35 @@ local function outing_of(parent, kind, mac)
   return any and all
 end
 
+-- 난방수 모드: 각방 온도 조절기가 붙은 보일러. 방 온도는 방마다 조절기가 맡고 보일러는 난방수(와 온수)만 데운다 —
+-- 온돌/실내 고르기(b4)가 먹지 않는다(2026-11-23 실측). 그래서 '온도조절 모드'를 숨기고 온도 설정을 '난방수 온도'로 보인다.
+-- 조절기가 붙지 않은 보일러는 온돌/실내 모드(보일러 조절기가 방 온도 조절기 노릇).
+-- 조절기 연결이 잠깐 끊겨도 화면이 바뀌지 않게, 아는 조절기(끊긴 것 포함)로 판단하고 재시작 직후에는 기억해 둔 값을 쓴다.
+-- 보일러 Wi-Fi 하나만 달린 집은 조절기가 있는지 알 길이 없어서, 허브 설정(초기 설정·관리 화면의 '보일러 모드')을 먼저 따른다
+-- (허브 메시지 0x0c 둘째 바이트: 1 난방수, 2 온돌·실내, 0/없음 = 정하지 않음 → 아래처럼 조절기 연결로 짐작).
+-- 보일러가 '실내' 로 동작 중이라고 알려 오면 무조건 온돌·실내 모드(사용자 결정 2026-11-23).
+local all_reported                                  -- 아래에서 정의
+local function bmode_of(parent)
+  local s = hub_state(parent)
+  if s.bmode == nil then s.bmode = parent:get_field("bmode") or 0 end
+  return s.bmode
+end
+local function water_mode(parent, mac)
+  local s = hub_state(parent)
+  local b = s.boilers[mac]
+  if b and b.heat_mode == "실내" then return false end
+  local set = bmode_of(parent)
+  if set == 1 then return true elseif set == 2 then return false end
+  local known = false
+  for tmac in pairs(s.thermos) do
+    if the_boiler(parent, tmac) == mac then known = true end
+  end
+  local saved = parent:get_field("water_" .. mac) == true
+  if not all_reported(parent) then return known or saved end
+  if saved ~= known then parent:set_field("water_" .. mac, known, { persist = true }) end
+  return known
+end
+
 -- 온수 예열 자동 끄기(허브가 시간을 재고 끈다). 화면은 온수 예열 구역의 표준 mode 목록 "자동 끄기".
 -- 허브가 이 설정을 알려 준 적이 있을 때만 칸을 내놓는다(옛 펌웨어에서는 안 보임). 값은 허브 기기 필드에 기억(재시작 대비).
 -- 목록은 1~60분과 무제한. 예열이 꺼져 있으면 다음에 켜질 때의 기본값을 보이고(고르면 기본값이 바뀜), 켜져 있으면 허브가
@@ -237,7 +266,10 @@ end
 
 local function update_outing(parent)
   local s = hub_state(parent)
-  for bmac, m in pairs(s.boilers) do m.outing = outing_of(parent, "boiler", bmac) end
+  for bmac, m in pairs(s.boilers) do
+    m.outing = outing_of(parent, "boiler", bmac)
+    m.water = water_mode(parent, bmac)
+  end
   for tmac, vb in pairs(s.vboilers or {}) do vb.outing = outing_of(parent, "vboiler", tmac) end
 end
 
@@ -245,7 +277,7 @@ end
 -- (그 전엔 자동화·가상 보일러 만들기/지우기를 하지 않는다 — 일부만 보고 '전부 꺼짐'·'단독'으로 오판하지 않게)
 -- 단, 목록에는 있는데 REPORT_WAIT_S 가 지나도록 상태를 못 보내는 기기는 더 기다리지 않는다(그 하나가 전체를 막지 않게).
 local REPORT_WAIT_S = 120
-local function all_reported(parent)
+function all_reported(parent)
   local s = hub_state(parent)
   if not s.linked then return false end
   local now = os.time()
@@ -341,7 +373,7 @@ local function main_text(m)
   if not m.power then return res("꺼짐") end
   local heat
   if m.outing then heat = "외출"
-  elseif m.heat then heat = m.heat_mode .. t(m.heat_temp)
+  elseif m.heat then heat = (m.water and "난방수" or m.heat_mode) .. t(m.heat_temp)
   else heat = "꺼짐" end
   if m.hotwater then return res(heat .. " · 온수" .. t(m.hw_set)) end
   if heat == "꺼짐" then return res("대기") end
@@ -574,10 +606,14 @@ local function wanted_caps(parent, key)
   end
   local kind, mac, id = parse_key(key)
   if kind == "boiler" or kind == "vboiler" then
+    -- 난방수 모드(각방 조절기가 붙은 보일러)에서는 온도조절 모드를 내놓지 않고, 프로필도 '난방수 온도 설정'으로 나오는 것을 쓴다
+    local water = kind == "boiler" and water_mode(parent, mac)
+    local heat = { { BIT.heat_mode, "switch" } }
+    if not water then heat[#heat + 1] = { BIT.heat_type, "thermostatMode" } end
+    heat[#heat + 1] = { BIT.heat_temp, "thermostatHeatingSetpoint" }
     local comps = {
       { "main", { { BIT.power, "switch" } } },
-      { "heat", { { BIT.heat_mode, "switch" }, { BIT.heat_type, "thermostatMode" },
-        { BIT.heat_temp, "thermostatHeatingSetpoint" } } },
+      { "heat", heat },
       -- 외출 스위치는 외출을 걸 방이 붙어 있을 때만
       { "outing", #thermos_of(parent, kind, mac) > 0 and { { BIT.heat_mode, "switch" } } or {} },
       { "hotwater", { { BIT.hw, "switch" }, { BIT.hw_temp, "thermostatWaterHeatingSetpoint" } } },
@@ -589,7 +625,7 @@ local function wanted_caps(parent, key)
       local caps = pick(c[2])
       if #caps > 0 then out[#out + 1] = { c[1], caps } end
     end
-    return "lynnai-boiler", out
+    return water and "lynnai-boiler-water" or "lynnai-boiler", out
   elseif kind == "zone" then
     local out = { { "main", pick({ { BIT.room_on, "switch" }, { BIT.room_set, "thermostatHeatingSetpoint" } }) } }
     local outing = pick({ { BIT.room_out, "switch" } })
@@ -1310,8 +1346,16 @@ local function on_boilcfg(parent, b)
   s.preoff = m
   if parent:get_field("preoff") ~= m then parent:set_field("preoff", m, { persist = true }) end
   s.preleft = #b >= 3 and b:byte(3) or nil                           -- 지금: 0 꺼짐, 1~60 남은 분, 255 켜짐·무제한
+  local bm = #b >= 2 and b:byte(2) or 0                              -- 보일러 모드(옛 펌웨어는 1바이트 = 정하지 않음)
+  if bm > 2 then bm = 0 end
+  local mode_changed = bmode_of(parent) ~= bm
+  if mode_changed then
+    s.bmode = bm
+    parent:set_field("bmode", bm, { persist = true })
+    update_outing(parent)
+  end
   for bmac in pairs(s.boilers) do
-    if first then
+    if first or mode_changed then
       local child = parent:get_child_by_parent_assigned_key(bkey(bmac))
       if child then apply_caps(parent, child) end                    -- 처음 알게 됨: 칸을 내놓는다
     end

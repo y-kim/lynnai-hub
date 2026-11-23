@@ -4,18 +4,20 @@ from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import LynnaiConfigEntry, protocol as p
-from .entity import BoilerEntity, HubModeEntity, setup_dynamic
+from .entity import BoilerEntity, HubModeEntity, forget_entity, setup_dynamic
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     hub = entry.runtime_data
 
     def make():
-        out: list = [HeatMode(hass, hub, entry.entry_id, mac) for mac in hub.boilers]
+        # floor/room control only where the boiler regulates the rooms itself (no room thermostats: see boiler_water_mode)
+        out: list = [HeatMode(hass, hub, entry.entry_id, mac) for mac in hub.boilers if not hub.boiler_water_mode(mac)]
         if hub.preheat_off is not None:
             out += [PreheatOff(hass, hub, entry.entry_id, mac) for mac in hub.boilers]
         if hub.mode is not None:
@@ -38,6 +40,18 @@ class HeatMode(BoilerEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         await self.hub.set_boiler_heat_mode(self.mac, option)
+
+    @callback
+    def _on_hub_update(self) -> None:
+        if self.hub.boiler_water_mode(self.mac):     # now heating-water mode (setting, thermostat): take it away
+            forget_entity(self.unique_id)            # ...and bring it back if the boiler goes to floor/room mode again
+            registry = er.async_get(self.hass)
+            if self.registry_entry and registry.async_get(self.entity_id):
+                registry.async_remove(self.entity_id)
+            else:
+                self.hass.async_create_task(self.async_remove(force_remove=True))
+            return
+        super()._on_hub_update()
 
 
 class PreheatOff(BoilerEntity, SelectEntity):

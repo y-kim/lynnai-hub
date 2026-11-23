@@ -147,6 +147,15 @@ class PluginEntity(LynnaiEntity):
         return self.hub.connected and (not known or self.hub.plugins.ok(self._bit))
 
 
+_GONE: set[str] = set()     # unique ids of entities that removed themselves (see forget_entity)
+
+
+def forget_entity(unique_id: str | None) -> None:
+    """An entity removed itself because it no longer applies; let setup_dynamic add it again if it applies again."""
+    if unique_id:
+        _GONE.add(unique_id)
+
+
 def setup_dynamic(
     hass: HomeAssistant,
     entry_id: str,
@@ -158,6 +167,9 @@ def setup_dynamic(
 
     @callback
     def add_new() -> None:
+        gone = _GONE & known                         # an entity that took itself away may come back
+        known.difference_update(gone)
+        _GONE.difference_update(gone)
         new = [e for e in make() if e.unique_id not in known]
         known.update(e.unique_id for e in new)
         if new:

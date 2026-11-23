@@ -528,6 +528,44 @@ core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"]
 local jw = table.concat(sent_cmds, " | ")
 check(jw:find("d1=32", 1, true) or jw:find("d1=37", 1, true), "52도 → 50 이나 55 로(" .. jw .. ")")
 
+print("[18c] 난방수 모드: 각방 조절기가 붙은 보일러는 온도조절 모드를 숨기고 '난방수'로 보인다")
+reset()
+links({ { 6, "a1b2c3" } })
+state(6, "a1b2c3", F06)
+local solo = driver._children["ba1b2c3"]
+check(solo.profile.id == "lynnai-boiler" and solo._caps.heat and solo._caps.heat["thermostatMode"],
+  "조절기 없는 보일러: 온돌/실내 모드 — 온도조절 모드가 보임")
+check((last_emit("ba1b2c3", "main", "status") or ""):find("온돌", 1, true), "요약 글자는 '온돌 …'")
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(9, "d4e5f6", f09_rooms(true, true, true)); state(6, "a1b2c3", F06)
+check(solo.profile.id == "lynnai-boiler-water" and solo._caps.heat and not solo._caps.heat["thermostatMode"]
+  and solo._caps.heat["thermostatHeatingSetpoint"], "조절기가 붙으면 난방수 모드 — 온도조절 모드 숨김, 프로필 lynnai-boiler-water")
+check((last_emit("ba1b2c3", "main", "status") or ""):find("난방수", 1, true), "요약 글자는 '난방수 …'")
+links({ { 6, "a1b2c3" } })                                     -- 조절기 연결이 잠깐 끊겨도
+state(6, "a1b2c3", F06)
+check(solo.profile.id == "lynnai-boiler-water", "조절기 연결이 끊긴 동안에도 난방수 모드 그대로(화면이 오락가락하지 않게)")
+check(hub._fields["water_a1b2c3"] == true, "난방수 모드를 기억(재시작 대비)")
+
+print("[18e] 보일러 모드: 허브 설정(0x0c 둘째 바이트)이 먼저, 보일러가 '실내' 면 무조건 온돌·실내")
+reset()
+links({ { 6, "a1b2c3" } })
+state(6, "a1b2c3", F06)
+local bm = driver._children["ba1b2c3"]
+check(bm.profile.id == "lynnai-boiler", "설정 없음 + 조절기 없음: 온돌·실내")
+msg(0x0c, string.char(0, 1))
+check(bm.profile.id == "lynnai-boiler-water" and not bm._caps.heat["thermostatMode"], "허브 설정 '난방수'(1): 조절기를 몰라도 난방수 모드")
+check(hub._fields["bmode"] == 1, "설정을 기억(재시작 대비)")
+state(6, "a1b2c3", F06:sub(1, 7) .. "1" .. F06:sub(9))
+check(bm.profile.id == "lynnai-boiler" and bm._caps.heat["thermostatMode"], "보일러가 '실내' 로 알리면 설정과 상관없이 온돌·실내")
+state(6, "a1b2c3", F06)
+check(bm.profile.id == "lynnai-boiler-water", "다시 온돌로 알리면 설정대로 난방수")
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(9, "d4e5f6", f09_rooms(true, true, true))
+msg(0x0c, string.char(0, 2))
+check(bm.profile.id == "lynnai-boiler", "허브 설정 '온돌·실내'(2): 조절기가 붙어 있어도 온돌·실내")
+msg(0x0c, string.char(0))
+check(bm.profile.id == "lynnai-boiler-water", "옛 펌웨어(1바이트) = 정하지 않음 → 조절기 연결로 짐작(난방수)")
+
 print("[18d] 온수 예열 자동 끄기: 허브가 알려 주면 온수 예열 구역에 '자동 끄기' 목록, 고르면 hub preoff=<분>")
 reset()
 links({ { 6, "a1b2c3" } })

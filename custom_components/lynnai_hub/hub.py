@@ -33,6 +33,7 @@ class LynnaiHub:
         self.mode: p.HubMode | None = None                      # None until the hub told us (older firmware never does)
         self.preheat_off: int | None = None                     # preheat auto-off minutes (0 = never), one for the hub
         self.preheat_left: int | None = None                    # 0 preheat off, 1-60 minutes left, 255 on without limit
+        self.boiler_mode = p.BOILER_MODE_UNSET                  # set on the hub: heating water / floor-room / not set
         self._on_update: Callable[[], None] = lambda: None
         self._on_new: Callable[[], None] = lambda: None
 
@@ -57,7 +58,8 @@ class LynnaiHub:
                 state = p.decode_boiler(blob)
                 if state is None:
                     return
-                new = mac not in self.boilers
+                old = self.boilers.get(mac)
+                new = old is None or old.heat_mode != state.heat_mode   # room mode brings floor/room control back
                 self.boilers[mac] = state
             elif kind == p.KIND_THERMOSTAT:
                 zones = p.decode_zones(blob)
@@ -90,9 +92,11 @@ class LynnaiHub:
             minutes = p.decode_boilcfg(payload)
             if minutes is None:
                 return
-            new = self.preheat_off is None
+            mode = p.decode_boiler_mode(payload)
+            new = self.preheat_off is None or mode != self.boiler_mode
             self.preheat_off = minutes
             self.preheat_left = p.decode_preheat_left(payload)
+            self.boiler_mode = mode
         elif cmd == p.CMD_ALIVE:
             temp = p.decode_alive(payload)
             if temp is None or temp == self.chip_temp:
@@ -132,6 +136,19 @@ class LynnaiHub:
             if self.boiler_of(tmac) == boiler_mac and self.device_online(p.KIND_THERMOSTAT, tmac)
             for zone_id in zones
         ]
+
+    def boiler_water_mode(self, boiler_mac: str) -> bool:
+        """A boiler with room thermostats only heats the water: the rooms regulate themselves, so floor/room control
+        (b4) does nothing there. A boiler that says it runs in room mode is never in this mode; otherwise the mode set
+        on the hub decides (with only the boiler's Wi-Fi module the hub cannot see wired room thermostats), and when
+        none is set, every thermostat the hub knows of counts (also one that is briefly offline)."""
+        state = self.boilers.get(boiler_mac)
+        if state and state.heat_mode == p.HEAT_MODE_ROOM:
+            return False
+        if self.boiler_mode != p.BOILER_MODE_UNSET:
+            return self.boiler_mode == p.BOILER_MODE_WATER
+        thermostats = set(self.zones) | {mac for kind, mac in (self.links or ()) if kind == p.KIND_THERMOSTAT}
+        return any(self.boiler_of(t) == boiler_mac for t in thermostats)
 
     def boiler_away(self, boiler_mac: str) -> bool:
         """A boiler counts as 'away' when every room that is switched on is away (rooms that are off do not count)."""

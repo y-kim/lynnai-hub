@@ -311,14 +311,22 @@ def preheat_off_minutes(option: str) -> int | None:
     return int(option) if option.isdigit() and int(option) in PREHEAT_OFF_CHOICES else None
 
 
+BOILER_MODE_UNSET, BOILER_MODE_WATER, BOILER_MODE_ROOM = 0, 1, 2   # set on the hub (setup / admin page)
+
+
 def decode_boilcfg(payload: bytes) -> int | None:
-    """[preheat auto-off minutes, 0 = never][reserved][minutes left, newer firmware]."""
+    """[preheat auto-off minutes, 0 = never][boiler mode, newer firmware]."""
     return payload[0] if payload and payload[0] in PREHEAT_OFF_CHOICES else None
 
 
 def decode_preheat_left(payload: bytes) -> int | None:
     """Third byte: 0 preheat off, 1-60 minutes until the hub turns it off, 255 on without a limit; None = older firmware."""
     return payload[2] if len(payload) >= 3 else None
+
+
+def decode_boiler_mode(payload: bytes) -> int:
+    """Second byte: 1 heating water (room thermostats do the rooms), 2 floor/room; 0 or missing = not set."""
+    return payload[1] if len(payload) >= 2 and payload[1] in (BOILER_MODE_WATER, BOILER_MODE_ROOM) else BOILER_MODE_UNSET
 
 
 # ---- requests (text sent with CMD_REQUEST) ----

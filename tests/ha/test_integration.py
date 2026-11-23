@@ -16,7 +16,7 @@ from homeassistant.util import dt as dt_util
 from custom_components.lynnai_hub.const import DOMAIN
 from custom_components.lynnai_hub.entity import _VIA_DEVICE_ID
 
-from .conftest import BOILER, F06_OFF, HUB_ID, THERMO, f09
+from .conftest import BOILER, F06_OFF, F06_ON, HUB_ID, THERMO, f09
 
 TOKEN = "ab" * 16
 
@@ -61,8 +61,10 @@ async def test_entities_show_the_hub_state(hass: HomeAssistant, entry, fake_hub)
     assert s.get(f"switch.boiler_{BOILER}_heating").state == "on"
     assert s.get(f"switch.boiler_{BOILER}_away").state == "off"
     assert s.get(f"switch.boiler_{BOILER}_hot_water_preheat").state == "off"
-    assert s.get(f"select.boiler_{BOILER}_heating_control").state == "ondol"
-    assert s.get(f"number.boiler_{BOILER}_heating_temperature").state == "65"
+    # with room thermostats the boiler only heats the water: no floor/room control, and the setpoint is the water's
+    assert s.get(f"select.boiler_{BOILER}_heating_control") is None
+    assert s.get(f"number.boiler_{BOILER}_heating_water_temperature").state == "65"
+    assert s.get(f"select.boiler_{BOILER}_hot_water_preheat_auto_off").state == "unlimited"
     hot = s.get(f"water_heater.boiler_{BOILER}_hot_water")
     assert hot.state == "gas" and hot.attributes["temperature"] == 60
     assert s.get(f"binary_sensor.boiler_{BOILER}_heating_burner").state == "off"
@@ -121,14 +123,11 @@ async def test_commands_reach_the_hub(hass: HomeAssistant, entry, fake_hub):
     assert sorted(fake_hub.requests) == [f"f09@{THERMO} a0={n},b3=1" for n in (1, 7)]   # leaving room 2 (off) alone
     fake_hub.requests.clear()
 
-    await call("select", "select_option", f"select.boiler_{BOILER}_heating_control", option="room")
-    assert fake_hub.requests.pop() == f"f06@{BOILER} b4=1"
-
     await call("select", "select_option", f"select.boiler_{BOILER}_hot_water_preheat_auto_off", option="30")
     assert fake_hub.requests.pop() == "hub preoff=30"
     await _settle(hass, lambda: hass.states.get(f"select.boiler_{BOILER}_hot_water_preheat_auto_off").state == "30")
 
-    await call("number", "set_value", f"number.boiler_{BOILER}_heating_temperature", value=62)
+    await call("number", "set_value", f"number.boiler_{BOILER}_heating_water_temperature", value=62)
     assert fake_hub.requests.pop() == f"f06@{BOILER} d2=3C"       # 62 is not allowed; below 65 it steps down to 60
 
     await call("water_heater", "set_temperature", f"water_heater.boiler_{BOILER}_hot_water", temperature=45)
@@ -267,6 +266,53 @@ async def test_no_mode_entities_for_a_hub_that_does_not_report_it(hass: HomeAssi
         assert hass.states.get(f"select.lynnai_hub_{HUB_ID.lower()}_operating_mode") is None
         await hass.config_entries.async_unload(e.entry_id)
         await hass.async_block_till_done()
+
+
+@pytest.fixture
+async def boiler_only(hass: HomeAssistant, fake_hub):
+    fake_hub.tokens.add(TOKEN)
+    fake_hub.seed(thermostat=False)
+    e = MockConfigEntry(
+        domain=DOMAIN, unique_id=HUB_ID, title="LYNNAI Hub",
+        data={"host": "127.0.0.1", "port": fake_hub.port, "token": TOKEN, "hub_id": HUB_ID},
+    )
+    e.add_to_hass(hass)
+    with patch("custom_components.lynnai_hub.discover", return_value={}):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await _settle(hass, lambda: hass.states.get("sensor.gas_meter_meter_reading") is not None)
+        yield e
+        await hass.config_entries.async_unload(e.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_floor_or_room_control_only_without_room_thermostats(hass: HomeAssistant, boiler_only, fake_hub):
+    s = hass.states
+    assert s.get(f"select.boiler_{BOILER}_heating_control").state == "ondol"
+    assert s.get(f"number.boiler_{BOILER}_heating_temperature").state == "65"
+    await hass.services.async_call("select", "select_option", {
+        "entity_id": f"select.boiler_{BOILER}_heating_control", "option": "room"}, blocking=True)
+    await _settle(hass, lambda: bool(fake_hub.requests))
+    assert fake_hub.requests.pop() == f"f06@{BOILER} b4=1"
+
+    # a room thermostat joins the hub: the boiler now only heats the water, so floor/room control goes away
+    await fake_hub.push(0x02, bytes([6]) + bytes.fromhex(BOILER) + bytes([9]) + bytes.fromhex(THERMO))
+    await fake_hub.push_state(9, THERMO, f09())
+    await _settle(hass, lambda: s.get(f"select.boiler_{BOILER}_heating_control") is None)
+
+
+
+async def test_boiler_mode_set_on_the_hub(hass: HomeAssistant, boiler_only, fake_hub):
+    s = hass.states
+    sel = f"select.boiler_{BOILER}_heating_control"
+    assert s.get(sel) is not None                                     # boiler alone, nothing set: floor/room
+    await fake_hub.push(0x0C, bytes([0, 1]))                          # set on the hub: heating water
+    await _settle(hass, lambda: s.get(sel) is None)
+    await fake_hub.push_state(6, BOILER, F06_ON[:7] + "1" + F06_ON[8:])   # the boiler says it runs in room mode
+    await _settle(hass, lambda: s.get(sel) is not None and s.get(sel).state == "room")
+    await fake_hub.push_state(6, BOILER, F06_ON)
+    await _settle(hass, lambda: s.get(sel) is None)
+    await fake_hub.push(0x0C, bytes([0, 2]))                          # floor/room
+    await _settle(hass, lambda: s.get(sel) is not None)
 
 
 async def test_preheat_time_left(hass: HomeAssistant, entry, fake_hub):

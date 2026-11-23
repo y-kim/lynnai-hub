@@ -1,0 +1,60 @@
+name: lynnai-boiler-water
+# optional: true 인 것은 허브 관리 화면에서 숨길 수 있다(드라이버가 try_update_metadata 로 켜고 끈다)
+# 화면 구성(vid): 글자 요약(boilerStatus, "온돌 70°C · 온수 60°C")은 팝업·기기 카드에만 쓰고 상세 화면에서는 뺐다.
+# 상세 화면은 표준 항목만: 구역마다 스위치 + 온도조절 모드 · 난방 온도 설정 · 온수 온도 설정(제목은 device-config patch).
+# 각방 온도 조절기가 붙은 보일러(난방수 모드)는 lynnai-boiler-water 를 쓴다 — 온도조절 모드가 없고 "난방수 온도 설정"으로
+# 나온다. 두 yml 은 name·vid·머리말만 다르다(같이 고칠 것). 드라이버가 try_update_metadata 로 고른다(core.lua wanted_caps).
+# 원본은 presentations/lynnai-boiler-water.device-config.json. 구역·capability 나 그 표시를 바꾸면
+# presentation:device-config:create 로 다시 만들고 vid 를 바꾼다.
+metadata:
+  mnmn: SmartThingsCommunity
+  vid: 1c9d2f9c-8521-3403-b510-ce6410bff410
+components:
+  - id: main
+    label: 전원
+    capabilities:
+      - id: connectbook02461.boilerStatus   # 글자 요약("온돌 70°C · 온수 60°C") — 팝업·기기 카드용
+        version: 1
+      - id: switch
+        version: 1
+        optional: true
+      - id: refresh
+        version: 1
+    categories:
+      - name: GasMeter
+  - id: heat
+    label: 난방
+    capabilities:
+      - id: switch                          # 난방 켜기/끄기(켜면 외출이 풀린다)
+        version: 1
+        optional: true
+      - id: thermostatMode                  # 난방 방식: ondol(온돌) / heat(실내)
+        version: 1
+        optional: true
+      - id: thermostatHeatingSetpoint
+        version: 1
+        optional: true
+  - id: outing
+    label: 외출
+    capabilities:
+      - id: switch                          # 외출(붙은 방 전부). 켜면 난방 스위치는 꺼짐으로 보인다
+        version: 1
+        optional: true
+  - id: hotwater
+    label: 온수
+    capabilities:
+      - id: switch
+        version: 1
+        optional: true
+      - id: thermostatWaterHeatingSetpoint  # 온수 온도 설정
+        version: 1
+        optional: true
+  - id: preheat
+    label: 온수 예열
+    capabilities:
+      - id: switch
+        version: 1
+        optional: true
+      - id: mode                            # 자동 끄기: 1~60분 / 무제한 (허브가 시간을 재고 끈다, CMD 0x0c)
+        version: 1
+        optional: true

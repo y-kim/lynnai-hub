@@ -51,6 +51,9 @@
       },
       "reservation_hours": {
         "name": "Reservation hours"
+      },
+      "heating_water_setpoint": {
+        "name": "Heating water temperature"
       }
     },
     "select": {

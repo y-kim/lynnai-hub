@@ -32,6 +32,8 @@ class HeatSetpoint(BoilerEntity, NumberEntity):
 
     def __init__(self, hass: HomeAssistant, hub, entry_id: str, mac: str) -> None:
         super().__init__(hass, hub, entry_id, mac, "heat_setpoint")
+        if hub.boiler_water_mode(mac):       # with room thermostats the boiler only heats the water (same id, other name)
+            self._attr_translation_key = "heating_water_setpoint"
 
     def _allowed(self) -> list[int]:
         state = self.state_or_none
