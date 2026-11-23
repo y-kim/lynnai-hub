@@ -48,6 +48,8 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
 - **SmartThings 기기**: 보일러(전원·난방 모드/방식/온도·온수·예열·예약 상태), 온도 조절기가 알려 주는 방마다
   기기(방1~방6·거실: 켜기·설정 온도·외출·예약), 온습도계, 가스 계량기. 보일러·온도 조절기 여러 대와 짝 지정 지원.
 - **자동화(드라이버 내장)**: 모든 방이 꺼지면 보일러 난방을 끄고, 방이 켜지면 다시 켠다.
+- **자동 단독 동작**: 프록시 모드에서 린나이 서버가 안 되면 그동안 허브가 기기를 직접 받아 스마트홈 제어가 끊기지
+  않는다. 서버가 돌아오면 스스로 프록시로 돌아간다([동작 모드](#동작-모드)).
 - **관리 화면** `http://<허브IP>/admin`: 동작 모드, 연결 방식(Zigbee/LAN), 연결된 기기(이름·보일러 연결·기기/방별 노출),
   종류별 노출 컨트롤, 서버 연동(API 토큰), 센서 플러그인.
 - **서버 연동**: `/api/v1/state`(JSON)·`/metrics`(Prometheus)·`/api/events`·`/api/stats`, NAS 기록기 `server/lynnai-hub-watch`.
@@ -78,11 +80,29 @@ SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 �
 ## 동작 모드
 
 - **프록시** (기본) — 기기 ↔ 허브 ↔ 린나이 클라우드를 이어 준다. 린나이 앱을 그대로 쓰면서 SmartThings 로도 제어.
-  클라우드 주소는 허브가 집 Wi-Fi 쪽 DNS 로 직접 조회한다.
+  클라우드 주소는 허브가 집 Wi-Fi 쪽 DNS 로 직접 조회하고, DNS 가 준 주소들을 그 TTL 동안만 쓴다.
 - **단독** — 클라우드에 붙지 않고 허브가 기기의 MQTT 상대가 된다. 인터넷이 없어도 SmartThings 로 제어되지만
   린나이 앱으로는 보이지 않는다.
 
-관리 화면 맨 위에서 고르고, 바꾸면 기기가 다시 접속할 때(수십 초) 적용된다.
+관리 화면의 동작 모드 카드나 스마트홈의 허브 기기(SmartThings "모드", Home Assistant "동작 모드")에서 고르고, 바꾸면
+기기가 다시 접속할 때(수십 초) 적용된다.
+
+### 린나이 서버가 안 될 때 (자동 단독 동작)
+
+프록시 모드는 서버가 있어야 기기가 붙는다. 그래서 서버 쪽이 **두 번 연달아 실패하면**(보통 1분 안) 허브가 그동안만
+단독 모드처럼 기기를 직접 받는다. 기본으로 켜져 있고 동작 모드 카드에서 끌 수 있다.
+
+- **무엇을 실패로 보나**: 서버가 기기의 로그인을 받아 주지 않는 모든 경우. 집 Wi-Fi 끊김, 서버 주소 조회 실패,
+  연결 안 됨, 보안 연결 실패뿐 아니라 연결은 되는데 로그인을 거절하거나 답이 없거나 바로 끊는 서버도 포함한다.
+- **그동안**: 스마트홈 제어는 계속되고, 린나이 앱에서는 기기가 오프라인으로 보인다(허브가 없어도 서버가 죽으면
+  오프라인이다).
+- **돌아가기**: 허브가 1분마다 서버에 보안 연결을 해 보고, 두 번 연달아 되면 기기를 다시 붙게 해서 프록시로 돌아간다.
+  돌아갔다가 또 실패하면 확인 간격을 10분까지 늘린다.
+- **어떻게 보이나**: "모드"는 **설정**이라 프록시 그대로다. 지금 실제 동작은 "상태"에 나온다 —
+  `단독 모드 (18:25부터 린나이 서버 연결 안 됨)`처럼 언제부터·왜인지까지. SmartThings 기기 목록에는 짧게
+  `임시 단독 모드`, 관리 화면에는 빨간 글씨로 나온다.
+
+자세한 까닭 목록과 예외는 [docs/esp32-hub.md](docs/esp32-hub.md)에 있다.
 
 ## 구성
 
@@ -128,7 +148,9 @@ SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 �
 **lynnai-hub** — a local hub for Rinnai‑protocol boiler controllers and room thermostats, bridged to SmartThings.
 A single ESP32‑C6 board becomes the "cloud" the appliances talk to: they join the hub's own Wi‑Fi AP, and the hub
 reads their state and injects commands. It either relays them to the real Rinnai cloud (proxy mode, the official app
-keeps working) or works on its own (standalone mode), and talks to SmartThings over Zigbee (or LAN).
+keeps working) or works on its own (standalone mode), and talks to SmartThings over Zigbee (or LAN). In proxy mode it
+falls back to serving the devices itself while the Rinnai server cannot be reached or does not accept the devices' login,
+and returns to proxy on its own.
 
 > ⚠️ Unofficial, reverse‑engineered project. Not affiliated with, endorsed by, or supported by Rinnai.
 > `lynnai` is a placeholder name to avoid trademark use. Use on hardware you own, at your own risk.
