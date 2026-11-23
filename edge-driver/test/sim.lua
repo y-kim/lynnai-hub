@@ -872,7 +872,7 @@ check(lastv("hub", "main", "roomStatus") == "단독 모드 (린나이 서버 접
 -- 까닭을 구체적으로: 연결 안 됨 / 보안 연결 실패 / 로그인 거절(코드) / 응답 없음 / 서버가 끊음 / 집 Wi-Fi
 local when = noon + 6 * 3600 + 25 * 60
 local whys = { "집 Wi-Fi 끊김", "린나이 서버 연결 안 됨", "린나이 서버 보안 연결 실패", "린나이 서버 로그인 거절(코드 5)",
-  "린나이 서버 로그인 응답 없음", "린나이 서버가 연결을 끊음" }
+  "린나이 서버 로그인 응답 없음", "린나이 서버가 연결을 끊음", "린나이 서버 주소 조회 실패" }
 local why_ok = true
 for w, text in ipairs(whys) do
   core.on_message(hub, MODE, mode_msg(0, 1, when, w, 5))

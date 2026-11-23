@@ -272,8 +272,8 @@ class HubMode:
 
 # Why the hub fell back, by the number it sends (hub_proxy.c FB_WHY_*): the home Wi-Fi is down, the server cannot be
 # connected to, the secure connection fails, the server refuses or does not answer the device's login, or it closes
-# the connection before accepting it.
-FALLBACK_REASONS = {1: "wifi", 2: "connect", 3: "tls", 4: "refused", 5: "noreply", 6: "closed"}
+# the connection before accepting it, or its address cannot be looked up.
+FALLBACK_REASONS = {1: "wifi", 2: "connect", 3: "tls", 4: "refused", 5: "noreply", 6: "closed", 7: "dns"}
 
 
 def decode_mode(payload: bytes) -> HubMode | None:

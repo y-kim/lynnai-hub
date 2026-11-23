@@ -54,8 +54,11 @@ extern const uint8_t cloud_ca_start[] asm("_binary_cloud_ca_crt_start");
 extern const uint8_t cloud_ca_end[]   asm("_binary_cloud_ca_crt_end");
 
 /* 린나이 클라우드. 이름·포트는 기기 펌웨어가 정한 값이라 고정, IP 만 집 Wi-Fi 쪽 DNS 로 조회(resolve_up) */
-#define DEF_UP_IP      "3.38.86.244"      /* 처음 쓰는 값. 이후엔 집 Wi-Fi 쪽 DNS 로 서버 이름을 조회해 갱신(resolve_up) */
-#define DNS_REFRESH_US (10LL * 60 * 1000000) /* 조회 결과 재사용 시간 */
+/* 서버 주소는 DNS 답만 따른다(resolve_up): 답에 든 주소들을 그 TTL 동안만 쓰고, TTL 이 지나면 다시 묻는다. 저장해 둔
+ * 주소나 내장 기본 주소는 없다 — DNS 가 답하지 않으면 서버 주소도 없는 것이다(자동 단독 동작의 까닭 "주소 조회 실패"). */
+#define UP_IPS_MAX     4                  /* 한 답에서 받아 두는 주소 수 */
+#define DNS_TTL_MIN_S  30                 /* TTL 이 이보다 짧아도 이만큼은 쓴다(연결마다 묻지 않게) */
+#define DNS_TTL_MAX_S  3600               /* TTL 이 아주 길어도 한 시간에 한 번은 다시 묻는다 */
 #define UP_HOST        "www.rkiot.net"
 #define MQTT_PORT      8883               /* 기기 → 허브, 허브 → 클라우드 모두 같은 포트(기기는 허브를 클라우드로 안다) */
 #define BOOT_PORT      80                 /* /key/server 도 마찬가지 */
@@ -67,11 +70,12 @@ static WOLFSSL_CTX *s_srv_ctx, *s_cli_ctx;
 static SemaphoreHandle_t s_ctx_mx;            /* s_srv_ctx 교체(인증서 바꿈)와 wolfSSL_new 사이 */
 static struct {
     char host[64];
-    char ip[16];
-} s_up = { UP_HOST, DEF_UP_IP };
+    char ips[UP_IPS_MAX][16];                 /* DNS 가 준 주소들. 연결에 실패한 주소는 맨 뒤로 돌린다 */
+    int nip;                                  /* 0 = 주소 없음(아직 못 물었거나 TTL 이 지났는데 답이 없음) */
+} s_up = { .host = UP_HOST };
 static size_t s_pem_len;                      /* 0 = 펌웨어 내장 인증서 사용 */
 static SemaphoreHandle_t s_dns_mx;
-static int64_t s_dns_at;                      /* 마지막 조회 성공 시각(0 = 아직) */
+static int64_t s_dns_exp;                     /* 지금 주소들을 쓸 수 있는 마지막 시각(esp_timer us). 0 = 주소 없음 */
 static char s_dns_from[16];                   /* 그때 물어본 DNS 서버 */
 static atomic_int s_links;
 
@@ -141,7 +145,8 @@ enum { FB_WHY_WIFI = 1,      /* 집 Wi-Fi 가 안 붙어 있음 */
        FB_WHY_TLS,           /* 연결은 되는데 보안 연결(TLS·인증서) 실패 */
        FB_WHY_REFUSED,       /* 서버가 기기의 로그인(MQTT CONNECT)을 거절 — s_fb_rc 에 거절 코드 */
        FB_WHY_NOREPLY,       /* 로그인에 답이 없음 */
-       FB_WHY_CLOSED };      /* 로그인을 받아 주기 전에 서버가 끊음 */
+       FB_WHY_CLOSED,        /* 로그인을 받아 주기 전에 서버가 끊음 */
+       FB_WHY_DNS };         /* 서버 주소를 못 알아냄(DNS 가 답하지 않음) */
 static volatile uint8_t s_fb_why, s_fb_rc;
 static atomic_int s_up_ok_links;              /* 서버가 로그인을 받아 준 채 이어져 있는 연결 수 */
 #define ACCEPT_WAIT_S   15                    /* 기기의 로그인을 넘긴 뒤 이만큼 답이 없으면 실패로 본다 */
@@ -194,13 +199,14 @@ static void fb_why_text(char *out, size_t cap)
     case FB_WHY_REFUSED: snprintf(out, cap, "린나이 서버 로그인 거절(코드 %d)", s_fb_rc); break;
     case FB_WHY_NOREPLY: strlcpy(out, "린나이 서버 로그인 응답 없음", cap); break;
     case FB_WHY_CLOSED:  strlcpy(out, "린나이 서버가 연결을 끊음", cap); break;
+    case FB_WHY_DNS:     strlcpy(out, "린나이 서버 주소 조회 실패", cap); break;
     default:             strlcpy(out, "린나이 서버 접속 불가", cap); break;
     }
 }
 
 const char *hub_proxy_fallback_why(void)
 {
-    static const char *const n[] = { "", "wifi", "connect", "tls", "refused", "noreply", "closed" };
+    static const char *const n[] = { "", "wifi", "connect", "tls", "refused", "noreply", "closed", "dns" };
     uint8_t w = s_fb_active ? s_fb_why : 0;
     return w < sizeof(n) / sizeof(n[0]) ? n[w] : "";
 }
@@ -227,8 +233,9 @@ static void fb_since_text(char *out, size_t cap)
  * 허브 자신의 리졸버를 쓰지 않는다: lwIP 의 DNS 서버는 전역이고 허브 AP 가 자기 자신을 DNS 로 내놓아서,
  * 이름으로 찾으면 허브 DNS(rkiot.net → 허브)가 답할 수 있다. 그래서 집 Wi-Fi(STA) 쪽 DNS 에 직접 UDP 로 묻는다. */
 
-/* server(네트워크 바이트 순서)에 host 의 A 레코드를 묻는다. 성공하면 out 에 "a.b.c.d" */
-static bool dns_query_a(uint32_t server, const char *host, char out[16])
+/* server(네트워크 바이트 순서)에 host 의 A 레코드를 묻는다. 돌려주는 값 = 받은 주소 수(out 에 답의 순서대로 "a.b.c.d",
+ * 최대 max 개). *ttl = 그 주소들의 TTL 중 가장 짧은 것(초). 답이 없거나 오류면 0. */
+static int dns_query_a(uint32_t server, const char *host, char out[][16], int max, uint32_t *ttl)
 {
     uint8_t q[300], r[512];
     uint16_t id = (uint16_t)esp_random();
@@ -242,7 +249,7 @@ static bool dns_query_a(uint32_t server, const char *host, char out[16])
         const char *dot = strchr(p, '.');
         int l = dot ? (int)(dot - p) : (int)strlen(p);
         if (l <= 0 || l > 63 || n + l + 6 > (int)sizeof(q)) {
-            return false;
+            return 0;
         }
         q[n++] = (uint8_t)l;
         memcpy(q + n, p, l);
@@ -255,7 +262,7 @@ static bool dns_query_a(uint32_t server, const char *host, char out[16])
 
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) {
-        return false;
+        return 0;
     }
     struct timeval tv = { .tv_sec = 2 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -266,11 +273,13 @@ static bool dns_query_a(uint32_t server, const char *host, char out[16])
     }
     close(s);
     if (got < 12 || ((r[0] << 8) | r[1]) != id || (r[3] & 0x0F) != 0) {
-        return false;                                /* 응답 없음 / 다른 응답 / 오류 코드 */
+        return 0;                                    /* 응답 없음 / 다른 응답 / 오류 코드 */
     }
     int an = (r[6] << 8) | r[7];
     int pos = n;                                     /* 질문 부분은 우리가 보낸 것과 같다 */
-    for (int i = 0; i < an && pos < got; i++) {
+    int found = 0;
+    *ttl = 0xFFFFFFFFu;
+    for (int i = 0; i < an && pos < got && found < max; i++) {
         if ((r[pos] & 0xC0) == 0xC0) {               /* 이름: 압축 포인터 */
             pos += 2;
         } else {
@@ -283,25 +292,28 @@ static bool dns_query_a(uint32_t server, const char *host, char out[16])
             break;
         }
         int type = (r[pos] << 8) | r[pos + 1], rdlen = (r[pos + 8] << 8) | r[pos + 9];
+        uint32_t t = ((uint32_t)r[pos + 4] << 24) | ((uint32_t)r[pos + 5] << 16) | ((uint32_t)r[pos + 6] << 8) | r[pos + 7];
         pos += 10;
         if (type == 1 && rdlen == 4 && pos + 4 <= got) {
-            snprintf(out, 16, "%u.%u.%u.%u", r[pos], r[pos + 1], r[pos + 2], r[pos + 3]);
-            return true;
+            snprintf(out[found++], 16, "%u.%u.%u.%u", r[pos], r[pos + 1], r[pos + 2], r[pos + 3]);
+            if (t < *ttl) {
+                *ttl = t;
+            }
         }
         pos += rdlen;                                /* CNAME 등은 건너뜀 */
     }
-    return false;
+    return found;
 }
 
-/* 클라우드 서버 이름을 집 Wi-Fi 쪽 DNS(DHCP 로 받은 DNS → 보조 → 공유기)로 조회해 s_up.ip 를 갱신.
- * 10분 안에 조회했으면 그대로. 실패하면 마지막으로 알던 IP(저장값)를 계속 쓴다. */
-static void resolve_up(bool force)
+/* 클라우드 서버 이름을 집 Wi-Fi 쪽 DNS(DHCP 로 받은 DNS → 보조 → 공유기)로 조회해 주소 목록을 채운다.
+ * 받아 둔 주소의 TTL 이 남아 있으면 그대로. TTL 이 지났는데 DNS 가 답하지 않으면 주소를 비운다(옛 주소를 계속 쓰지 않는다). */
+static void resolve_up(void)
 {
     if (!s_dns_mx) {
         return;
     }
     xSemaphoreTake(s_dns_mx, portMAX_DELAY);
-    if (!force && s_dns_at && esp_timer_get_time() - s_dns_at < DNS_REFRESH_US) {
+    if (s_up.nip && esp_timer_get_time() < s_dns_exp) {
         xSemaphoreGive(s_dns_mx);
         return;
     }
@@ -319,32 +331,82 @@ static void resolve_up(bool force)
     if (sta && esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.gw.addr) {
         cand[nc++] = ip.gw.addr;                     /* 공유기(대개 DNS 중계도 함) */
     }
-    char got[16];
-    bool ok = false;
-    for (int k = 0; k < nc && !ok; k++) {
-        ok = dns_query_a(cand[k], s_up.host, got);
-        if (ok) {
+    char got[UP_IPS_MAX][16];
+    uint32_t ttl = 0;
+    int n = 0;
+    for (int k = 0; k < nc && !n; k++) {
+        n = dns_query_a(cand[k], s_up.host, got, UP_IPS_MAX, &ttl);
+        if (n) {
             struct in_addr ia = { .s_addr = cand[k] };
             inet_ntoa_r(ia, s_dns_from, sizeof(s_dns_from));
         }
     }
-    if (ok) {
-        s_dns_at = esp_timer_get_time();
-        ESP_LOGI(TAG, "클라우드 주소 조회: %s = %s (집 DNS %s)", s_up.host, got, s_dns_from);
-        if (strcmp(got, s_up.ip)) {
-            ESP_LOGW(TAG, "클라우드 %s 주소: %s → %s (DNS %s)", s_up.host, s_up.ip, got, s_dns_from);
-            strlcpy(s_up.ip, got, sizeof(s_up.ip));
-            nvs_handle_t h;
-            if (nvs_open("proxy", NVS_READWRITE, &h) == ESP_OK) {   /* 다음 부팅에 DNS 가 안 돼도 쓰게 */
-                hs_set_str(h, "up_ip", got);
-                nvs_commit(h);
-                nvs_close(h);
-            }
-        }
+    if (n) {
+        uint32_t use = ttl < DNS_TTL_MIN_S ? DNS_TTL_MIN_S : ttl > DNS_TTL_MAX_S ? DNS_TTL_MAX_S : ttl;
+        memcpy(s_up.ips, got, sizeof(got));
+        s_up.nip = n;
+        s_dns_exp = esp_timer_get_time() + (int64_t)use * 1000000;
+        ESP_LOGI(TAG, "클라우드 주소 조회: %s = %s%s (주소 %d개, TTL %lu초 → %lu초 동안 씀, 집 DNS %s)", s_up.host, got[0],
+                 n > 1 ? " 외" : "", n, (unsigned long)ttl, (unsigned long)use, s_dns_from);
     } else {
-        ESP_LOGW(TAG, "클라우드 %s 조회 실패(DNS 후보 %d개) — 마지막 주소 %s 사용", s_up.host, nc, s_up.ip);
+        if (s_up.nip) {
+            ESP_LOGW(TAG, "클라우드 %s 조회 실패(DNS 후보 %d개) — 받아 둔 주소의 TTL 이 지나 주소를 비움", s_up.host, nc);
+        }
+        s_up.nip = 0;
+        s_dns_exp = 0;
     }
     xSemaphoreGive(s_dns_mx);
+}
+
+/* 상태 API 용: 지금 쓰는 서버 주소들과 남은 TTL — {"host":"…","ips":["a.b.c.d",…],"ttl_left":초,"dns":"물어본 DNS"} */
+void hub_proxy_up_json(char *out, size_t cap)
+{
+    int o = snprintf(out, cap, "{\"host\":\"%s\",\"ips\":[", s_up.host);
+    int64_t left = 0;
+    if (s_dns_mx) {
+        xSemaphoreTake(s_dns_mx, portMAX_DELAY);
+        for (int i = 0; i < s_up.nip && o < (int)cap; i++) {
+            o += snprintf(out + o, cap - o, "%s\"%s\"", i ? "," : "", s_up.ips[i]);
+        }
+        left = s_up.nip ? (s_dns_exp - esp_timer_get_time()) / 1000000 : 0;
+        xSemaphoreGive(s_dns_mx);
+    }
+    if (o < (int)cap) {
+        snprintf(out + o, cap - o, "],\"ttl_left\":%ld,\"dns\":\"%s\"}", (long)(left > 0 ? left : 0), s_dns_from);
+    }
+}
+
+static int tcp_connect(const char *ip, uint16_t port, int timeout_s);
+
+/* 클라우드 서버에 TCP 로 붙는다: DNS 가 준 주소를 앞에서부터 차례로. 실패한 주소는 맨 뒤로 돌려 다음 연결이 되는
+ * 주소부터 시작하게 한다(기기는 몇 초 넘게 기다려 주지 않는다). *no_addr = 주소가 없어서(DNS) 못 붙음. 실패 -1. */
+static int up_connect(uint16_t port, int timeout_s, bool *no_addr)
+{
+    resolve_up();
+    char ips[UP_IPS_MAX][16];
+    xSemaphoreTake(s_dns_mx, portMAX_DELAY);
+    int n = s_up.nip;
+    memcpy(ips, s_up.ips, sizeof(ips));
+    xSemaphoreGive(s_dns_mx);
+    if (no_addr) {
+        *no_addr = n == 0;
+    }
+    for (int i = 0; i < n; i++) {
+        int fd = tcp_connect(ips[i], port, timeout_s);
+        if (fd >= 0) {
+            return fd;
+        }
+        ESP_LOGW(TAG, "클라우드 %s:%d 연결 안 됨%s", ips[i], port, i + 1 < n ? " — 다음 주소로" : "");
+        xSemaphoreTake(s_dns_mx, portMAX_DELAY);
+        if (s_up.nip > 1 && !strcmp(s_up.ips[0], ips[i])) {      /* 아직 맨 앞이면(그새 다시 조회되지 않았으면) 뒤로 */
+            char t[16];
+            memcpy(t, s_up.ips[0], 16);
+            memmove(s_up.ips[0], s_up.ips[1], 16 * (s_up.nip - 1));
+            memcpy(s_up.ips[s_up.nip - 1], t, 16);
+        }
+        xSemaphoreGive(s_dns_mx);
+    }
+    return -1;
 }
 
 static void mode_load(void)
@@ -357,10 +419,7 @@ static void mode_load(void)
         hs_get_u8(h, "proxy", "fb", &fb);
         s_fb_on = fb ? 1 : 0;
         hs_erase(h, "boot");                         /* 예전 공용 부트스트랩 캐시(이제 기기별 bt########) */
-        size_t n = sizeof(s_up.ip);
-        if (hs_get_str(h, "proxy", "up_ip", s_up.ip, &n) != ESP_OK || !s_up.ip[0]) {
-            strlcpy(s_up.ip, DEF_UP_IP, sizeof(s_up.ip));
-        }
+        hs_erase(h, "up_ip");                        /* 예전에 저장해 두던 서버 주소(이제 DNS 답만 따른다) */
         nvs_close(h);
     }
     s_mode = m == HUB_MODE_STANDALONE ? HUB_MODE_STANDALONE : HUB_MODE_PROXY;
@@ -1124,16 +1183,14 @@ static bool fb_on_up_fail(uint8_t why, uint8_t rc)
 static void up_task(void *arg)
 {
     up_job_t *j = arg;
-    bool sta = sta_ready(j->quiet ? 1 : 15);
-    if (sta) {
-        resolve_up(false);                           /* 10분 지났으면 집 DNS 로 다시 조회 */
-    }
-    j->fd = s_test_block == 1 ? -1 : tcp_connect(s_up.ip, MQTT_PORT, j->quiet ? 5 : 10);
+    bool sta = sta_ready(j->quiet ? 1 : 15), no_addr = false;
+    j->fd = s_test_block == 1 || !sta ? -1 : up_connect(MQTT_PORT, j->quiet ? 5 : 10, &no_addr);
     j->ssl = j->fd >= 0 ? wolfSSL_new(s_cli_ctx) : NULL;
     if (!j->ssl) {
-        j->why = sta ? FB_WHY_CONNECT : FB_WHY_WIFI;
+        j->why = !sta ? FB_WHY_WIFI : no_addr ? FB_WHY_DNS : FB_WHY_CONNECT;
         if (!j->quiet) {
-            ESP_LOGW(TAG, "클라우드 연결 실패 (%s)", sta ? "인터넷·린나이 서버 확인" : "집 Wi-Fi 가 안 붙어 있음");
+            ESP_LOGW(TAG, "클라우드 연결 실패 (%s)", !sta ? "집 Wi-Fi 가 안 붙어 있음"
+                                                   : no_addr ? "서버 주소 조회(DNS) 실패" : "인터넷·린나이 서버 확인");
             hub_event(EV_LINK_CLOUD_TLS, NULL, j->dev, -2);
         }
     } else {
@@ -1482,7 +1539,7 @@ static void listen_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "기기 대기 :%d (%s 모드, 클라우드 %s = %s)", MQTT_PORT, s_mode ? "단독" : "프록시", s_up.host, s_up.ip);
+    ESP_LOGI(TAG, "기기 대기 :%d (%s 모드, 클라우드 %s)", MQTT_PORT, s_mode ? "단독" : "프록시", s_up.host);
     for (;;) {
         struct sockaddr_in from;
         socklen_t fl = sizeof(from);
@@ -1586,10 +1643,7 @@ static bool boot_cache_get(const char *key, char *out, size_t cap)
 static int boot_fetch(const char *svc, const char *mac, char *buf, int cap, char **body)
 {
     *body = NULL;
-    if (sta_ready(15)) {
-        resolve_up(false);
-    }
-    int s = tcp_connect(s_up.ip, BOOT_PORT, 8);
+    int s = sta_ready(15) ? up_connect(BOOT_PORT, 8, NULL) : -1;
     if (s < 0) {
         return -1;
     }

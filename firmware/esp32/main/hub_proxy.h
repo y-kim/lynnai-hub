@@ -24,7 +24,8 @@ uint8_t hub_proxy_mode(void);                    /* 정해 둔 모드 */
 bool hub_proxy_local(void);                      /* 지금 허브가 기기를 직접 받는가(단독 모드이거나 폴백 중) */
 bool hub_proxy_fallback(void);                   /* 프록시 모드인데 클라우드에 닿지 않아 단독처럼 동작 중 */
 bool hub_proxy_fallback_on(void);                /* 자동 폴백 설정 */
-const char *hub_proxy_fallback_why(void);        /* 폴백의 까닭: wifi·connect·tls·refused·noreply·closed, 폴백 중이 아니면 "" */
+void hub_proxy_up_json(char *out, size_t cap);   /* 지금 쓰는 린나이 서버 주소들(DNS 답)과 남은 TTL — 상태 API 용 JSON */
+const char *hub_proxy_fallback_why(void);        /* 폴백의 까닭: wifi·connect·tls·refused·noreply·closed·dns, 폴백 중이 아니면 "" */
 uint32_t hub_proxy_fallback_since(void);         /* 폴백이 시작된 시각(유닉스 초). 폴백 중이 아니거나 시각을 모르면 0 */
 void hub_proxy_send_mode(void);                  /* 스마트홈 쪽에 모드·폴백 상태를 알린다(HUB_RK_CMD_MODE) */
 void hub_proxy_request(const char *text, int len);   /* 스마트홈 쪽 요청: "mode=proxy|standalone", "fallback=0|1" */

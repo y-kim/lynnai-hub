@@ -103,7 +103,8 @@ _STATUS = {
            "fallback": "단독 모드 ({since}부터 {reason})", "fallback_unknown": "단독 모드 ({reason})",
            "reason": {None: "린나이 서버 접속 불가", "wifi": "집 Wi-Fi 끊김", "connect": "린나이 서버 연결 안 됨",
                       "tls": "린나이 서버 보안 연결 실패", "refused": "린나이 서버 로그인 거절(코드 {code})",
-                      "noreply": "린나이 서버 로그인 응답 없음", "closed": "린나이 서버가 연결을 끊음"}},
+                      "noreply": "린나이 서버 로그인 응답 없음", "closed": "린나이 서버가 연결을 끊음",
+                      "dns": "린나이 서버 주소 조회 실패"}},
     "en": {"proxy": "Proxy", "standalone": "Standalone",
            "fallback": "Standalone ({reason} since {since})", "fallback_unknown": "Standalone ({reason})",
            "reason": {None: "Rinnai server unreachable", "wifi": "home Wi-Fi down",
@@ -111,7 +112,8 @@ _STATUS = {
                       "tls": "secure connection to the Rinnai server fails",
                       "refused": "Rinnai server refuses the login (code {code})",
                       "noreply": "Rinnai server does not answer the login",
-                      "closed": "Rinnai server closes the connection"}},
+                      "closed": "Rinnai server closes the connection",
+                      "dns": "cannot look up the Rinnai server's address"}},
 }
 
 

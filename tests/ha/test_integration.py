@@ -223,10 +223,11 @@ async def test_hub_mode_can_be_seen_and_changed(hass: HomeAssistant, entry, fake
     for reason, text in ((1, "home Wi-Fi down"), (2, "cannot connect to the Rinnai server"),
                          (3, "secure connection to the Rinnai server fails"),
                          (4, "Rinnai server refuses the login (code 5)"),
-                         (5, "Rinnai server does not answer the login"), (6, "Rinnai server closes the connection")):
+                         (5, "Rinnai server does not answer the login"), (6, "Rinnai server closes the connection"),
+                         (7, "cannot look up the Rinnai server's address")):
         await fake_hub.push(0x0B, bytes([0, 1, 1]) + struct.pack("<I", since) + bytes([reason, 5]))
         await _settle(hass, lambda: hass.states.get(status).state == f"Standalone ({text} since 18:25)")
-    assert hass.states.get(status).attributes["reason"] == "closed"
+    assert hass.states.get(status).attributes["reason"] == "dns"
     await fake_hub.push(0x0B, bytes([0, 1, 1]) + struct.pack("<I", since) + bytes([4, 5]))
     await _settle(hass, lambda: hass.states.get(status).attributes.get("refusal_code") == 5)
     await fake_hub.push(0x0B, bytes([0, 0, 1, 0, 0, 0, 0]))
