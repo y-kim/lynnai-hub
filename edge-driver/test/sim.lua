@@ -504,6 +504,12 @@ core.capability_handlers["switch"]["off"](nil, driver._children["ba1b2c3"], { co
 local jh = table.concat(sent_cmds, " | ")
 check(jh:find("f06@a1b2c3 b1=0", 1, true) and not jh:find("b3=", 1, true), "난방 끄기 → b1=0 만(외출은 안 건드림)")
 
+print("[18b] 온수 설정은 보일러가 받는 값(35~47·50·55·60)으로만")
+sent_cmds = {}
+core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children["ba1b2c3"], { component = "hotwater", args = { setpoint = 52 } })
+local jw = table.concat(sent_cmds, " | ")
+check(jw:find("d1=32", 1, true) or jw:find("d1=37", 1, true), "52도 → 50 이나 55 로(" .. jw .. ")")
+
 print("[19] 표 값 이벤트(설정 범위)도 중복 억제")
 reset()
 links({ { 6, "a1b2c3" }, { 9, "c0ffee" } })

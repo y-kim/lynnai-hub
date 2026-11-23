@@ -43,13 +43,13 @@ PLUGIN_GAS = 2
 NO_HUMIDITY = -32768
 GAS_UNSET = 0xFFFFFFFF
 
-HEAT_MODE_ONDOL = "ondol"   # floor (water) temperature control, 35-85 C
+HEAT_MODE_ONDOL = "ondol"   # floor (water) temperature control, 40-85 C
 HEAT_MODE_ROOM = "room"     # room temperature control, 5-40 C
 
 # Temperatures the boiler accepts (the device ignores values in between).
-ONDOL_TEMPS = [35, 40, 45, *range(46, 61), 65, 70, 75, 80, 85]
+ONDOL_TEMPS = [40, 45, *range(46, 61), 65, 70, 75, 80, 85]   # 35 is not taken (bounces back to 40)
 ROOM_TEMPS = list(range(5, 41))
-HOT_WATER_TEMPS = [*range(35, 56), 60]
+HOT_WATER_TEMPS = [*range(35, 48), 50, 55, 60]   # the only values the boiler takes (others bounce back after ~20 s)
 ZONE_MIN_TEMP = 10
 ZONE_MAX_TEMP = 30
 

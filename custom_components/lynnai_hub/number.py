@@ -23,7 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
 
 
 class HeatSetpoint(BoilerEntity, NumberEntity):
-    """Heating water temperature (floor mode, 35-85) or room temperature (room mode, 5-40)."""
+    """Heating water temperature (floor mode, 40-85) or room temperature (room mode, 5-40)."""
 
     _attr_device_class = NumberDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS

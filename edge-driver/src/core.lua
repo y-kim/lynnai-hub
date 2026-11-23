@@ -46,15 +46,18 @@ local SWITCH_COMPONENT = { power = "main", hotwater = "hotwater", preheat = "pre
 -- 화면에는 '난방' 스위치와 '외출' 스위치로 나온다(둘 중 하나만 켜짐). 붙은 방이 없는 보일러는 외출 스위치를 내놓지 않는다
 -- (외출을 걸 방이 없다 — f06 b3 는 안 먹힘).
 local HEAT_MODES = { [0] = "온돌", [1] = "실내" }
-local ONDOL_TEMPS = { 35, 40, 45 }
+-- 온돌 설정: 보일러가 받는 값은 40, 45~60, 65~85(5도 단위). 35 는 받지 않는다(2026-11-23 실측 — 20초 뒤 40 으로 되돌아옴)
+local ONDOL_TEMPS = { 40, 45 }
 for t = 46, 60 do ONDOL_TEMPS[#ONDOL_TEMPS + 1] = t end
 for _, t in ipairs({ 65, 70, 75, 80, 85 }) do ONDOL_TEMPS[#ONDOL_TEMPS + 1] = t end
 local ROOM_TEMPS = {}
 for t = 5, 40 do ROOM_TEMPS[#ROOM_TEMPS + 1] = t end
+-- 온수 설정: 보일러가 받는 값은 35~47, 50, 55, 60 뿐(2026-11-23 실측 — 48·49·51~54 를 보내면 제어기가 20초쯤 그 값을
+-- 보여 주다 원래 값으로 되돌린다).
 local HW_TEMPS = {}
-for t = 35, 55 do HW_TEMPS[#HW_TEMPS + 1] = t end
-HW_TEMPS[#HW_TEMPS + 1] = 60
-local RANGE = { ["온돌"] = { 35, 85 }, ["실내"] = { 5, 40 } }
+for t = 35, 47 do HW_TEMPS[#HW_TEMPS + 1] = t end
+for _, t in ipairs({ 50, 55, 60 }) do HW_TEMPS[#HW_TEMPS + 1] = t end
+local RANGE = { ["온돌"] = { 40, 85 }, ["실내"] = { 5, 40 } }
 
 local status_cap = capabilities["connectbook02461.boilerStatus"]
 local room_cap = capabilities["connectbook02461.roomStatus"]

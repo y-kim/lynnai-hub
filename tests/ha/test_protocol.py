@@ -64,6 +64,8 @@ def test_snap_follows_direction():
     assert p.snap(62, p.ONDOL_TEMPS, 60) == 65      # going up from 60 skips to the next allowed value
     assert p.snap(62, p.ONDOL_TEMPS, 65) == 60      # going down
     assert p.snap(57, p.HOT_WATER_TEMPS) == 55      # no direction: nearest
+    assert p.snap(48, p.HOT_WATER_TEMPS, 47) == 50  # the boiler takes 35-47, 50, 55 and 60 only
+    assert p.snap(54, p.HOT_WATER_TEMPS, 55) == 50
 
 
 def test_requests_and_lines():
