@@ -504,6 +504,24 @@ core.capability_handlers["switch"]["off"](nil, driver._children["ba1b2c3"], { co
 local jh = table.concat(sent_cmds, " | ")
 check(jh:find("f06@a1b2c3 b1=0", 1, true) and not jh:find("b3=", 1, true), "난방 끄기 → b1=0 만(외출은 안 건드림)")
 
+-- 꺼진 방은 외출을 걸지 않고 세지도 않는다(꺼진 방에 b3=1 을 보내면 켜짐+외출이 되고, 풀면 켜진 채 남는다)
+state(9, "d4e5f6", f09_rooms(true, false, true))
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["ba1b2c3"], { component = "outing" })
+local jp = table.concat(sent_cmds, " | ")
+check(jp:find("a0=1,b3=1", 1, true) and jp:find("a0=7,b3=1", 1, true) and not jp:find("a0=2,", 1, true),
+  "외출 → 켜진 방(방1·거실)에만 b3=1, 꺼진 방2 는 그대로")
+local part = {}
+for i = 1, 108, 2 do part[#part + 1] = f09_rooms(true, false, true):sub(i, i + 1) end
+part[1] = "93"; part[43] = "93"                                 -- 방1·거실 켜짐+외출, 방2 꺼짐
+state(9, "d4e5f6", table.concat(part))
+check(lastv("ba1b2c3", "outing", "switch") == "on", "켜진 방이 모두 외출이면(꺼진 방이 있어도) 보일러 '외출' 켜짐")
+state(9, "d4e5f6", f09_rooms(false, false, false))
+check(lastv("ba1b2c3", "outing", "switch") == "off", "방이 모두 꺼져 있으면 외출 아님")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["ba1b2c3"], { component = "outing" })
+check(#sent_cmds == 0, "방이 모두 꺼져 있으면 외출 명령을 보내지 않음")
+state(9, "d4e5f6", f09_rooms(true, true, true))
 print("[18b] 온수 설정은 보일러가 받는 값(35~47·50·55·60)으로만")
 sent_cmds = {}
 core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children["ba1b2c3"], { component = "hotwater", args = { setpoint = 52 } })

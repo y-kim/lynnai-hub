@@ -41,7 +41,9 @@ local SWITCH = {
   preheat = { pos = 5, code = "b6" },
 }
 -- 외출은 보일러(f06 b3) 가 아니라 각방 조절기의 방마다(f09 a0=<방>,b3=1) — f06 b3 는 실측으로 안 먹힘.
--- 보일러의 '외출' = 그 보일러에 붙은 방이 모두 외출(update_outing), 외출 명령은 방마다 보낸다(outing_cmds).
+-- 보일러의 '외출' = 그 보일러에 붙은 방 가운데 켜진 방이 모두 외출(update_outing), 외출 명령은 방마다 보낸다(outing_cmds).
+-- 꺼진 방은 세지도, 외출을 걸지도 않는다: 꺼진 방에 b3=1 을 보내면 조절기가 그 방을 '켜짐+외출'로 바꾸고, 외출을 풀면
+-- 켜진 채 남아 난방이 돈다(2026-11-23 실측).
 local SWITCH_COMPONENT = { power = "main", hotwater = "hotwater", preheat = "preheat" }
 -- 화면에는 '난방' 스위치와 '외출' 스위치로 나온다(둘 중 하나만 켜짐). 붙은 방이 없는 보일러는 외출 스위치를 내놓지 않는다
 -- (외출을 걸 방이 없다 — f06 b3 는 안 먹힘).
@@ -209,8 +211,10 @@ local function outing_of(parent, kind, mac)
   local any, all = false, true
   for _, tmac in ipairs(thermos_of(parent, kind, mac)) do
     for _, z in pairs(hub_state(parent).thermos[tmac] or {}) do
-      any = true
-      if not z.outing then all = false end
+      if z.on or z.outing then                                          -- 꺼진 방은 세지 않는다
+        any = true
+        if not z.outing then all = false end
+      end
     end
   end
   return any and all
@@ -1014,12 +1018,12 @@ local function bstate(parent, kind, mac)
   return kind == "vboiler" and (s.vboilers or {})[mac] or s.boilers[mac]
 end
 
--- 이 보일러에 붙은 방들의 외출을 on 으로(이미 그 상태인 방은 빼고). 방마다 한 줄.
+-- 이 보일러에 붙은 방들의 외출을 on 으로(이미 그 상태인 방은 빼고). 방마다 한 줄. 외출을 걸 때 꺼진 방은 건드리지 않는다.
 local function outing_cmds(parent, kind, mac, on, list)
   for _, tmac in ipairs(thermos_of(parent, kind, mac)) do
     for _, id in ipairs(ZONE_ORDER) do
       local z = (hub_state(parent).thermos[tmac] or {})[id]
-      if z and z.outing ~= on then
+      if z and z.outing ~= on and (z.on or not on) then
         list[#list + 1] = string.format("f09@%s a0=%d,b3=%s", tmac, ZONES[id].a0, on and "1" or "0")
       end
     end
@@ -1041,7 +1045,7 @@ local function on_switch(on)
         else
           -- 외출 = 붙은 방마다 f09 a0,b3(방마다 따로 — 한 메시지가 길어지지 않게). 켜면 난방 스위치는 꺼짐으로 보인다
           outing_cmds(parent, kind, mac, on, list)
-          if on and #list == 0 then log.warn("외출을 걸 방이 없음(붙은 조절기 없음 또는 이미 모두 외출) — 보낸 명령 없음") end
+          if on and #list == 0 then log.warn("외출을 걸 방이 없음(붙은 조절기 없음, 켜진 방 없음 또는 이미 모두 외출) — 보낸 명령 없음") end
         end
         for _, c in ipairs(list) do send_text(parent, c) end
         return

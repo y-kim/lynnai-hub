@@ -125,9 +125,10 @@ class LynnaiHub:
         ]
 
     def boiler_away(self, boiler_mac: str) -> bool:
-        """A boiler counts as 'away' when every room attached to it is away."""
-        rooms = self.zones_of_boiler(boiler_mac)
-        return bool(rooms) and all(self.zones[t][z].away for t, z in rooms)
+        """A boiler counts as 'away' when every room that is switched on is away (rooms that are off do not count)."""
+        rooms = [self.zones[t][z] for t, z in self.zones_of_boiler(boiler_mac)]
+        rooms = [zone for zone in rooms if zone.on or zone.away]
+        return bool(rooms) and all(zone.away for zone in rooms)
 
     # ---- commands ----
 
@@ -163,10 +164,11 @@ class LynnaiHub:
         await self._send(self._away_requests(mac, on))
 
     def _away_requests(self, boiler_mac: str, on: bool) -> list[str]:
+        """Rooms that are off are left alone: 'away' would switch them on, and they would stay on (heating) afterwards."""
         return [
             p.zone_cmd(tmac, zone_id, f"b3={p.onoff(on)}")
             for tmac, zone_id in self.zones_of_boiler(boiler_mac)
-            if self.zones[tmac][zone_id].away != on
+            if self.zones[tmac][zone_id].away != on and (self.zones[tmac][zone_id].on or not on)
         ]
 
     async def set_boiler_heat_mode(self, mac: str, mode: str) -> None:

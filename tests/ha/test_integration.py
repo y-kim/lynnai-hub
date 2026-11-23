@@ -117,8 +117,8 @@ async def test_commands_reach_the_hub(hass: HomeAssistant, entry, fake_hub):
     await call("switch", "turn_off", f"switch.boiler_{BOILER}_heating")
     assert fake_hub.requests.pop() == f"f06@{BOILER} b1=0"
 
-    await call("switch", "turn_on", f"switch.boiler_{BOILER}_away")               # away is set room by room
-    assert sorted(fake_hub.requests) == [f"f09@{THERMO} a0={n},b3=1" for n in (1, 2, 7)]
+    await call("switch", "turn_on", f"switch.boiler_{BOILER}_away")               # away is set room by room,
+    assert sorted(fake_hub.requests) == [f"f09@{THERMO} a0={n},b3=1" for n in (1, 7)]   # leaving room 2 (off) alone
     fake_hub.requests.clear()
 
     await call("select", "select_option", f"select.boiler_{BOILER}_heating_control", option="room")
