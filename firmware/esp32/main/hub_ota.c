@@ -16,13 +16,37 @@
 #include "esp_timer.h"
 
 #include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_image_format.h"
 #include "hub_ota.h"
 #include "hub_bbox.h"
 #include "hub_sensors.h"
-#include "hub_radio.h"
 #include "hub_diag.h"
 
 static const char *TAG = "HUB_OTA";
+
+/* 이미지 표시: 이미지의 고정된 자리(앱 설명 바로 뒤)에 넣어, 올라온 파일이 LYNNAI 허브 펌웨어인지 확인한다.
+ * kind 는 늘 0 이다. v0.5 까지는 Zigbee 라디오를 UART 로 따로 붙이는 펌웨어(kind 1)가 따로 있었고, 그때의 펌웨어는
+ * 자기와 kind 가 같은 이미지만 적용하므로 이 자리와 값은 바꾸지 않는다(바꾸면 v0.5 에서 OTA 로 올라오지 못한다). */
+#define IMG_MAGIC   0x524E594Cu        /* "LYNR" */
+#define IMG_KIND    0
+typedef struct {
+    uint32_t magic;
+    uint8_t kind;
+    uint8_t rsv[3];
+} hub_img_desc_t;
+const __attribute__((section(".rodata_custom_desc"), used)) hub_img_desc_t hub_img_desc = { .magic = IMG_MAGIC, .kind = IMG_KIND };
+#define IMG_DESC_OFF (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
+
+/* 한 칸에 담긴 펌웨어의 종류: 0 = 이 펌웨어와 같은 종류, 1 = 옛 외부 라디오용(쓸 수 없음), -1 = 표시 없음(비었거나 남의 것) */
+static int image_kind(const esp_partition_t *p)
+{
+    hub_img_desc_t d;
+    if (!p || esp_partition_read(p, IMG_DESC_OFF, &d, sizeof(d)) != ESP_OK || d.magic != IMG_MAGIC) {
+        return -1;
+    }
+    return d.kind;
+}
 
 #define OTA_RX_CHUNK 4096
 
@@ -88,7 +112,7 @@ void hub_ota_boot_guard(void)
         /* 새 펌웨어가 TRIAL_MAX 번 떠도 확정하지 못했다 — 이전 칸으로 */
         const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
         ota_set("trial", 0);
-        if (other && hub_radio_partition_variant(other) == hub_radio_this_variant() &&
+        if (other && image_kind(other) == IMG_KIND &&
             esp_ota_set_boot_partition(other) == ESP_OK) {
             ota_set("rb", 1);
             ESP_LOGE(TAG, "새 펌웨어가 확정되지 못함 — 이전 펌웨어(%s)로 되돌리고 재시작", other->label);
@@ -175,31 +199,25 @@ int hub_ota_write_req(httpd_req_t *req, char *msg, size_t msglen, bool *do_reboo
         snprintf(msg, msglen, "이미지 검증 실패: %s", esp_err_to_name(e));
         return 0;
     }
-    int up = hub_radio_partition_variant(tgt);
-    int me = hub_radio_this_variant();
+    int up = image_kind(tgt);
     if (up < 0) {
         snprintf(msg, msglen, "LYNNAI 허브 펌웨어가 아닙니다(표시 없음) — 적용하지 않음");
         return 0;
     }
-    const char *mename = me ? "외부" : "내장";
-    const char *upname = up ? "외부" : "내장";
-    if (up == me) {
-        e = esp_ota_set_boot_partition(tgt);
-        if (e != ESP_OK) {
-            snprintf(msg, msglen, "부팅 칸 전환 실패: %s", esp_err_to_name(e));
-            return 0;
-        }
-        ota_set("rb", 0);
-        ota_set("trial", 1);            /* 새 펌웨어는 시험 부팅으로 시작 — 확정 못 하면 스스로 이 칸으로 돌아온다 */
-        ESP_LOGW(TAG, "OTA 적용: %s(%s 라디오용) %d바이트 → 재시작", tgt->label, upname, got);
-        snprintf(msg, msglen, "완료: %d바이트(%s 라디오용). 새 펌웨어로 재시작합니다 — 잠시 뒤 관리 화면을 새로고침하세요.",
-                 got, upname);
-        *do_reboot = true;
-        return 1;
+    if (up != IMG_KIND) {
+        snprintf(msg, msglen, "외부 라디오용 펌웨어(-app-rcp.bin)는 더 지원하지 않습니다 — 적용하지 않음. -app.bin 을 올리세요.");
+        return 0;
     }
-    ESP_LOGW(TAG, "OTA 스테이징: %s(%s 라디오용) %d바이트 — 부팅 전환 안 함", tgt->label, upname, got);
-    snprintf(msg, msglen, "완료: %d바이트. 반대(%s 라디오용) 칸을 갱신했습니다 — 지금 펌웨어(%s)는 그대로이고, 라디오를 바꾸면 적용됩니다.",
-             got, upname, mename);
+    e = esp_ota_set_boot_partition(tgt);
+    if (e != ESP_OK) {
+        snprintf(msg, msglen, "부팅 칸 전환 실패: %s", esp_err_to_name(e));
+        return 0;
+    }
+    ota_set("rb", 0);
+    ota_set("trial", 1);            /* 새 펌웨어는 시험 부팅으로 시작 — 확정 못 하면 스스로 이 칸으로 돌아온다 */
+    ESP_LOGW(TAG, "OTA 적용: %s %d바이트 → 재시작", tgt->label, got);
+    snprintf(msg, msglen, "완료: %d바이트. 새 펌웨어로 재시작합니다 — 잠시 뒤 관리 화면을 새로고침하세요.", got);
+    *do_reboot = true;
     return 1;
 }
 
@@ -221,8 +239,6 @@ void hub_ota_render(char *out, size_t cap)
 {
     const esp_partition_t *run = esp_ota_get_running_partition();
     const esp_partition_t *tgt = esp_ota_get_next_update_partition(NULL);
-    int me = hub_radio_this_variant();
-    int other = tgt ? hub_radio_partition_variant(tgt) : -1;
     char ln[360];
 
     strlcat(out, "<h2>시스템 · 펌웨어(OTA)</h2><div class=card>", cap);
@@ -234,10 +250,13 @@ void hub_ota_render(char *out, size_t cap)
     }
 
     const esp_app_desc_t *ad = esp_app_get_description();
-    snprintf(ln, sizeof(ln),
-             "<p class=muted>지금 펌웨어: <b>%s</b> (빌드 %s %s) · 칸 %s (%s 라디오용) · 반대 칸: %s</p>",
-             ad->version, ad->date, ad->time, run ? run->label : "?", me ? "외부" : "내장",
-             other == 0 ? "내장 라디오용" : other == 1 ? "외부 라디오용" : "비었음/모름");
+    esp_app_desc_t od;
+    char prev[48] = "없음";             /* 반대 칸 = 직전 펌웨어(새 펌웨어가 확정되지 못하면 돌아갈 곳) */
+    if (tgt && tgt != run && image_kind(tgt) == IMG_KIND && esp_ota_get_partition_description(tgt, &od) == ESP_OK) {
+        snprintf(prev, sizeof(prev), "%.32s", od.version);
+    }
+    snprintf(ln, sizeof(ln), "<p class=muted>지금 펌웨어: <b>%s</b> (빌드 %s %s) · 칸 %s · 이전 펌웨어: %s</p>",
+             ad->version, ad->date, ad->time, run ? run->label : "?", prev);
     strlcat(out, ln, cap);
 
     /* Zigbee 상태 한 줄 — 관리 화면에서도 보이게(선 없이 진단) */
@@ -269,9 +288,8 @@ void hub_ota_render(char *out, size_t cap)
             "<button name=op value=reboot class=ghost>재부팅 (Zigbee 재가입)</button></form>", cap);
 
     strlcat(out,
-            "<p class=muted>.bin 은 build_all.sh 가 만든 <code>build/lynnai_hub.bin</code>(내장용)·"
-            "<code>build_rcp/lynnai_hub.bin</code>(외부용). 같은 라디오용이면 새로 재시작하고(구버전은 되돌림용으로 남음), "
-            "반대 라디오용이면 그 칸만 갱신합니다.</p>", cap);
+            "<p class=muted>.bin 은 릴리즈의 <code>-app.bin</code>(직접 빌드했다면 <code>build/lynnai_hub.bin</code>). "
+            "올리면 새 펌웨어로 재시작하고, 이전 펌웨어는 되돌림용으로 남습니다.</p>", cap);
 
     strlcat(out,
             "<script>function otaUp(){var f=document.getElementById('otaf').files[0];"

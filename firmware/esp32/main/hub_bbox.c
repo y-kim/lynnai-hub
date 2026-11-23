@@ -27,7 +27,6 @@
 #include "hub_bbox.h"
 #include "esp_heap_caps.h"
 #include "hub_proxy.h"
-#include "hub_radio.h"
 #include "hub_zigbee.h"
 #include "hub_zb_rinnai.h"
 #include "hub_wifi.h"
@@ -146,7 +145,7 @@ static void put(bool zb, const char *p, int n)
 /* Zigbee 쪽 버퍼에 담을 줄인가. ESP 로그 한 줄은 "I (1234) TAG: 내용" 꼴이다. */
 static bool zb_line(const char *s)
 {
-    static const char *const TAGS[] = { "ZB:", "TEMPERATURE_SENSOR:", "HUB_BBOX:", "HUB_RADIO:", "HUB_OTA:", "HUB_CRYPT:" };
+    static const char *const TAGS[] = { "ZB:", "TEMPERATURE_SENSOR:", "HUB_BBOX:", "HUB_OTA:", "HUB_CRYPT:" };
     const char *t = strstr(s, ") ");
     if (!t || t - s > 14) {
         return false;
@@ -246,8 +245,8 @@ static volatile bool s_stack_up;        /* 스택이 라디오를 켰다(첫 신
 
 static bool radio_read(radio_t *r)
 {
-    /* 내장 라디오를 쓰는 펌웨어이고 스택이 라디오를 켠 뒤에만 레지스터를 읽는다 */
-    if (hub_radio_external() || !s_stack_up) {
+    /* 스택이 라디오를 켠 뒤에만 레지스터를 읽는다 */
+    if (!s_stack_up) {
         return false;
     }
     r->ack_to = IEEE802154.debug_rx_ack_timeout_cnt;

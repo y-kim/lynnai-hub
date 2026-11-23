@@ -1,2 +1,0 @@
-# 외부 Zigbee 라디오(UART 로 붙인 C6/H2)용 펌웨어 — 앱 영역 ota_1 에 넣는다. sdkconfig.defaults 위에 덧씌움
-CONFIG_ZB_RADIO_SPINEL_UART=y

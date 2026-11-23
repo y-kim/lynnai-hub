@@ -463,8 +463,8 @@ static uint32_t crc32b(uint32_t c, const void *d, size_t n)
     return ~c;
 }
 
-/* 저널·마커 자리 = 전용 영역 "cryptj"(파티션 표 맨 뒤, 128KB). 앱 영역 두 칸(ota_0·ota_1)은 내장 라디오용·외부 라디오용
- * 펌웨어가 하나씩 쓰므로(hub_radio) 거기엔 두지 않는다. 전용 영역이 없는 옛 파티션 표에서는 NULL —
+/* 저널·마커 자리 = 전용 영역 "cryptj"(파티션 표 맨 뒤, 128KB). 앱 영역 두 칸(ota_0·ota_1)은 지금 펌웨어와 직전 펌웨어가
+ * 하나씩 쓰므로(hub_ota) 거기엔 두지 않는다. 전용 영역이 없는 옛 파티션 표에서는 NULL —
  * 그러면 암호화 켜기는 "백업 실패"로 그만두고, 이미 암호화한 허브는 옛 자리(ota_1 끝)의 마커를 읽기만 한다. */
 #define J_PART_LABEL "cryptj"
 static const esp_partition_t *jpart(void)

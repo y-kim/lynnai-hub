@@ -33,7 +33,6 @@ ESP32-C6 보드 하나로 린나이 보일러 조절기·온도 조절기를 Sma
   - [A.1 Linux · macOS · WSL](#a1-linux--macos--wsl)
   - [A.2 Windows](#a2-windows)
   - [A.3 릴리즈 이미지 만들기](#a3-릴리즈-이미지-만들기)
-- [부록 B. 외부 Zigbee 라디오 (선택)](#부록-b-외부-zigbee-라디오-선택)
 
 ---
 ## 1. 준비물
@@ -72,6 +71,9 @@ ESP32-C6 보드 하나로 린나이 보일러 조절기·온도 조절기를 Sma
 | `lynnai-hub-esp32c6-<버전>-full.bin` | `0x0` | **처음 설치**. 부트로더·파티션 표·앱이 다 들어 있음. 허브 설정(Wi-Fi·관리자 암호 등)이 지워짐 |
 | `lynnai-hub-esp32c6-<버전>-app.bin` | `0x20000` | **업데이트**. 앱만 바꿈. 설정·Zigbee 가입·허브 인증서 유지 |
 
+업데이트는 USB 없이도 됩니다. 관리 화면의 **시스템 · 펌웨어(OTA)** 에서 `-app.bin` 을 올리면 허브가 새 펌웨어로
+재시작합니다. 새 펌웨어가 집 Wi-Fi 에 붙지 못하면 허브가 스스로 이전 펌웨어로 돌아갑니다.
+
 ### 2.1 USB 연결
 
 - 보드의 **UART 포트**를 PC 에 연결합니다.
@@ -86,16 +88,14 @@ ESP32-C6 보드 하나로 린나이 보일러 조절기·온도 조절기를 Sma
 ```sh
 pip install esptool                                   # 한 번
 python -m esptool --chip esp32c6 -p COM3 write_flash 0x0 lynnai-hub-esp32c6-<버전>-full.bin       # 처음 설치
-python -m esptool --chip esp32c6 -p COM3 write_flash 0x20000 lynnai-hub-esp32c6-<버전>-app.bin    # 업데이트
+python -m esptool --chip esp32c6 -p COM3 erase_region 0xf000 0x2000                               # 업데이트 ①
+python -m esptool --chip esp32c6 -p COM3 write_flash 0x20000 lynnai-hub-esp32c6-<버전>-app.bin    # 업데이트 ②
 ```
 
-외부 Zigbee 라디오([부록 B](#부록-b-외부-zigbee-라디오-선택))를 쓰는 허브는 업데이트할 때 두 번째 펌웨어도 같이 씁니다.
-이 구조가 들어오기 전의 펌웨어에서 올리는 허브는 파티션 표도 한 번 같이 씁니다(설정과 Zigbee 가입 정보는 유지됩니다).
-
-```sh
-python -m esptool --chip esp32c6 -p COM3 write_flash 0x8000 lynnai-hub-esp32c6-<버전>-partitions.bin \
-    0x20000 lynnai-hub-esp32c6-<버전>-app.bin 0x320000 lynnai-hub-esp32c6-<버전>-app-rcp.bin
-```
+업데이트 ①은 부팅 칸 기록을 지워 첫째 칸(`0x20000`)으로 부팅하게 합니다. 허브에는 앱 칸이 둘 있고 OTA 는 두 칸을
+번갈아 쓰므로, OTA 를 한 적이 있는 허브는 ①을 빼면 방금 쓴 펌웨어가 아니라 옛 펌웨어로 켜질 수 있습니다.
+파티션 표가 지금과 다른 옛 펌웨어에서 올리는 허브는 파티션 표(`0x8000`, `-partitions.bin`)도 한 번 같이 씁니다
+(설정과 Zigbee 가입 정보는 유지됩니다).
 
 포트(`COM3`)는 2.1 에서 찾은 이름으로 바꿉니다. 쓰기가 끝나면 보드가 저절로 다시 켜집니다.
 
@@ -104,6 +104,7 @@ python -m esptool --chip esp32c6 -p COM3 write_flash 0x8000 lynnai-hub-esp32c6-<
 1. Chrome 또는 Edge 에서 Espressif 의 웹 플래셔(<https://espressif.github.io/esptool-js/>)를 엽니다.
 2. **Connect** → 보드 포트를 고릅니다.
 3. Flash Address 에 `0x0`(처음 설치) 또는 `0x20000`(업데이트)을 넣고 해당 파일을 고른 뒤 **Program**.
+   OTA 를 한 적이 있는 허브의 업데이트는 관리 화면이나 2.2 의 방법으로 합니다(부팅 칸 때문).
 4. 끝나면 보드의 RESET 버튼을 누르거나 USB 를 뺐다 꽂습니다.
 
 처음 설치한 허브는 첫 부팅 때 기기 접속용 인증서를 만듭니다(몇 초). 그 뒤 [3장](#3-첫-설정)으로 갑니다.
@@ -259,18 +260,18 @@ LAN Edge 드라이버를 설치합니다. 새 드라이버는 **첫 설치도** 
 | 상태 글의 까닭 | 뜻 |
 |---|---|
 | 집 Wi-Fi 끊김 | 허브가 집 Wi-Fi 에 붙어 있지 않음 |
-| 린나이 서버 연결 안 됨 | 서버에 연결 자체가 안 됨(인터넷 끊김, 서버 죽음, 공유기에서 막힘) |
 | 린나이 서버 주소 조회 실패 | 서버 이름(`www.rkiot.net`)의 주소를 DNS 가 알려 주지 않음 |
+| 린나이 서버 연결 안 됨 | 서버에 연결 자체가 안 됨(인터넷 끊김, 서버 죽음, 공유기에서 막힘) |
 | 린나이 서버 보안 연결 실패 | 연결은 되는데 암호화·인증서 단계에서 실패 |
 | 린나이 서버 로그인 거절(코드 N) | 서버가 기기의 로그인을 거절(MQTT 거절 코드. 4 = 아이디·암호 틀림, 5 = 권한 없음) |
 | 린나이 서버 로그인 응답 없음 | 로그인을 보냈는데 15초 안에 답이 없음 |
 | 린나이 서버가 연결을 끊음 | 로그인을 받아 주기 전에 서버가 끊음 |
 
-기기 하나만 로그인이 안 되고 다른 기기는 서버에 붙어 있으면(예: 린나이 계정에서 그 기기만 지운 경우) 서버는 멀쩡한
 서버 주소는 DNS 답만 따릅니다. 답에 든 주소들을 그 TTL 동안만 쓰고(30초~1시간 사이), 지나면 다시 묻습니다. 주소가
 여럿이면 차례로 시도하고, 안 되는 주소는 뒤로 돌립니다. 저장해 둔 주소는 없어서 DNS 가 답하지 않으면 서버에 닿지 않는
 것으로 봅니다.
 
+기기 하나만 로그인이 안 되고 다른 기기는 서버에 붙어 있으면(예: 린나이 계정에서 그 기기만 지운 경우) 서버는 멀쩡한
 것이므로 자동 단독 동작으로 넘어가지 않습니다. 이때는 프록시 때 받아 둔 접속 정보를
 그대로 쓰므로 돌아갈 때 거절되는 시간이 없습니다. 이때도 "모드"는 정해 둔 대로 프록시이고, 지금 이 상태인지와 언제부터인지는
 관리 화면의 동작 모드 카드와 스마트홈 허브 기기의 "상태"에 표시됩니다. 원치 않으면 동작 모드 카드에서 끕니다(끄면 서버가 돌아올 때까지 기기가 붙지 못해 스마트홈에서도 제어되지
@@ -324,8 +325,7 @@ python3 tools/hub_doctor.py --serial /dev/ttyUSB0      # diag 를 받아 해석�
 다른 명령: `help`, `led`, `mode`(지금 동작 모드), `mode proxy` / `mode standalone`(동작 모드 바꾸기 — 관리 화면에
 들어갈 수 없을 때. USB 를 꽂을 수 있으면 관리자와 같은 권한으로 본다), `scan`(허브가 듣는 Wi-Fi AP 의 채널·신호 —
 무선이 약할 때 어느 AP 가 안 들리는지 본다), `devs`(등록된 기기와 허브 AP 에 붙은 단말), `devs add <MAC 12자리>`(등록),
-`devs unreg <MAC 끝 6자리>`(등록만 풀기 — SmartThings 의 기기는 지우지 않는다),
-`radio`(Zigbee 라디오 상태), `radio auto|native|ext`(라디오 고정 — 부록 B, 바꾸면 재시작), `radio test`(외부 라디오 배선 시험).
+`devs unreg <MAC 끝 6자리>`(등록만 풀기 — SmartThings 의 기기는 지우지 않는다).
 
 허브는 같은 이름의 AP 가 여럿(메시)이면 신호가 가장 센 것에 붙습니다. 라디오가 하나라, 부팅 직후에는 Zigbee 재가입이
 끝난 뒤(보통 1~2초, 길어도 13초 뒤)에 Wi-Fi(허브 AP 와 집 Wi-Fi 접속)를 켭니다. 약한 AP(-75dBm 아래)에 붙어 있으면
@@ -450,14 +450,12 @@ cd edge-driver/test && python3 run_sim.py                                # 하�
 # ESP-IDF v5.5.6 설치(한 번) — https://docs.espressif.com/projects/esp-idf/en/stable/esp32c6/get-started/
 . ~/esp/esp-idf/export.sh          # 터미널마다
 cd firmware/esp32
-./build_all.sh                      # 펌웨어 두 벌 빌드: build/(내장 라디오용), build_rcp/(외부 라디오용)
-./build_all.sh flash /dev/ttyUSB0   # 빌드하고 전부 굽기: 부트로더·파티션 표·두 펌웨어(설정·Zigbee 가입 정보 유지)
-idf.py -p /dev/ttyUSB0 app-flash    # 내장 라디오용 앱만 다시 굽기(외부 라디오를 안 쓰는 허브의 빠른 업데이트)
+./build_all.sh                      # 빌드(idf.py build 와 같음)
+./build_all.sh flash /dev/ttyUSB0   # 빌드하고 굽기: 부트로더·파티션 표·앱(설정·Zigbee 가입 정보 유지)
 idf.py -p /dev/ttyUSB0 monitor      # 로그(보드가 리셋됨, 끝내기 Ctrl+])
 ```
 
-두 펌웨어는 Zigbee 라디오 연결 방식만 다릅니다(같은 소스, `sdkconfig.defaults.rcp` 한 줄). `idf.py build` 만 하면
-내장 라디오용 하나만 만들어집니다.
+빌드한 `build/lynnai_hub.bin` 을 관리 화면의 **시스템 · 펌웨어(OTA)** 에 올려도 됩니다.
 
 - 처음 빌드에서 "wolfssl 매니지드 컴포넌트가 없습니다"가 나오면 `idf.py reconfigure` 를 한 번 더 하고 빌드합니다.
   wolfSSL 설정 원본은 `firmware/esp32/wolfssl/user_settings.h` 입니다.
@@ -479,8 +477,7 @@ WSL 없이 Windows 에서 바로 빌드하는 방법입니다.
    ```powershell
    cd C:\work\lynnai-hub\firmware\esp32
    idf.py build
-   idf.py -p COM3 flash          # 처음
-   idf.py -p COM3 app-flash      # 이후
+   idf.py -p COM3 flash          # 굽기(설정·Zigbee 가입 정보 유지)
    idf.py -p COM3 monitor        # 로그 보기(보드가 리셋됨, 끝내기 Ctrl+])
    ```
 
@@ -497,65 +494,9 @@ WSL 없이 Windows 에서 바로 빌드하는 방법입니다.
 ./build_all.sh release <버전>
 ```
 
-`-full.bin`(처음 설치용, 0x0), `-app.bin`(내장 라디오용, 0x20000), `-app-rcp.bin`(외부 라디오용, 0x320000),
-`-partitions.bin`(파티션 표, 0x8000)이 만들어집니다.
+`-full.bin`(처음 설치용, 0x0), `-app.bin`(업데이트·OTA 용, 0x20000), `-partitions.bin`(파티션 표, 0x8000)이 만들어집니다.
 
 버전은 `X.Y` 형식입니다. 첫 배포는 `0.0`, **패치는 0.1씩**(0.0 → 0.1 → 0.2 …), **기능 추가는 1씩**(0.x → 1.0) 올립니다.
 
 Edge 드라이버도 같은 버전으로 냅니다. `edge-driver/config.yml` 과 `edge-driver-lan/config.yml` 의 `description` 끝에
 같은 버전(예 `(v0.1)`)을 적고 공개 채널에 다시 올립니다.
-
-
-## 부록 B. 외부 Zigbee 라디오 (선택)
-
-ESP32-C6 는 라디오가 하나라 Wi-Fi 와 Zigbee 가 번갈아 씁니다. Wi-Fi 가 바쁘면 Zigbee 수신을 놓칠 수 있습니다.
-두 번째 보드(ESP32-C6 또는 ESP32-H2)를 **Zigbee 전용 라디오**로 붙이면 허브의 라디오는 Wi-Fi 만 맡습니다.
-
-- 허브에는 펌웨어가 두 벌 들어 있습니다(내장 라디오용, 외부 라디오용). **부팅할 때 외부 라디오가 답하는지 보고**
-  맞는 펌웨어로 넘어갑니다. 라디오 보드를 붙이거나 뗀 뒤 처음 켤 때만 한 번 더 재시작합니다.
-- 설정, 등록한 기기, Zigbee 가입 정보는 두 펌웨어가 같이 씁니다. Zigbee 주소(EUI)는 허브 보드 것으로 고정하므로
-  라디오를 붙였다 떼도 SmartThings 에는 같은 기기로 남습니다.
-- 외부 라디오가 없으면 지금까지와 똑같이 내장 라디오로 동작합니다(부팅이 0.75초 늦어집니다).
-
-**배선** (허브 보드 ↔ 라디오 보드)
-
-| 허브 보드 | 라디오 보드 | 비고 |
-|---|---|---|
-| GPIO2 (TX) | GPIO3 (RX) | 엇갈려 잇습니다 |
-| GPIO3 (RX) | GPIO2 (TX) | |
-| GND | GND | 반드시 연결(신호 기준) |
-| 5V | 5V | 반드시 연결 — **USB 는 허브 보드에만** 꽂고, 라디오 보드는 이 핀으로 전원을 받습니다 |
-
-속도는 460800bps 입니다. 네 가닥(GPIO2·3·GND·5V)을 잇고 **USB 는 허브 보드 하나에만** 꽂으면 됩니다(라디오 보드는
-5V 로 전원을 받습니다). 두 보드의 안테나는 10cm 이상 떨어뜨리세요. GPIO2·3 은 이 용도로 비워 두므로 센서 플러그인에
-쓸 수 없습니다.
-
-> 개발 중 라디오 보드의 로그를 따로 보려면 라디오 보드에도 USB 를 꽂을 수 있습니다. 정품 ESP32-C6-DevKitC-1 은 5V 를
-> 이은 채 두 USB 를 꽂아도 역류 방지 다이오드가 있어 괜찮지만, 호환 보드는 5V 선을 먼저 빼세요.
-
-**라디오 보드 펌웨어**: ESP-IDF 의 `examples/openthread/ot_rcp` 를 라디오 보드의 칩에 맞춰 빌드해 씁니다.
-`sdkconfig.defaults` 에 아래 네 줄을 더합니다.
-
-```
-CONFIG_OPENTHREAD_RCP_UART=y
-CONFIG_OPENTHREAD_UART_PIN_MANUAL=y
-CONFIG_OPENTHREAD_UART_RX_PIN=3
-CONFIG_OPENTHREAD_UART_TX_PIN=2
-```
-
-**확인**: USB 진단 `diag` 의 `radio` 줄에 지금 펌웨어(`fw=native`/`external`), 외부 라디오 유무(`ext_present`),
-다른 칸의 펌웨어 종류(`other`), 고정 설정(`force`)이 나옵니다.
-
-**라디오 고정(시험용)**: USB 명령 `radio native` / `radio ext` 는 탐지 결과와 상관없이 한쪽 라디오만 쓰게 하고
-재시작합니다. `radio auto` 로 풉니다. 선을 건드리지 않고 두 구성을 번갈아 비교할 때 씁니다. `ext` 로 고정했는데
-외부 라디오가 답하지 않으면 내장 라디오로 돌아가지 않고 Zigbee 를 쓰지 않습니다.
-
-**배선 시험**: 허브가 라디오를 못 찾으면 USB 명령 `radio test`(약 9초)를 실행하고, 그동안 라디오 보드의 리셋 버튼을
-한 번 누릅니다. 허브는 듣기만 하면서 어느 핀에 라디오 신호가 들어오는지 보고, 어느 선이 문제인지 알려 줍니다
-(선이 엇갈리지 않았는지, 허브→라디오 선이 빠졌는지, 아무 신호도 없는지).
-
-> 시험 범위(ESP32-C6-DevKitC-1 두 대, 2026-11-20): 라디오 보드 탐지 → 외부 라디오용 펌웨어로 전환 → 같은 가입 정보·같은
-> Zigbee 주소로 재참가 → SmartThings 명령·보고 왕복까지 실제 보드에서 확인했습니다. 부팅 재참가는 내장·외부 모두 20/20
-> 성공했습니다(중앙값 1.6~1.7초). Wi-Fi 보류 완화가 이미 내장 라디오의 부팅 재참가를 안정시켜, 조용한 환경의 부팅만으로는
-> 차이가 작습니다. 외부 라디오의 이점은 **프록시 모드처럼 Wi-Fi 가 계속 바쁠 때 Zigbee 수신을 놓치지 않는 것**이며, 그
-> 부하 상태의 장기 비교는 더 지켜봐야 합니다.

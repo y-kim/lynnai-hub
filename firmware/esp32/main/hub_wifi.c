@@ -293,9 +293,6 @@ esp_err_t hub_wifi_apply(const hub_state_t *st)
 
 void hub_wifi_radio_pause(void)
 {
-#if CONFIG_ZB_RADIO_SPINEL_UART
-    return;                                          /* 외부 라디오: Zigbee 가 Wi-Fi 와 라디오를 나눠 쓰지 않는다 */
-#endif
     if (s_radio_paused) {
         return;
     }

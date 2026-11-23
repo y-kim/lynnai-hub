@@ -24,7 +24,7 @@ void hub_bbox_init(void);            /* app_main 맨 앞: 로그 담기 시작(N
 void hub_bbox_start(void);           /* NVS 를 연 뒤: 부팅 이력에 이번 부팅을 올리고 프레임 카운터 감시 시작 */
 
 void hub_bbox_note(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   /* 기록에만 남기는 한 줄(콘솔 X) */
-void hub_bbox_radio(const char *when);        /* 무선 카운터가 지난번 이후 얼마나 늘었나 한 줄(내장 라디오만) */
+void hub_bbox_radio(const char *when);        /* 무선 카운터가 지난번 이후 얼마나 늘었나 한 줄 */
 
 void hub_bbox_zb_boot(uint32_t fc);           /* 스택이 뜸: 저장돼 있던 프레임 카운터 */
 void hub_bbox_zb_fail(uint8_t status);        /* 가입/재가입 실패 */

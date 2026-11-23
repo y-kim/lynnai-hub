@@ -20,7 +20,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "hub_radio.h"
 
 bool hub_main_chip_temp(int ch, int16_t *c100);   /* 허브 칩 온도(1/100°C). 못 쟀거나 그 통로(EXPOSE_CH_*)의 노출 설정에서 껐으면 false */
 
@@ -54,7 +53,6 @@ bool hub_main_chip_temp(int ch, int16_t *c100);   /* 허브 칩 온도(1/100°C)
     }
 #endif
 
-#if CONFIG_ZB_RADIO_NATIVE
 #define ESP_ZIGBEE_PLATFORM_CONFIG()                                 \
     {                                                                \
         .storage_partition_name = ESP_ZIGBEE_STORAGE_PARTITION_NAME, \
@@ -62,29 +60,6 @@ bool hub_main_chip_temp(int ch, int16_t *c100);   /* 허브 칩 온도(1/100°C)
             .radio_mode = ESP_ZIGBEE_RADIO_MODE_NATIVE,              \
         },                                                           \
     }
-#else
-/* 라디오 칩(RCP: ESP32-C6·H2 에 ot_rcp)을 UART 로 붙인 구성. 핀·속도는 hub_radio.h */
-#define ESP_ZIGBEE_PLATFORM_CONFIG()                                 \
-    {                                                                \
-        .storage_partition_name = ESP_ZIGBEE_STORAGE_PARTITION_NAME, \
-        .radio_config = {                                            \
-            .radio_mode = ESP_ZIGBEE_RADIO_MODE_UART_RCP,            \
-            .radio_uart_config = {                                   \
-                .port = HUB_RCP_UART_PORT,                           \
-                .uart_config = {                                     \
-                    .baud_rate = HUB_RCP_UART_BAUD,                  \
-                    .data_bits = UART_DATA_8_BITS,                   \
-                    .parity = UART_PARITY_DISABLE,                   \
-                    .stop_bits = UART_STOP_BITS_1,                   \
-                    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,           \
-                    .source_clk = UART_SCLK_DEFAULT,                 \
-                },                                                   \
-                .rx_pin = HUB_RCP_UART_RX,                           \
-                .tx_pin = HUB_RCP_UART_TX,                           \
-            },                                                       \
-        },                                                           \
-    }
-#endif
 
 #define ESP_ZIGBEE_DEFAULT_CONFIG()                      \
     {                                                    \
