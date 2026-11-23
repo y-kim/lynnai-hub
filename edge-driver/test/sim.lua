@@ -528,6 +528,35 @@ core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"]
 local jw = table.concat(sent_cmds, " | ")
 check(jw:find("d1=32", 1, true) or jw:find("d1=37", 1, true), "52도 → 50 이나 55 로(" .. jw .. ")")
 
+print("[18d] 온수 예열 자동 끄기: 허브가 알려 주면 온수 예열 구역에 '자동 끄기' 목록, 고르면 hub preoff=<분>")
+reset()
+links({ { 6, "a1b2c3" } })
+state(6, "a1b2c3", F06)
+local pb = driver._children["ba1b2c3"]
+check(not (pb._caps.preheat and pb._caps.preheat["mode"]), "옛 펌웨어(설정을 안 알려 줌): 자동 끄기 칸 없음")
+msg(0x0c, string.char(0))
+check(pb._caps.preheat and pb._caps.preheat["mode"], "허브가 설정을 알려 주면 자동 끄기 칸이 생김")
+state(6, "a1b2c3", F06)
+check(lastv("ba1b2c3", "preheat", "mode") == "무제한", "0 = 무제한")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, pb, { component = "preheat", args = { mode = "30분" } })
+check(last_cmd_has("hub preoff=30"), "30분을 고르면 hub preoff=30")
+msg(0x0c, string.char(30))
+check(lastv("ba1b2c3", "preheat", "mode") == "30분", "허브가 30 을 알려 주면 30분으로 보임")
+check(hub._fields["preoff"] == 30, "값을 기억(재시작 대비)")
+msg(0x0c, string.char(30, 0, 14))
+check(lastv("ba1b2c3", "preheat", "mode") == "14분", "예열이 켜져 있으면 허브가 알려 준 남은 분(14분)")
+msg(0x0c, string.char(30, 0, 255))
+check(lastv("ba1b2c3", "preheat", "mode") == "무제한", "켜짐·무제한(255) → 무제한")
+msg(0x0c, string.char(30, 0, 0))
+check(lastv("ba1b2c3", "preheat", "mode") == "30분", "예열이 꺼지면 기본값(30분)")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, pb, { component = "preheat", args = { mode = "7분" } })
+check(last_cmd_has("hub preoff=7"), "1~60분 아무 값이나: 7분 → hub preoff=7")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, hub, { component = "main", args = { mode = "단독" } })
+check(last_cmd_has("hub mode=standalone"), "허브 기기의 모드 목록은 그대로 동작 모드")
+
 print("[19] 표 값 이벤트(설정 범위)도 중복 억제")
 reset()
 links({ { 6, "a1b2c3" }, { 9, "c0ffee" } })

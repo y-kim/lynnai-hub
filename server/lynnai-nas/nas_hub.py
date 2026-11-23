@@ -114,7 +114,8 @@ def main():
         reg.pairing_open(hub_devices.PAIR_SEC)
         log("[dev] DEVICE_PAIR 켜짐 — 등록이 끝나면 .env 에서 지울 것(켜 두면 재시작마다 600초 열림)")
 
-    core = HubCore(log=lambda *a: log(*a), standalone=hub_proxy.FB.local)   # 폴백 중에도 클라우드 노릇을 하게 함수로
+    core = HubCore(log=lambda *a: log(*a), standalone=hub_proxy.FB.local,   # 폴백 중에도 클라우드 노릇을 하게 함수로
+                   data_dir=DATA)                                           # 온수 예열 자동 끄기 설정(boiler.json)
     send_mode = lambda: core.emit(0x0B, hub_proxy.mode_payload())           # HUB_RK_CMD_MODE
     hub_proxy.ON_MODE = send_mode                                           # 폴백에 들어가거나 나올 때
     core.on_resend = send_mode                                              # 스마트홈이 붙거나 새로고침할 때

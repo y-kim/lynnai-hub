@@ -31,6 +31,8 @@ class LynnaiHub:
         self.plugins = p.PluginState()
         self.chip_temp: float | None = None                     # the hub's own temperature, when it sends one
         self.mode: p.HubMode | None = None                      # None until the hub told us (older firmware never does)
+        self.preheat_off: int | None = None                     # preheat auto-off minutes (0 = never), one for the hub
+        self.preheat_left: int | None = None                    # 0 preheat off, 1-60 minutes left, 255 on without limit
         self._on_update: Callable[[], None] = lambda: None
         self._on_new: Callable[[], None] = lambda: None
 
@@ -84,6 +86,13 @@ class LynnaiHub:
         elif cmd == p.CMD_MODE:
             new = self.mode is None
             self.mode = p.decode_mode(payload) or self.mode
+        elif cmd == p.CMD_BOILCFG:
+            minutes = p.decode_boilcfg(payload)
+            if minutes is None:
+                return
+            new = self.preheat_off is None
+            self.preheat_off = minutes
+            self.preheat_left = p.decode_preheat_left(payload)
         elif cmd == p.CMD_ALIVE:
             temp = p.decode_alive(payload)
             if temp is None or temp == self.chip_temp:
@@ -146,6 +155,9 @@ class LynnaiHub:
 
     async def set_auto_fallback(self, on: bool) -> None:
         await self._send([p.hub_fallback_cmd(on)])
+
+    async def set_preheat_off(self, minutes: int) -> None:
+        await self._send([p.hub_preheat_off_cmd(minutes)])
 
     async def set_boiler_switch(self, mac: str, name: str, on: bool) -> None:
         _pos, code = p.BOILER_SWITCHES[name]

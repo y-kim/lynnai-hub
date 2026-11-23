@@ -111,6 +111,8 @@ static const char *src_name(uint8_t s)
     case HUB_TR_SRC_PLATFORM: return "smartthings";
     case HUB_TR_SRC_POLL:     return "hub_poll";
     case HUB_TR_SRC_TIME:     return "hub_time";
+    case HUB_TR_SRC_RETRY:    return "hub_retry";
+    case HUB_TR_SRC_AUTO:     return "hub_auto";
     default:                  return "?";
     }
 }

@@ -17,6 +17,7 @@ local CMD_STATE, CMD_LINKS, CMD_ROOM, CMD_GAS, CMD_PLUGINS, CMD_EXPOSE, CMD_PAIR
 local CMD_FORGET = 0x08
 local CMD_TARIFF = 0x09
 local CMD_MODE = 0x0b
+local CMD_BOILCFG = 0x0c   -- 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)]. 바꾸기는 "hub preoff=<분>"
 local CMD_ALIVE = 0x0a
 local KIND_F06, KIND_F09 = 6, 9
 
@@ -218,6 +219,20 @@ local function outing_of(parent, kind, mac)
     end
   end
   return any and all
+end
+
+-- 온수 예열 자동 끄기(허브가 시간을 재고 끈다). 화면은 온수 예열 구역의 표준 mode 목록 "자동 끄기".
+-- 허브가 이 설정을 알려 준 적이 있을 때만 칸을 내놓는다(옛 펌웨어에서는 안 보임). 값은 허브 기기 필드에 기억(재시작 대비).
+-- 목록은 1~60분과 무제한. 예열이 꺼져 있으면 다음에 켜질 때의 기본값을 보이고(고르면 기본값이 바뀜), 켜져 있으면 허브가
+-- 1분마다 알려 주는 남은 분을 보인다(고르면 이번 예열을 지금부터 그만큼 — 사용자 결정 2026-11-23). 정하는 것은 허브가 한다.
+local PREOFF_CHOICES = {}
+for v = 1, 60 do PREOFF_CHOICES[#PREOFF_CHOICES + 1] = v end
+PREOFF_CHOICES[#PREOFF_CHOICES + 1] = 0
+local function preoff_label(m) return (m == 0 or m == 255) and "무제한" or (m .. "분") end
+local function preoff_of(parent)
+  local s = hub_state(parent)
+  if s.preoff == nil then s.preoff = parent:get_field("preoff") end
+  return s.preoff
 end
 
 local function update_outing(parent)
@@ -454,6 +469,15 @@ local function refresh_boiler(parent, mac)
   if m.heat_temp then emit(child, "heat", setpoint(m.heat_temp)) end
   emit(child, "hotwater", hw_cap.heatingSetpointRange({ value = { minimum = 35, maximum = 60, step = 1 }, unit = "C" }))
   if m.hw_set then emit(child, "hotwater", hw_cap.heatingSetpoint({ value = m.hw_set, unit = "C" })) end
+  local preoff = preoff_of(parent)
+  if preoff ~= nil and child:supports_capability_by_id("mode", "preheat") then
+    local list = {}
+    for _, v in ipairs(PREOFF_CHOICES) do list[#list + 1] = preoff_label(v) end
+    emit(child, "preheat", capabilities.mode.supportedModes(list, { visibility = { displayed = false } }))
+    emit(child, "preheat", capabilities.mode.supportedArguments(list, { visibility = { displayed = false } }))
+    local left = hub_state(parent).preleft                          -- 예열이 켜져 있으면 남은 분(255 = 무제한)
+    emit(child, "preheat", capabilities.mode.mode(preoff_label((left and left > 0) and left or preoff)))
+  end
   emit_text(child, main_text(m))
 end
 
@@ -557,7 +581,8 @@ local function wanted_caps(parent, key)
       -- 외출 스위치는 외출을 걸 방이 붙어 있을 때만
       { "outing", #thermos_of(parent, kind, mac) > 0 and { { BIT.heat_mode, "switch" } } or {} },
       { "hotwater", { { BIT.hw, "switch" }, { BIT.hw_temp, "thermostatWaterHeatingSetpoint" } } },
-      { "preheat", { { BIT.preheat, "switch" } } },
+      { "preheat", (kind == "boiler" and preoff_of(parent) ~= nil)
+        and { { BIT.preheat, "switch" }, { BIT.preheat, "mode" } } or { { BIT.preheat, "switch" } } },
     }
     local out = {}
     for _, c in ipairs(comps) do
@@ -1277,9 +1302,33 @@ local function on_mode(parent, b)
   parent:emit_component_event(main, room_cap.roomStatus(long))
 end
 
+local function on_boilcfg(parent, b)
+  if #b < 1 then return end
+  local m = b:byte(1)
+  local s = hub_state(parent)
+  local first = preoff_of(parent) == nil
+  s.preoff = m
+  if parent:get_field("preoff") ~= m then parent:set_field("preoff", m, { persist = true }) end
+  s.preleft = #b >= 3 and b:byte(3) or nil                           -- 지금: 0 꺼짐, 1~60 남은 분, 255 켜짐·무제한
+  for bmac in pairs(s.boilers) do
+    if first then
+      local child = parent:get_child_by_parent_assigned_key(bkey(bmac))
+      if child then apply_caps(parent, child) end                    -- 처음 알게 됨: 칸을 내놓는다
+    end
+    refresh_boiler(parent, bmac)
+  end
+end
+
 local function set_hub_mode(_, device, cmd)
   local parent = parent_of(device)
   local want = cmd.args.mode
+  if is_child(device) then                                           -- 보일러의 온수 예열 → 자동 끄기
+    for _, v in ipairs(PREOFF_CHOICES) do
+      if preoff_label(v) == want then return send_text(parent, "hub preoff=" .. v) end
+    end
+    log.warn("모르는 자동 끄기 값: " .. tostring(want))
+    return
+  end
   if want == MODE_PROXY then
     send_text(parent, "hub mode=proxy")
   elseif want == MODE_STANDALONE then
@@ -1306,7 +1355,7 @@ end
 
 local HANDLERS = { [CMD_ALIVE] = on_alive, [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
   [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
-  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode }
+  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode, [CMD_BOILCFG] = on_boilcfg }
 
 function M.info_changed(_, device)
   if not is_child(device) then return end

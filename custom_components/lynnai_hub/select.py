@@ -1,4 +1,4 @@
-"""Selects: how the boiler regulates heating, and the hub's operating mode."""
+"""Selects: how the boiler regulates heating, hot water preheat auto-off, and the hub's operating mode."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
 
     def make():
         out: list = [HeatMode(hass, hub, entry.entry_id, mac) for mac in hub.boilers]
+        if hub.preheat_off is not None:
+            out += [PreheatOff(hass, hub, entry.entry_id, mac) for mac in hub.boilers]
         if hub.mode is not None:
             out.append(HubModeSelect(hub, entry.entry_id))
         return out
@@ -36,6 +38,30 @@ class HeatMode(BoilerEntity, SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         await self.hub.set_boiler_heat_mode(self.mac, option)
+
+
+class PreheatOff(BoilerEntity, SelectEntity):
+    """The hub turns hot water preheat off after this long (it never stops by itself). One setting for the hub.
+    Picked while preheat is on, it sets the time left from now for this run; while off, the default for the next one."""
+
+    _attr_options = [p.preheat_off_option(m) for m in p.PREHEAT_OFF_CHOICES]
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, hass: HomeAssistant, hub, entry_id: str, mac: str) -> None:
+        super().__init__(hass, hub, entry_id, mac, "preheat_off")
+
+    @property
+    def current_option(self) -> str | None:
+        """While preheat is on: the minutes left (the hub reports them every minute); otherwise the default."""
+        left = self.hub.preheat_left
+        if left:
+            return p.preheat_off_option(0 if left == 255 else left)
+        return None if self.hub.preheat_off is None else p.preheat_off_option(self.hub.preheat_off)
+
+    async def async_select_option(self, option: str) -> None:
+        minutes = p.preheat_off_minutes(option)
+        if minutes is not None:
+            await self.hub.set_preheat_off(minutes)
 
 
 class HubModeSelect(HubModeEntity, SelectEntity):

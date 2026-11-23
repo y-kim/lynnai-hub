@@ -171,6 +171,7 @@ def build_state(core, hub_id):
     return {"v": 1, "id": hub_id, "up_s": int(t - T0), "time": int(t),
             "links": {"boiler": linked_b, "rooms": linked_r},
             "mode": hub_proxy.mode_json(),                   # set = 정해 둔 모드, fallback = 서버에 닿지 않아 직접 받는 중
+            "cmd": core.cmd_info(),                          # 명령 확인 누계·온수 예열 자동 끄기(ESP32 와 같은 칸)
             "boilers": boilers, "thermostats": thermostats,
             "boiler": boilers[0] if boilers else None,       # 하위호환(기록기)
             "rooms": thermostats[0] if thermostats else None}
@@ -187,6 +188,9 @@ def build_metrics(core, hub_id):
         L.append(f'lynnai_link_up{{device="boiler",mac="{mac}"}} {int(linked)}')
     for mac, _b, linked in thermos:
         L.append(f'lynnai_link_up{{device="rooms",mac="{mac}"}} {int(linked)}')
+    ci = core.cmd_info()
+    L += ["# TYPE lynnai_cmd_resent_total counter", f"lynnai_cmd_resent_total {ci['resent']}",
+          "# TYPE lynnai_cmd_failed_total counter", f"lynnai_cmd_failed_total {ci['failed']}"]
     L.append("# TYPE lynnai_boiler_on gauge")
     for mac, b, _l in boilers:
         bo = decode_boiler(b)

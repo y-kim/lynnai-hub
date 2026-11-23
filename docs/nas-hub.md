@@ -133,13 +133,19 @@ IP 로만 판정하므로 공유기에서 그 기기들의 IP 를 고정해야 �
 
 단독 모드에서 처음 등록한 기기는 나중에 프록시로 바꾸면 다시 등록해야 할 수 있습니다.
 
+**명령 확인**: ESP32 허브와 같이, 보낸 명령이 2.5초 안에 기기 상태에 나타나지 않으면 같은 명령을 다시 보냅니다(모두
+3번). **온수 예열 자동 끄기**(1~60분 / 무제한, 기본 무제한)는 SmartThings·Home Assistant 의 보일러 기기(온수 예열 →
+자동 끄기)에서 고르며, `DATA_DIR/boiler.json` 에 저장됩니다. 예열이 켜져 있을 때 고르면 기본값은 그대로 두고 이번 예열만
+지금부터 그만큼 켜 두며, 켜져 있는 동안은 남은 분을 1분마다 알립니다. 온수 예열은 스스로 꺼지지 않고 켜 둔 동안 10분쯤마다
+버너가 돌기 때문입니다.
+
 ## 7. 상태 확인
 
 | 확인할 것 | 방법 |
 |---|---|
 | 컨테이너 로그 | `docker logs -f lynnai-nas` — 시작할 때 등록된 기기 수, 모드, 경고가 나옵니다 |
 | 등록된 기기·후보 | `http://<NAS>/devices` (토큰 입력), 또는 `curl -H "Authorization: Bearer $API_TOKEN" http://<NAS>/api/v1/devices` |
-| 기기 상태 | `curl -H "Authorization: Bearer $API_TOKEN" http://<NAS>/api/v1/state` — 보일러·방 상태와 연결 여부(JSON) |
+| 기기 상태 | `curl -H "Authorization: Bearer $API_TOKEN" http://<NAS>/api/v1/state` — 보일러·방 상태와 연결 여부(JSON). `cmd` = 명령 확인 누계(`resent` 다시 보낸 횟수, `failed` 3번 보내도 반영 안 된 명령)와 온수 예열 자동 끄기 |
 | 그래프용 | `http://<NAS>/metrics` (Prometheus 형식, 같은 토큰) |
 
 기기가 붙으면 로그에 `링크 = f06 …`(보일러 조절기), `링크 = f09 …`(온도 조절기)가 나오고, `/api/v1/state` 의

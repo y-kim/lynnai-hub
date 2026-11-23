@@ -20,6 +20,8 @@
 #define HUB_TR_SRC_PLATFORM 2  /* SmartThings 명령(Zigbee/LAN 으로 받은 것) */
 #define HUB_TR_SRC_POLL     3  /* 허브의 주기 상태 요청(30초) */
 #define HUB_TR_SRC_TIME     4  /* 단독 모드: 허브의 시간 응답 */
+#define HUB_TR_SRC_RETRY    5  /* 허브가 답이 없는 명령을 다시 보냄 */
+#define HUB_TR_SRC_AUTO     6  /* 허브가 스스로 낸 명령(온수 예열 자동 끄기) */
 
 void hub_trace_init(void);
 

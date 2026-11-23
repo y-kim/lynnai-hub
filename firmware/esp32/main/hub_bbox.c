@@ -26,6 +26,7 @@
 
 #include "hub_bbox.h"
 #include "esp_heap_caps.h"
+#include "hub_rinnai.h"
 #include "hub_proxy.h"
 #include "hub_zigbee.h"
 #include "hub_zb_rinnai.h"
@@ -1095,6 +1096,12 @@ esp_err_t hub_bbox_http(httpd_req_t *req)
         }
         if (httpd_query_key_value(q, "cloudblock", v, sizeof(v)) == ESP_OK) {  /* 시험: 린나이 서버에 닿지 않는 것처럼(자동 폴백 확인) */
             hub_proxy_test_block(atoi(v));
+        }
+        if (httpd_query_key_value(q, "cmddrop", v, sizeof(v)) == ESP_OK) {     /* 시험: 다음 명령 n 개를 기기로 안 보냄(재전송 확인) */
+            hub_rinnai_test_drop(atoi(v));
+        }
+        if (httpd_query_key_value(q, "preoff", v, sizeof(v)) == ESP_OK) {      /* 시험: 온수 예열 자동 끄기를 초 단위로(0 = 설정대로) */
+            hub_rinnai_test_preoff(atoi(v));
         }
         if (httpd_query_key_value(q, "reboot", v, sizeof(v)) == ESP_OK) {      /* 주기 재부팅 간격(분, 0 = 끔, 5~1440) */
             int m = atoi(v);

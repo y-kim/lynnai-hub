@@ -1,12 +1,12 @@
 name: lynnai-boiler
 # optional: true 인 것은 허브 관리 화면에서 숨길 수 있다(드라이버가 try_update_metadata 로 켜고 끈다)
 # 화면 구성(vid): 글자 요약(boilerStatus, "온돌 70°C · 온수 60°C")은 팝업·기기 카드에만 쓰고 상세 화면에서는 뺐다.
-# 상세 화면은 표준 항목만: 구역마다 스위치 + 온도조절 모드 · 난방 온도 설정 · 수온 설정.
+# 상세 화면은 표준 항목만: 구역마다 스위치 + 온도조절 모드 · 난방 온도 설정 · 온수 온도 설정(제목은 device-config patch).
 # 원본은 presentations/lynnai-boiler.device-config.json. 구역·capability 나 그 표시를 바꾸면
 # presentation:device-config:create 로 다시 만들고 vid 를 바꾼다.
 metadata:
   mnmn: SmartThingsCommunity
-  vid: bb2d05b7-31e2-3d12-89b8-8fc65b04aeb9
+  vid: 1699b0ea-5774-3447-b6e9-4789e9250c09
 components:
   - id: main
     label: 전원
@@ -44,12 +44,15 @@ components:
       - id: switch
         version: 1
         optional: true
-      - id: thermostatWaterHeatingSetpoint  # 수온 설정
+      - id: thermostatWaterHeatingSetpoint  # 온수 온도 설정
         version: 1
         optional: true
   - id: preheat
     label: 온수 예열
     capabilities:
       - id: switch
+        version: 1
+        optional: true
+      - id: mode                            # 자동 끄기: 1~60분 / 무제한 (허브가 시간을 재고 끈다, CMD 0x0c)
         version: 1
         optional: true

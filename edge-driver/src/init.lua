@@ -90,6 +90,7 @@ local driver_template = {
         [0x09] = from_hub(0x09),
         [0x0A] = from_hub(0x0A),   -- 생존 신호: 받은 시각만 갱신(처리할 내용 없음)
         [0x0B] = from_hub(0x0B),   -- 동작 모드
+        [0x0C] = from_hub(0x0C),   -- 보일러 설정(온수 예열 자동 끄기)
       },
     },
   },

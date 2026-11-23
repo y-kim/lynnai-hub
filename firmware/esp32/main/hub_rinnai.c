@@ -26,6 +26,7 @@
 #include "hub_devs.h"
 #include "hub_trace.h"
 #include "hub_main.h"
+#include "hub_store.h"
 
 static const char *TAG = "HUB_RINNAI";
 
@@ -52,6 +53,8 @@ typedef struct {
 typedef struct {
     int len;
     uint8_t src;                    /* 누가 만든 패킷인가(HUB_TR_SRC_*) — 메시지 기록용 */
+    int8_t pend;                    /* 확인을 기다리는 명령이면 그 칸(s_pend), 아니면 -1 */
+    uint16_t pend_gen;
     uint8_t pkt[CMD_MAX];
 } cmd_t;
 
@@ -83,6 +86,9 @@ typedef struct {
     uint32_t seq, chg_seq;   /* 상태(70)를 실어 온 마지막 메시지 / 값이 바뀐 마지막 메시지의 기록 순번(hub_trace) */
     uint64_t chg_ms;         /* 값이 마지막으로 바뀐 때(부팅 후 ms) */
     uint8_t burn;       /* f06: 마지막 연소 상태(비트 1 난방 2 온수) — 바뀔 때만 이벤트 */
+    uint64_t pre_on_ms; /* f06: 온수 예열이 켜진 것을 처음 본 때(부팅 후 ms, 0 = 꺼져 있음) — 자동 끄기용 */
+    uint64_t pre_try_ms;/* f06: 자동 끄기 명령을 마지막으로 보낸 때 */
+    uint64_t pre_off_at;/* f06: 이때 끈다(부팅 후 ms, 0 = 무제한). 켜질 때 기본값으로 정하고, 켜진 동안 고르면 그 값으로 다시 정한다 */
     uint8_t out_mask;   /* f09: 마지막 존별 외출 비트 — 바뀐 존만 이벤트 */
 } rk_dev_t;
 
@@ -108,6 +114,149 @@ static void kick(void)
 }
 
 static bool mac3_eq(const uint8_t *a, const uint8_t *b) { return !memcmp(a, b, 3); }
+
+/* ---------------------------------------------------------------- 명령 확인·재전송
+ * 명령(/set)은 QoS 0 으로 한 번 써 넣을 뿐이라 가끔 그냥 사라진다(2026-11-23 실측: 약 90번에 2번 — 제어기가 자기 보고를
+ * 올린 직후에 들어간 명령). 그래서 보낸 명령이 바꾸려던 칸을 그 뒤의 상태 보고(70)에서 확인하고, PEND_WAIT_MS 안에
+ * 나타나지 않으면 같은 명령을 다시 보낸다(모두 PEND_TRIES 번, 린나이 앱과 같은 2.5초·3번).
+ *   - "아무 보고나 오면 성공"으로 보지 않는다: 보일러는 온도 값이 흔들릴 때마다 4~12초 간격으로 보고를 올린다.
+ *     바꾸려던 칸을 모르는 명령만 "보낸 뒤 온 첫 보고"를 답으로 친다.
+ *   - 칸이 바뀌었다 = 제어기가 명령을 받았다. 보일러가 그 값을 안 받으면 제어기는 20초쯤 뒤 원래 값으로 되돌리는데
+ *     (꺼진 채 온돌 설정 등), 그건 다시 보내도 같으므로 여기서 다루지 않는다.
+ *   - 같은 칸에 새 명령이 오면 옛 명령은 잊는다(켰다 바로 끈 경우 옛 '켜기'를 다시 보내지 않게). */
+#define PEND_MAX      8
+#define PEND_WAIT_MS  2500
+#define PEND_TRIES    3
+#define PEND_QUEUE_MS 10000         /* 주입 큐에서 이만큼 못 나가면(연결이 막힘) 포기 */
+#define PEND_ANY_MS   300           /* 칸을 모르는 명령: 보낸 지 이만큼 지난 뒤의 보고만 답으로 친다 */
+#define CHK_MAX       3
+enum { CHK_NIB, CHK_HEX2, CHK_BIT, CHK_BYTE };
+typedef struct {
+    uint8_t type;                   /* CHK_NIB 니블이 0 이 아님 == want · CHK_HEX2 니블 둘의 값 == want (f06, pos = 니블 위치) */
+    uint8_t pos, mask, want;        /* CHK_BIT (바이트 & mask) == want · CHK_BYTE 바이트 == want (f09, pos = 바이트 위치) */
+} chk_t;
+typedef struct {
+    bool used;
+    uint8_t kind, mac3[3];
+    uint8_t tries;                  /* 지금까지 보낸 횟수 */
+    uint8_t src;
+    uint8_t nchk;
+    chk_t chk[CHK_MAX];
+    uint16_t gen;
+    uint16_t jlen;
+    uint64_t made_ms, sent_ms;      /* 큐에 넣은 때 / 기기 쪽 소켓에 써 넣은 때(0 = 아직 큐에 있음) */
+    char key[24];                   /* 바꾸려는 칸 이름(코드들, 각방은 a0 값까지) — 같은 칸의 새 명령이 옛 명령을 밀어낸다 */
+    char json[256];
+} pend_t;
+static pend_t s_pend[PEND_MAX];
+static uint16_t s_pend_gen;
+static uint32_t s_cmd_tracked, s_cmd_resent, s_cmd_failed;
+static char s_cmd_last_fail[48];    /* 끝내 반영되지 않은 마지막 명령(관리 화면용) */
+static uint8_t s_pre_off_min;       /* 온수 예열 자동 끄기(분, 0 = 끄지 않음) */
+static volatile uint8_t s_test_drop; /* 시험: 다음 명령 n 개를 기기로 안 보냄 */
+static volatile uint32_t s_test_preoff_s;   /* 시험: 자동 끄기 시간(초, 0 = 설정대로) */
+static volatile bool s_boilcfg_dirty;       /* 예열이 켜지거나 꺼짐 → 남은 시간을 바로 알린다 */
+
+static bool chk_ok(const chk_t *c, const uint8_t *b, int bn)
+{
+    if (c->type == CHK_NIB || c->type == CHK_HEX2) {
+        int last = c->pos + (c->type == CHK_HEX2 ? 1 : 0);
+        if (last / 2 >= bn) {
+            return false;
+        }
+        if (c->type == CHK_NIB) {
+            return (bnib(b, c->pos) != 0) == (c->want != 0);
+        }
+        return ((bnib(b, c->pos) << 4) | bnib(b, c->pos + 1)) == c->want;
+    }
+    if (c->pos >= bn) {
+        return false;
+    }
+    return c->type == CHK_BIT ? (b[c->pos] & c->mask) == c->want : b[c->pos] == c->want;
+}
+
+static bool chk_all(const chk_t *c, int n, const uint8_t *b, int bn)
+{
+    for (int i = 0; i < n; i++) {
+        if (!chk_ok(&c[i], b, bn)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* 명령 항목(code=value 들)에서 확인할 칸을 뽑는다. 돌려주는 값 = 칸 수(0 = 모르는 명령). key 에 칸 이름.
+ *   f06: 80 전원(니블 0) b1 난방(2) d7 온수(3) b6 예열(5) b4 실내 모드(7) d1 온수 설정(10~11) d2 온돌 설정(13~14) d4 실내 설정(15~16)
+ *   f09: a0 = 방 번호(1~7, stat 바이트 = (a0-1)*7) + b1 켜짐(0x02) b3 외출(0x10) 96 예약(0x08) 97 예약 시간(stat+1) d4 설정 온도(stat+4) */
+static int build_checks(uint8_t kind, char codes[][3], const uint32_t *vals, int n, chk_t *out, char *key, size_t keycap)
+{
+    int nc = 0, zone = -1;
+    key[0] = 0;
+    for (int i = 0; i < n; i++) {
+        if (kind == HUB_KIND_F09 && !strcmp(codes[i], "a0") && vals[i] >= 1 && vals[i] <= RK_NZ) {
+            zone = (int)vals[i] - 1;
+        }
+        char one[8];
+        if (!strcmp(codes[i], "97")) {               /* 예약 시간은 칸 이름에 넣지 않는다(예약 걸기와 풀기가 같은 칸이 되게) */
+            continue;
+        }
+        if (!strcmp(codes[i], "a0")) {
+            snprintf(one, sizeof(one), "a0=%x,", (unsigned)(vals[i] & 0xff));
+        } else {
+            snprintf(one, sizeof(one), "%s,", codes[i]);
+        }
+        strlcat(key, one, keycap);
+    }
+    for (int i = 0; i < n && nc < CHK_MAX; i++) {
+        const char *c = codes[i];
+        uint8_t v = (uint8_t)vals[i];
+        if (kind == HUB_KIND_F06) {
+            static const struct { const char *code; uint8_t type, pos; } F06[] = {
+                { "80", CHK_NIB, 0 }, { "b1", CHK_NIB, 2 }, { "d7", CHK_NIB, 3 }, { "b6", CHK_NIB, 5 }, { "b4", CHK_NIB, 7 },
+                { "d1", CHK_HEX2, 10 }, { "d2", CHK_HEX2, 13 }, { "d4", CHK_HEX2, 15 } };
+            for (size_t k = 0; k < sizeof(F06) / sizeof(F06[0]); k++) {
+                if (!strcmp(c, F06[k].code)) {
+                    out[nc++] = (chk_t){ .type = F06[k].type, .pos = F06[k].pos, .want = v };
+                    break;
+                }
+            }
+        } else if (zone >= 0) {
+            uint8_t st = (uint8_t)(zone * 7);
+            uint8_t bit = !strcmp(c, "b1") ? 0x02 : !strcmp(c, "b3") ? 0x10 : !strcmp(c, "96") ? 0x08 : 0;
+            if (bit) {
+                out[nc++] = (chk_t){ .type = CHK_BIT, .pos = st, .mask = bit, .want = v ? bit : 0 };
+            } else if (!strcmp(c, "97")) {
+                out[nc++] = (chk_t){ .type = CHK_BYTE, .pos = (uint8_t)(st + 1), .want = v };
+            } else if (!strcmp(c, "d4")) {
+                out[nc++] = (chk_t){ .type = CHK_BYTE, .pos = (uint8_t)(st + 4), .want = v };
+            }
+        }
+    }
+    return nc;
+}
+
+static void pend_done(pend_t *q, const char *how)
+{
+    if (q->tries > 1) {
+        ESP_LOGW(TAG, "명령 %s — f0%d %02x%02x%02x %s(%d번 보냄)", how, q->kind, q->mac3[0], q->mac3[1], q->mac3[2], q->key, q->tries);
+    }
+    q->used = false;
+}
+
+/* 기기가 상태(70)를 올렸다: 기다리던 명령이 반영됐는지 본다. 호출자가 lock 보유. */
+static void pend_report(uint8_t kind, const uint8_t *mac3, const uint8_t *blob, int bn)
+{
+    uint64_t now = hub_trace_now_ms();
+    for (int i = 0; i < PEND_MAX; i++) {
+        pend_t *q = &s_pend[i];
+        if (!q->used || q->kind != kind || !mac3_eq(q->mac3, mac3)) {
+            continue;
+        }
+        if (q->nchk ? chk_all(q->chk, q->nchk, blob, bn) : (q->sent_ms && now - q->sent_ms >= PEND_ANY_MS)) {
+            pend_done(q, "반영됨");
+        }
+    }
+}
 
 /* base 토픽의 마지막 세그먼트(MAC "AA:BB:CC:A1:B2:C3")에서 끝 3바이트를 뽑는다 */
 static bool parse_mac3(const char *base, uint8_t out[3])
@@ -375,8 +524,26 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
         lock();
         rk_dev_t *d = dev_get(kind, t->mac3);
         bool changed = d && (d->n != bn || memcmp(d->blob, blob, bn));
+        pend_report(kind, t->mac3, blob, bn);
         if (d) {
             d->seq = tseq;
+            if (kind == HUB_KIND_F06 && bn > 2) {            /* 온수 예열이 켜진 때를 기억(자동 끄기) */
+                if (bnib(blob, 5) != 1) {
+                    if (d->pre_on_ms) {
+                        s_boilcfg_dirty = true;
+                    }
+                    d->pre_on_ms = 0;
+                    d->pre_off_at = 0;
+                } else if (!d->pre_on_ms) {
+                    uint64_t now = hub_trace_now_ms();
+                    uint64_t lim = s_test_preoff_s ? (uint64_t)s_test_preoff_s * 1000 : (uint64_t)s_pre_off_min * 60000;
+                    d->pre_on_ms = now | 1;
+                    d->pre_off_at = lim ? now + lim : 0;     /* 기본값으로 */
+                    d->pre_try_ms = 0;
+                    s_boilcfg_dirty = true;
+                    kick();
+                }
+            }
             if (changed) {
                 d->chg_seq = tseq;
                 d->chg_ms = hub_trace_now_ms();
@@ -510,9 +677,29 @@ int hub_rinnai_take_cmd(hub_link_tap_t *t, uint8_t *out, int cap)
         return 0;
     }
     int n = c->len <= cap ? c->len : 0;
+    if (n && c->pend >= 0 && s_test_drop) {          /* 시험: 보낸 것으로 치고 버린다(명령이 사라진 경우를 흉내) */
+        s_test_drop--;
+        ESP_LOGW(TAG, "시험: 명령 하나를 기기로 보내지 않음");
+        lock();
+        if (s_pend[c->pend].used && s_pend[c->pend].gen == c->pend_gen) {
+            s_pend[c->pend].sent_ms = hub_trace_now_ms() | 1;
+        }
+        unlock();
+        free(c);
+        kick();
+        return 0;
+    }
     memcpy(out, c->pkt, n);
     if (n > 2) {                                     /* 지금 기기 쪽 소켓에 써 넣는다 — 이 순간을 기록 */
         hub_trace_add(HUB_TR_HUB2DEV, c->src, t->kind, t->mac3, c->pkt, n, (c->pkt[1] & 0x80) ? 3 : 2);
+    }
+    if (c->pend >= 0 && c->pend < PEND_MAX) {        /* 확인을 기다리는 명령: 여기서부터 2.5초를 잰다 */
+        lock();
+        if (s_pend[c->pend].used && s_pend[c->pend].gen == c->pend_gen) {
+            s_pend[c->pend].sent_ms = n > 2 ? hub_trace_now_ms() | 1 : 0;
+        }
+        unlock();
+        kick();
     }
     free(c);
     return n;
@@ -580,12 +767,21 @@ static hub_link_tap_t *find_tap(uint8_t kind, const uint8_t *mac3)
     return mac3 ? NULL : any;
 }
 
-/* PUBLISH 패킷을 만들어 tap 의 주입 큐에 넣는다(QoS0). 성공 true. 호출자가 lock 보유. */
+/* PUBLISH 패킷을 만들어 tap 의 주입 큐에 넣는다(QoS0). 성공 true. 호출자가 lock 보유.
+ * pend >= 0 이면 확인을 기다리는 명령(s_pend 의 그 칸) — 써 넣는 순간 hub_rinnai_take_cmd 가 시각을 적는다. */
+static bool enqueue_pub2(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j, uint8_t src, int pend);
 static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j, uint8_t src)
+{
+    return enqueue_pub2(t, topic, tl, json, j, src, -1);
+}
+
+static bool enqueue_pub2(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j, uint8_t src, int pend)
 {
     cmd_t *c = malloc(sizeof(cmd_t));
     if (c) {
         c->src = src;
+        c->pend = (int8_t)pend;
+        c->pend_gen = pend >= 0 ? s_pend[pend].gen : 0;
     }
     int rl = 2 + tl + j;
     if (!c || rl > 16383 || 3 + rl > CMD_MAX) {
@@ -635,6 +831,155 @@ static void poll_status(bool all)
         }
     }
     unlock();
+}
+
+/* 명령 하나를 기기 쪽에 넣고, 반영되는지 지켜본다. 호출자가 lock 보유. 큐에 넣었으면 true.
+ * 지금 상태가 이미 그 값이면 지켜보지 않는다(확인할 것이 없다). */
+static bool send_tracked(hub_link_tap_t *t, const char *json, int j, const chk_t *chk, int nchk, const char *key, uint8_t src)
+{
+    char topic[80];
+    int tl = snprintf(topic, sizeof(topic), "%s/set", t->base);
+    if (tl <= 0 || tl >= (int)sizeof(topic)) {
+        return false;
+    }
+    int slot = -1;
+    for (int i = 0; i < PEND_MAX; i++) {             /* 같은 칸의 옛 명령은 잊는다 */
+        pend_t *q = &s_pend[i];
+        if (q->used && q->kind == t->kind && mac3_eq(q->mac3, t->mac3) && !strcmp(q->key, key)) {
+            q->used = false;
+        }
+    }
+    rk_dev_t *d = dev_find(t->kind, t->mac3);
+    bool already = nchk > 0 && d && d->n && chk_all(chk, nchk, d->blob, d->n);
+    if (!already && j < (int)sizeof(s_pend[0].json)) {
+        for (int i = 0; i < PEND_MAX && slot < 0; i++) {
+            if (!s_pend[i].used) {
+                slot = i;
+            }
+        }
+    }
+    if (slot >= 0) {
+        pend_t *q = &s_pend[slot];
+        memset(q, 0, sizeof(*q));
+        q->kind = t->kind;
+        memcpy(q->mac3, t->mac3, 3);
+        q->tries = 1;
+        q->src = src;
+        q->nchk = (uint8_t)nchk;
+        memcpy(q->chk, chk, sizeof(chk_t) * nchk);
+        q->gen = ++s_pend_gen;
+        q->jlen = (uint16_t)j;
+        memcpy(q->json, json, j);
+        strlcpy(q->key, key, sizeof(q->key));
+        q->made_ms = hub_trace_now_ms();
+        q->used = true;
+    }
+    if (!enqueue_pub2(t, topic, tl, json, j, src, slot)) {
+        if (slot >= 0) {
+            s_pend[slot].used = false;
+        }
+        return false;
+    }
+    if (slot >= 0) {
+        s_cmd_tracked++;
+    }
+    return true;
+}
+
+/* 기다리는 명령들을 본다: 2.5초 안에 반영이 없으면 다시 보내고, 3번 보내도 없으면 포기. 남은 것이 있으면 true. */
+static bool pend_tick(void)
+{
+    bool left = false;
+    uint64_t now = hub_trace_now_ms();
+    lock();
+    for (int i = 0; i < PEND_MAX; i++) {
+        pend_t *q = &s_pend[i];
+        if (!q->used) {
+            continue;
+        }
+        hub_link_tap_t *t = find_tap(q->kind, q->mac3);
+        if (!t) {                                    /* 연결이 끊겼다 — 다시 붙으면 기기가 자기 상태를 올린다 */
+            q->used = false;
+            continue;
+        }
+        if (!q->sent_ms) {
+            if (now - q->made_ms > PEND_QUEUE_MS) {
+                q->used = false;
+            }
+        } else if (now - q->sent_ms >= PEND_WAIT_MS) {
+            char topic[80];
+            int tl = snprintf(topic, sizeof(topic), "%s/set", t->base);
+            if (q->tries >= PEND_TRIES) {
+                s_cmd_failed++;
+                snprintf(s_cmd_last_fail, sizeof(s_cmd_last_fail), "f0%d %s", q->kind, q->key);
+                ESP_LOGW(TAG, "명령이 반영되지 않음 — f0%d %02x%02x%02x %s(%d번 보냄, 포기)",
+                         q->kind, q->mac3[0], q->mac3[1], q->mac3[2], q->key, q->tries);
+                q->used = false;
+            } else if (tl > 0 && tl < (int)sizeof(topic) &&
+                       enqueue_pub2(t, topic, tl, q->json, q->jlen, HUB_TR_SRC_RETRY, i)) {
+                q->tries++;
+                q->sent_ms = 0;
+                q->made_ms = now;
+                s_cmd_resent++;
+                ESP_LOGW(TAG, "명령에 답이 없어 다시 보냄(%d번째) — f0%d %02x%02x%02x %s",
+                         q->tries, q->kind, q->mac3[0], q->mac3[1], q->mac3[2], q->key);
+            }
+        }
+        left = left || q->used;
+    }
+    unlock();
+    return left;
+}
+
+/* 온수 예열 자동 끄기: 켜진 것을 본 지 정한 시간이 지나면 끈다(어디서 켰든). 예열은 스스로 꺼지지 않고, 켜 둔 동안
+ * 10분쯤마다 버너가 돈다(2026-11-23 실측). 한 번 보낸 뒤 30초가 지나도 켜져 있으면 다시 시도한다. */
+static void preheat_tick(void)
+{
+    uint64_t now = hub_trace_now_ms();
+    lock();
+    for (int i = 0; i < MAX_DEV; i++) {
+        rk_dev_t *d = &s_dev[i];
+        if (!d->used || d->kind != HUB_KIND_F06 || !d->pre_on_ms || !d->pre_off_at || now < d->pre_off_at ||
+            (d->pre_try_ms && now - d->pre_try_ms < 30000)) {
+            continue;
+        }
+        hub_link_tap_t *t = find_tap(HUB_KIND_F06, d->mac3);
+        if (!t) {
+            continue;
+        }
+        static const char json[] = "{\"ptn\":\"J07\",\"code\":\"null\",\"id\":\"f06\",\"no\":\"1\",\"sum\":1,"
+                                   "\"rpc\":[{\"id\":\"b6\",\"data\":\"0\"}],\"lt\":\"null\"}";
+        const chk_t chk = { .type = CHK_NIB, .pos = 5, .want = 0 };
+        d->pre_try_ms = now | 1;
+        if (send_tracked(t, json, sizeof(json) - 1, &chk, 1, "b6,", HUB_TR_SRC_AUTO)) {
+            ESP_LOGW(TAG, "온수 예열 자동 끄기(켜진 지 %lu초) — f06 %02x%02x%02x", (unsigned long)((now - d->pre_on_ms) / 1000),
+                     d->mac3[0], d->mac3[1], d->mac3[2]);
+        }
+    }
+    unlock();
+}
+
+/* 예열이 켜진 첫 보일러의 남은 시간: 0 = 꺼짐, 1~60 = 남은 분(올림), 255 = 켜짐·무제한. 잠근 채로 부른다 */
+static uint8_t preheat_left_locked(uint64_t now, uint32_t *left_s)
+{
+    for (int i = 0; i < MAX_DEV; i++) {
+        const rk_dev_t *d = &s_dev[i];
+        if (d->used && d->kind == HUB_KIND_F06 && d->pre_on_ms) {
+            if (!d->pre_off_at) {
+                if (left_s) {
+                    *left_s = UINT32_MAX;
+                }
+                return 255;
+            }
+            uint64_t left = d->pre_off_at > now ? d->pre_off_at - now : 0;
+            if (left_s) {
+                *left_s = (uint32_t)(left / 1000);
+            }
+            uint64_t m = (left + 59999) / 60000;
+            return (uint8_t)(m < 1 ? 1 : m > 60 ? 60 : m);
+        }
+    }
+    return 0;
 }
 
 static void command_one(const char *text, int len)
@@ -697,6 +1042,8 @@ static void command_one(const char *text, int len)
     }
     char rpc[192];
     int r = 0, items = 0;
+    char codes[8][3];                                /* 확인할 칸을 뽑으려고 항목을 따로 적어 둔다(8개까지) */
+    uint32_t vals[8];
     for (char *save = NULL, *tok = strtok_r(rest, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
         char *eq = strchr(tok, '=');
         if (!eq || !token_ok(tok, eq - tok, 2) || !token_ok(eq + 1, strlen(eq + 1), 16)) {
@@ -709,6 +1056,10 @@ static void command_one(const char *text, int len)
             return;
         }
         r += snprintf(rpc + r, sizeof(rpc) - r, "%s{\"id\":\"%s\",\"data\":\"%s\"}", items ? "," : "", tok, eq + 1);
+        if (items < 8) {
+            strlcpy(codes[items], tok, sizeof(codes[0]));
+            vals[items] = (uint32_t)strtoul(eq + 1, NULL, 16);
+        }
         items++;
         if (r >= (int)sizeof(rpc) - 8) {
             return;
@@ -731,12 +1082,14 @@ static void command_one(const char *text, int len)
         ESP_LOGW(TAG, "f0%d 연결 없음 — 명령 버림: %s", kind, s);
         return;
     }
-    char topic[80];
-    int tl = snprintf(topic, sizeof(topic), "%s/set", t->base);
-    bool ok = enqueue_pub(t, topic, tl, json, j, HUB_TR_SRC_PLATFORM);
+    chk_t chk[CHK_MAX];
+    char key[24];
+    int nchk = build_checks(kind, codes, vals, items < 8 ? items : 8, chk, key, sizeof(key));
+    bool ok = send_tracked(t, json, j, chk, nchk, key, HUB_TR_SRC_PLATFORM);
     unlock();
     if (ok) {
-        ESP_LOGI(TAG, "명령 → %s %s", topic, json);
+        ESP_LOGI(TAG, "명령 → f0%d %s", kind, json);
+        kick();                                      /* 확인 시계를 돌리게 태스크를 깨운다 */
     } else {
         ESP_LOGW(TAG, "명령 큐 가득/실패");
     }
@@ -758,13 +1111,29 @@ static int build_links(uint8_t *out, int cap)
     return n;
 }
 
+static void send_boilcfg(void);
+
 static void zb_task(void *arg)
 {
     TickType_t last_beat = xTaskGetTickCount();
     TickType_t last_poll = xTaskGetTickCount();
     TickType_t last_alive = xTaskGetTickCount();
+    bool waiting = false;
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waiting ? 250 : 10000));   /* 확인을 기다리는 명령이 있으면 촘촘히 */
+        waiting = pend_tick();
+        preheat_tick();
+        {   /* 온수 예열 남은 시간: 켜지고 꺼질 때 바로, 켜져 있는 동안 1분마다 알린다 */
+            static TickType_t last_left;
+            lock();
+            bool on = preheat_left_locked(hub_trace_now_ms(), NULL) != 0;
+            unlock();
+            if (s_boilcfg_dirty || (on && xTaskGetTickCount() - last_left >= pdMS_TO_TICKS(60000))) {
+                s_boilcfg_dirty = false;
+                last_left = xTaskGetTickCount();
+                send_boilcfg();
+            }
+        }
         if (xTaskGetTickCount() - last_alive >= pdMS_TO_TICKS(ALIVE_S * 1000)) {
             /* SmartThings 는 Zigbee 기기가 30분쯤 조용해야 오프라인으로 바꾼다. 드라이버가 먼저 알아채도록 짧게 자주 */
             /* [0][칩 온도 s16, 1/100°C] — 온도는 그 통로의 노출 설정에서 켰을 때만 붙는다(없으면 1바이트) */
@@ -813,6 +1182,7 @@ static void zb_task(void *arg)
             uint8_t pairs[MAX_PAIRS_BYTES];
             int pn = hub_pairs_blob(pairs, sizeof(pairs));
             hub_uplink_send(HUB_RK_CMD_PAIRS, pairs, pn);   /* 짝(없으면 0바이트 = 전부 단독/암묵) */
+            send_boilcfg();                                  /* 보일러 설정(온수 예열 자동 끄기) */
         }
         /* 기기별 상태 */
         for (int i = 0; i < MAX_DEV; i++) {
@@ -922,10 +1292,153 @@ bool hub_rinnai_forget(const char *mac6)
     return ng > 0;
 }
 
+/* ---------------------------------------------------------------- 설정·관리 화면 */
+
+static bool pre_off_valid(int v) { return v >= 0 && v <= 60; }   /* 1~60분, 0 = 무제한 */
+
+void hub_rinnai_test_drop(int n) { s_test_drop = (uint8_t)(n < 0 ? 0 : n > 10 ? 10 : n); }
+void hub_rinnai_test_preoff(int sec)
+{
+    s_test_preoff_s = sec < 0 ? 0 : (uint32_t)sec;
+    kick();
+}
+
+void hub_rinnai_cmd_info(hub_cmd_info_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    o->preheat_off_min = s_pre_off_min;
+    if (!s_lock) {
+        return;
+    }
+    uint64_t now = hub_trace_now_ms();
+    lock();
+    o->tracked = s_cmd_tracked;
+    o->resent = s_cmd_resent;
+    o->failed = s_cmd_failed;
+    strlcpy(o->last_fail, s_cmd_last_fail, sizeof(o->last_fail));
+    for (int i = 0; i < PEND_MAX; i++) {
+        o->pending += s_pend[i].used ? 1 : 0;
+    }
+    preheat_left_locked(now, &o->preheat_left_s);
+    for (int i = 0; i < MAX_DEV; i++) {              /* 예열이 켜져 있는 첫 보일러: 켜진 지 몇 초 */
+        if (s_dev[i].used && s_dev[i].kind == HUB_KIND_F06 && s_dev[i].pre_on_ms && !o->preheat_on_s) {
+            o->preheat_on_s = (uint32_t)((now - s_dev[i].pre_on_ms) / 1000) + 1;
+        }
+    }
+    unlock();
+}
+
+void hub_rinnai_render(char *o, size_t cap)
+{
+    hub_cmd_info_t ci;
+    hub_rinnai_cmd_info(&ci);
+    /* 온수 예열 자동 끄기는 스마트싱스·HA 의 보일러 기기에서만 정한다(관리 화면에서는 뺌 — 사용자 결정 2026-11-23). */
+    strlcat(o, "<h2>보일러 명령</h2><div class=card><p class=muted>", cap);
+    char line[200];
+    snprintf(line, sizeof(line), "명령 확인: 보낸 명령이 2.5초 안에 상태에 나타나지 않으면 다시 보냅니다(3번까지). "
+             "켜진 뒤 다시 보냄 %lu번 · 끝내 반영 안 됨 %lu번", (unsigned long)ci.resent, (unsigned long)ci.failed);
+    strlcat(o, line, cap);
+    if (ci.last_fail[0]) {
+        strlcat(o, " (마지막: <code>", cap);
+        strlcat(o, ci.last_fail, cap);
+        strlcat(o, "</code>)", cap);
+    }
+    strlcat(o, "</p></div>", cap);
+}
+
+/* [자동 끄기 기본값(분, 0 = 무제한)][0 — 비워 둔 자리][지금: 0 예열 꺼짐, 1~60 남은 분, 255 켜짐·무제한] */
+static void send_boilcfg(void)
+{
+    uint8_t p[3] = { s_pre_off_min, 0, 0 };
+    if (s_lock) {
+        lock();
+        p[2] = preheat_left_locked(hub_trace_now_ms(), NULL);
+        unlock();
+    }
+    hub_uplink_send(HUB_RK_CMD_BOILCFG, p, sizeof(p));
+}
+
+static esp_err_t save_u8(const char *key, uint8_t v)
+{
+    nvs_handle_t h;
+    esp_err_t e = nvs_open("rinnai", NVS_READWRITE, &h);
+    if (e == ESP_OK) {
+        e = hs_set_u8(h, key, v);
+        if (e == ESP_OK) {
+            e = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "보일러 설정 %s 저장 실패: %s", key, esp_err_to_name(e));
+    }
+    return e;
+}
+
+static esp_err_t pre_off_set(uint8_t m)
+{
+    if (m == s_pre_off_min) {
+        return ESP_OK;
+    }
+    esp_err_t e = save_u8("pre_off", m);
+    if (e != ESP_OK) {
+        return e;
+    }
+    s_pre_off_min = m;
+    ESP_LOGI(TAG, "온수 예열 자동 끄기 → %d분(0 = 무제한)", m);
+    kick();
+    return ESP_OK;
+}
+
+/* 스마트홈 쪽 요청 "preoff=<분>". 바뀌었든 아니든 지금 값을 다시 알려 화면을 맞춘다(잘못된 값이면 되돌아간다). */
+void hub_rinnai_request(const char *text, int len)
+{
+    char t[24];
+    if (len > 0 && len < (int)sizeof(t)) {
+        memcpy(t, text, len);
+        t[len] = 0;
+        if (!strncmp(t, "preoff=", 7) && isdigit((unsigned char)t[7]) && pre_off_valid(atoi(t + 7))) {
+            /* 예열이 켜져 있으면 이번 예열의 남은 시간을 그 값으로(지금부터), 꺼져 있으면 다음에 켜질 때의 기본값을 바꾼다 */
+            int m = atoi(t + 7);
+            bool on = false;
+            uint64_t now = hub_trace_now_ms();
+            if (s_lock) {
+                lock();
+                for (int i = 0; i < MAX_DEV; i++) {
+                    rk_dev_t *d = &s_dev[i];
+                    if (d->used && d->kind == HUB_KIND_F06 && d->pre_on_ms) {
+                        d->pre_off_at = m ? now + (uint64_t)m * 60000 : 0;
+                        d->pre_try_ms = 0;
+                        on = true;
+                    }
+                }
+                unlock();
+            }
+            if (on) {
+                ESP_LOGI(TAG, "이번 온수 예열: %s", m ? "남은 시간 다시 정함" : "무제한");
+                kick();
+            } else {
+                pre_off_set((uint8_t)m);
+            }
+        } else {
+            ESP_LOGW(TAG, "모르는 보일러 설정 요청: %s", t);
+        }
+    }
+    send_boilcfg();
+}
+
 void hub_rinnai_start(void)
 {
     if (!s_lock) {
+        nvs_handle_t h;
+        if (nvs_open("rinnai", NVS_READONLY, &h) == ESP_OK) {
+            uint8_t m = 0;
+            if (hs_get_u8(h, "rinnai", "pre_off", &m) == ESP_OK && pre_off_valid(m)) {
+                s_pre_off_min = m;
+            }
+            nvs_close(h);
+        }
         s_lock = xSemaphoreCreateMutex();
-        xTaskCreate(zb_task, "hub_rk_zb", 3072, NULL, 3, &s_task);
+        xTaskCreate(zb_task, "hub_rk_zb", 4096, NULL, 3, &s_task);   /* 3072 일 때 최저 여유 864 — 명령 확인·재전송을 넣으며 늘림 */
     }
 }

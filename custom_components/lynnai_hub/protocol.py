@@ -33,6 +33,7 @@ CMD_FORGET = 0x08
 CMD_TARIFF = 0x09
 CMD_ALIVE = 0x0A
 CMD_MODE = 0x0B
+CMD_BOILCFG = 0x0C   # boiler settings: [hot water preheat auto-off, minutes, 0 = never]
 
 KIND_BOILER = 6
 KIND_THERMOSTAT = 9
@@ -295,6 +296,31 @@ def decode_mode(payload: bytes) -> HubMode | None:
                    since if since and fallback else None, reason, payload[8] if reason == "refused" else 0)
 
 
+# Hot water preheat never turns itself off and fires the burner every ten minutes or so while it is on; the hub
+# turns it off after this many minutes (0 = never). The same choices as on the hub's admin page.
+PREHEAT_OFF_CHOICES = [*range(1, 61), 0]   # minutes, 0 = never
+
+
+def preheat_off_option(minutes: int) -> str:
+    return "unlimited" if minutes == 0 else str(minutes)
+
+
+def preheat_off_minutes(option: str) -> int | None:
+    if option == "unlimited":
+        return 0
+    return int(option) if option.isdigit() and int(option) in PREHEAT_OFF_CHOICES else None
+
+
+def decode_boilcfg(payload: bytes) -> int | None:
+    """[preheat auto-off minutes, 0 = never][reserved][minutes left, newer firmware]."""
+    return payload[0] if payload and payload[0] in PREHEAT_OFF_CHOICES else None
+
+
+def decode_preheat_left(payload: bytes) -> int | None:
+    """Third byte: 0 preheat off, 1-60 minutes until the hub turns it off, 255 on without a limit; None = older firmware."""
+    return payload[2] if len(payload) >= 3 else None
+
+
 # ---- requests (text sent with CMD_REQUEST) ----
 
 def hub_mode_cmd(mode: str) -> str:
@@ -303,6 +329,10 @@ def hub_mode_cmd(mode: str) -> str:
 
 def hub_fallback_cmd(on: bool) -> str:
     return f"hub fallback={onoff(on)}"
+
+
+def hub_preheat_off_cmd(minutes: int) -> str:
+    return f"hub preoff={minutes}"
 
 
 def boiler_cmd(mac: str, code: str, value: str) -> str:

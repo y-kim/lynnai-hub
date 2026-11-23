@@ -124,6 +124,10 @@ async def test_commands_reach_the_hub(hass: HomeAssistant, entry, fake_hub):
     await call("select", "select_option", f"select.boiler_{BOILER}_heating_control", option="room")
     assert fake_hub.requests.pop() == f"f06@{BOILER} b4=1"
 
+    await call("select", "select_option", f"select.boiler_{BOILER}_hot_water_preheat_auto_off", option="30")
+    assert fake_hub.requests.pop() == "hub preoff=30"
+    await _settle(hass, lambda: hass.states.get(f"select.boiler_{BOILER}_hot_water_preheat_auto_off").state == "30")
+
     await call("number", "set_value", f"number.boiler_{BOILER}_heating_temperature", value=62)
     assert fake_hub.requests.pop() == f"f06@{BOILER} d2=3C"       # 62 is not allowed; below 65 it steps down to 60
 
@@ -264,3 +268,15 @@ async def test_no_mode_entities_for_a_hub_that_does_not_report_it(hass: HomeAssi
         await hass.config_entries.async_unload(e.entry_id)
         await hass.async_block_till_done()
 
+
+async def test_preheat_time_left(hass: HomeAssistant, entry, fake_hub):
+    s = hass.states
+    sel = f"select.boiler_{BOILER}_hot_water_preheat_auto_off"
+    await fake_hub.push(0x0C, bytes([20, 0, 14]))                     # preheat on, 14 minutes left
+    await _settle(hass, lambda: s.get(sel).state == "14")
+    await fake_hub.push(0x0C, bytes([20, 0, 0]))                      # off again: the default
+    await _settle(hass, lambda: s.get(sel).state == "20")
+    fake_hub.requests.clear()
+    await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": "7"}, blocking=True)
+    await _settle(hass, lambda: bool(fake_hub.requests))
+    assert fake_hub.requests == ["hub preoff=7"]

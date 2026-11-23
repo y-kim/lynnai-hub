@@ -35,6 +35,7 @@ class FakeHub:
         self.port = 0
         self.on_hello: list[tuple[int, bytes]] = []     # sent to every client right after "ok"
         self.mode = [0, 0, 1, 0, 0, 0, 0]               # [mode][fallback active][auto fallback][since u32] as in HUB_RK_CMD_MODE
+        self.preheat_off = 0                            # HUB_RK_CMD_BOILCFG: preheat auto-off minutes (0 = never)
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
@@ -73,6 +74,11 @@ class FakeHub:
                         self.mode[0] = 1 if value == "standalone" else 0
                     elif key == "fallback":
                         self.mode[2] = 1 if value == "1" else 0
+                    elif key == "preoff":              # answered with the boiler settings, like the firmware
+                        self.preheat_off = int(value)
+                        for w in self.writers:
+                            w.write(f"0c {bytes([self.preheat_off]).hex()}\n".encode())
+                        continue
                     for w in self.writers:
                         w.write(f"0b {bytes(self.mode).hex()}\n".encode())
 
@@ -97,6 +103,7 @@ class FakeHub:
             (0x03, struct.pack("<hh", 2534, 3410)),
             (0x04, struct.pack("<5I", 1504, 0xFFFFFFFF, 210, 5190, 857)),
             (0x0B, bytes(self.mode)),
+            (0x0C, bytes([self.preheat_off])),
         ]
 
 

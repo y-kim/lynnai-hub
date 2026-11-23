@@ -69,7 +69,13 @@
       "capability": "thermostatWaterHeatingSetpoint",
       "version": 1,
       "values": [],
-      "patch": []
+      "patch": [
+        {
+          "op": "replace",
+          "path": "/0/label",
+          "value": "온수 온도 설정"
+        }
+      ]
     },
     {
       "component": "preheat",
@@ -77,6 +83,19 @@
       "version": 1,
       "values": [],
       "patch": []
+    },
+    {
+      "component": "preheat",
+      "capability": "mode",
+      "version": 1,
+      "values": [],
+      "patch": [
+        {
+          "op": "replace",
+          "path": "/0/label",
+          "value": "자동 끄기"
+        }
+      ]
     }
   ],
   "automation": {
@@ -142,7 +161,13 @@
         "capability": "thermostatWaterHeatingSetpoint",
         "version": 1,
         "values": [],
-        "patch": [],
+        "patch": [
+          {
+            "op": "replace",
+            "path": "/0/label",
+            "value": "온수 온도 설정"
+          }
+        ],
         "exclusion": []
       },
       {
@@ -151,6 +176,20 @@
         "version": 1,
         "values": [],
         "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "preheat",
+        "capability": "mode",
+        "version": 1,
+        "values": [],
+        "patch": [
+          {
+            "op": "replace",
+            "path": "/0/label",
+            "value": "자동 끄기"
+          }
+        ],
         "exclusion": []
       }
     ],
@@ -216,7 +255,13 @@
         "capability": "thermostatWaterHeatingSetpoint",
         "version": 1,
         "values": [],
-        "patch": [],
+        "patch": [
+          {
+            "op": "replace",
+            "path": "/0/label",
+            "value": "온수 온도 설정"
+          }
+        ],
         "exclusion": []
       },
       {
@@ -225,6 +270,20 @@
         "version": 1,
         "values": [],
         "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "preheat",
+        "capability": "mode",
+        "version": 1,
+        "values": [],
+        "patch": [
+          {
+            "op": "replace",
+            "path": "/0/label",
+            "value": "자동 끄기"
+          }
+        ],
         "exclusion": []
       }
     ]

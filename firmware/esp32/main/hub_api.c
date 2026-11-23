@@ -431,6 +431,16 @@ static esp_err_t state_get(httpd_req_t *req)
         hub_proxy_up_json(up, sizeof(up));          /* 린나이 서버 주소: DNS 답 그대로, TTL 이 지나면 다시 묻는다 */
         CHUNK(",\"cloud\":%s", up);
     }
+    {
+        /* 명령 확인·재전송 누계(켜진 뒤)와 온수 예열 자동 끄기: preheat_off_min 0 = 무제한, preheat_on_s = 예열이 켜진 지 몇 초, preheat_left_s 꺼지기까지 남은 초(-1 무제한) */
+        hub_cmd_info_t ci;
+        hub_rinnai_cmd_info(&ci);
+        CHUNK(",\"cmd\":{\"tracked\":%lu,\"resent\":%lu,\"failed\":%lu,\"pending\":%d,\"preheat_off_min\":%d,\"preheat_on_s\":%lu,"
+              "\"preheat_left_s\":%ld}",
+              (unsigned long)ci.tracked, (unsigned long)ci.resent, (unsigned long)ci.failed, ci.pending, ci.preheat_off_min,
+              (unsigned long)ci.preheat_on_s,
+              ci.preheat_left_s == UINT32_MAX ? -1L : (long)ci.preheat_left_s);
+    }
 
     {
         int mode = 0, billday = 8;
@@ -485,6 +495,13 @@ static esp_err_t metrics_get(httpd_req_t *req)
     for (int i = 0; i < nd; i++) {
         CHUNK("lynnai_link_up{device=\"%s\",mac=\"%s\"} %d\n", dev[i].kind == HUB_KIND_F06 ? "boiler" : "rooms",
               MACSTR3(dev[i]), dev[i].linked);
+    }
+    {
+        hub_cmd_info_t ci;
+        hub_rinnai_cmd_info(&ci);
+        CHUNK("# TYPE lynnai_cmd_resent_total counter\nlynnai_cmd_resent_total %lu\n"
+              "# TYPE lynnai_cmd_failed_total counter\nlynnai_cmd_failed_total %lu\n",
+              (unsigned long)ci.resent, (unsigned long)ci.failed);
     }
     CHUNK("# TYPE lynnai_boiler_on gauge\n");
     for (int i = 0; i < nd; i++) {

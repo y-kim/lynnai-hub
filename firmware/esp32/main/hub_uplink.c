@@ -225,6 +225,10 @@ void hub_uplink_on_request(uint8_t from, const char *text, int len)
         return;
     }
     ESP_LOGI(TAG, "요청: %.*s", len, text);
+    if (len > 11 && !memcmp(text, "hub preoff=", 11)) {   /* 보일러 설정: 온수 예열 자동 끄기(분) */
+        hub_rinnai_request(text + 4, len - 4);
+        return;
+    }
     if (len > 4 && !memcmp(text, "hub ", 4)) {       /* 허브 자체에 대한 요청(동작 모드) — 기기 명령이 아니다 */
         hub_proxy_request(text + 4, len - 4);
         return;

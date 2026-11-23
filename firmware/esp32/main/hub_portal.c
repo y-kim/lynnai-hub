@@ -499,6 +499,7 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_proxy_render(b, cap); FLUSH();     /* 동작 모드(프록시/단독) */
     hub_uplink_render(b, cap); FLUSH();    /* 연결 방식(통로) */
     hub_pairs_render(b, cap); FLUSH();     /* 연결된 기기 */
+    hub_rinnai_render(b, cap); FLUSH();    /* 보일러 명령(명령 확인 누계) */
     hub_devs_render(b, cap); FLUSH();      /* 등록 대기 */
     hub_expose_render_types(b, cap); FLUSH();  /* 노출 설정 */
     hub_plugins_render(b, cap); FLUSH();
