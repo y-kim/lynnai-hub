@@ -855,6 +855,11 @@ function show_gas(parent)
   -- 들고 있는 capability 정의가 옛것(KRW 만)이라서다. 2026-11-22 에 두 번 확인: 정의를 고친 지 2시간이 지나고 드라이버를
   -- 다시 설치해도 "Given 원 for unit. Incorrect string given" 으로 그 뒤의 요금 갱신이 전부 멈췄다.
   local month_won = gas_won(child, month_m3, true)
+  local hub_period = hub_state(parent).gas_period
+  if hub_period then          -- 허브가 센 값이 있으면 그것을 쓴다: 따로 세면 시작점이 달라 관리 화면과 숫자가 어긋난다
+    month_m3 = math.floor(hub_period[1] / 10 + 0.5) / 100
+    month_won = hub_period[2]
+  end
   local day_won = gas_won(child, day / 1000, false)
   -- 사용량 경고: 이번달 예상 금액 또는 지난 24시간 요금이 설정한 기준(원) 이상이면. 기준 0 = 끔. 금액이 기준 아래로
   -- 내려가면(새 청구 기간, 하루치가 줄어듦) 저절로 풀린다. 드라이버는 휴대폰 알림을 못 보낸다 — 요약 글자에 표시하고,
@@ -897,6 +902,9 @@ local function on_gas(parent, b)
   hub_state(parent).gas = { string.unpack("<I4I4I4I4I4", b) }
   -- 여섯째(있으면) = 1펄스 양(L). 옛 펌웨어는 다섯만 보낸다 → 10 L 로 본다
   hub_state(parent).gas_step = (#b >= 24) and string.unpack("<I4", b, 21) or 10
+  -- 일곱째·여덟째(있으면) = 허브가 센 이번 청구 기간 사용량(L)·예상 청구액(원). 관리 화면과 같은 숫자다.
+  -- v0.5 까지의 펌웨어는 안 보낸다 → 드라이버가 스스로 센다(show_gas)
+  hub_state(parent).gas_period = (#b >= 32) and { string.unpack("<I4I4", b, 25) } or nil
   if not visible(parent, BIT.gas) then return end
   create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter")
   show_gas(parent)

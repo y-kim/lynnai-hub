@@ -25,7 +25,7 @@
 #define HUB_RK_CMD_STATE    0x01    /* [종류 6|9][MAC끝3바이트][EPC 70 블롭] */
 #define HUB_RK_CMD_LINKS    0x02    /* 연결된 기기 목록: ([종류][MAC끝3바이트]) * n. 목록에 없으면 오프라인 */
 #define HUB_RK_CMD_ROOM     0x03    /* 온습도 int16 x2 (°C*100, %*100) */
-#define HUB_RK_CMD_GAS      0x04    /* u32 x6 (펄스, 계량기 L|FFFFFFFF, 1시간 L, 24시간 L, 유량 L/h, 1펄스 L — 여섯째는 v0.3 뒤에 추가) */
+#define HUB_RK_CMD_GAS      0x04    /* u32 x6~8 (펄스, 계량기 L|FFFFFFFF, 1시간 L, 24시간 L, 유량 L/h, 1펄스 L — 여섯째는 v0.3 뒤에 추가, 이번 청구 기간 사용량 L, 예상 청구액 원 — 이 둘은 v0.5 뒤에 추가) */
 #define HUB_RK_CMD_EXPOSE   0x06    /* u32: 이 통로에 노출할 항목 비트(hub_expose.h) */
 #define HUB_RK_CMD_PLUGINS  0x05    /* [켜진 플러그인 비트: 1 온습도계, 2 가스][고장 비트(같은 자리)] — 꺼진 것의 기기는 지우고,
                                      * 고장인 것은 오프라인으로 보인다. 옛 펌웨어는 첫 바이트만 보낸다 */

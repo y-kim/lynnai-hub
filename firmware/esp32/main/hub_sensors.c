@@ -33,6 +33,7 @@
 #include "hub_uplink.h"
 #include "hub_plugins.h"
 #include "hub_expose.h"
+#include "hub_tariff.h"
 #include "hub_events.h"
 #include "hub_api.h"
 #include "hub_room_calc.h"
@@ -445,12 +446,14 @@ static void gas_task(void *arg)
 static void send_gas(void)
 {
     gas_view_t v = gas_view();
-    /* 여섯째 = 1펄스 양(L). 옛 드라이버는 앞의 다섯만 읽는다 */
-    uint32_t p[6] = { v.count, v.reading_l, v.hour_l, v.day_l, v.flow_lph, GAS_STEP_L };
+    /* 여섯째 = 1펄스 양(L). 옛 드라이버는 앞의 다섯만 읽는다. 일곱째·여덟째 = 이번 청구 기간의 사용량(L)과 예상
+     * 청구액(원) — 허브가 아직 모르면(시계 전) 붙이지 않는다 */
+    uint32_t p[8] = { v.count, v.reading_l, v.hour_l, v.day_l, v.flow_lph, GAS_STEP_L };
+    bool period = hub_tariff_period(&p[6], &p[7]);
     if (s_gas_fault) {
         send_plugins();       /* 고장 중엔 값보다 먼저 다시 알린다(드라이버가 재시작해 잊었어도 온라인으로 되돌리지 않게) */
     }
-    hub_uplink_send(HUB_RK_CMD_GAS, (uint8_t *)p, sizeof(p));   /* 리틀엔디언 u32 x6 */
+    hub_uplink_send(HUB_RK_CMD_GAS, (uint8_t *)p, period ? sizeof(p) : 6 * sizeof(uint32_t));   /* 리틀엔디언 u32 x6 또는 x8 */
 }
 
 /* ---------------------------------------------------------------- 온습도 */

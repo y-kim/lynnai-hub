@@ -33,5 +33,6 @@ void hub_tariff_cur(int *mode, const char **region, int *billday,
 /* 월별 기록: 개수와 i번째(0=가장 오래됨). m3·won 은 그 기간 사용량/청구액.
  * status: 0=진행 중, 1=기간 끝(잠정, 열량 확정 전), 2=확정. */
 void hub_tariff_tick(void);        /* 월별 집계 최신화(API·metrics 진입 때 호출) */
+bool hub_tariff_period(uint32_t *use_l, uint32_t *won);   /* 이번 청구 기간 사용량(L)·예상 청구액(원). 아직 모르면 false */
 int  hub_tariff_months(void);
 int  hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won, int *closed);

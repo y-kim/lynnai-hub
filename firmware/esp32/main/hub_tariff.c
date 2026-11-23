@@ -655,6 +655,23 @@ void hub_tariff_cur(int *mode, const char **region, int *billday,
 
 void hub_tariff_tick(void) { months_update(); }
 
+/* 이번 청구 기간의 사용량(L)과 예상 청구액(원) — 관리 화면 그래프의 마지막 달과 같은 값. 스마트홈에도 이 값을 보낸다
+ * (드라이버가 따로 세면 시작점이 달라 웹과 앱의 숫자가 어긋난다). 아직 모르면(시계 전·가스 꺼짐) false. */
+bool hub_tariff_period(uint32_t *use_l, uint32_t *won)
+{
+    if (!s_lock) return false;
+    months_update();
+    bool ok = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_mon_n && !s_mon[s_mon_n - 1].closed) {
+        *use_l = s_mon[s_mon_n - 1].use_l;
+        *won = s_mon[s_mon_n - 1].won;
+        ok = true;
+    }
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+
 int hub_tariff_months(void) { return s_mon_n; }
 
 int hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won, int *closed)

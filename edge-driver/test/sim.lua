@@ -896,3 +896,12 @@ check(lastv("hub", "main", "mode") == "단독", "너무 짧은 메시지는 무�
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)
+print("[32] 가스: 허브가 이번 청구 기간 사용량·청구액을 보내면 그 값을 쓴다(관리 화면과 같은 숫자)")
+reset()
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4", 1000, 50000, 0, 5000, 0, 10))
+core.info_changed(nil, driver._children["gas"])
+check(lastv("gas", "main", "period").value == 0, "허브 값이 없으면(옛 펌웨어) 드라이버가 스스로 센다 → 첫 값 0")
+core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4I4I4", 1001, 50010, 0, 5000, 0, 10, 9140, 11004))
+check(lastv("gas", "main", "period").value == 9.14 and lastv("gas", "main", "periodText") == "9.14", "이번달 사용량 = 허브 값 9.14㎥")
+check(lastv("gas", "main", "month").value == 11004, "이번달 예상 금액 = 허브 값 11004원")
+
