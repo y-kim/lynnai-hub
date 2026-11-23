@@ -51,8 +51,8 @@ HEAT_MODE_ROOM = "room"     # room temperature control, 5-40 C
 ONDOL_TEMPS = [40, 45, *range(46, 61), 65, 70, 75, 80, 85]   # 35 is not taken (bounces back to 40)
 ROOM_TEMPS = list(range(5, 41))
 HOT_WATER_TEMPS = [*range(35, 48), 50, 55, 60]   # the only values the boiler takes (others bounce back after ~20 s)
-ZONE_MIN_TEMP = 10
-ZONE_MAX_TEMP = 30
+ZONE_MIN_TEMP = 5
+ZONE_MAX_TEMP = 40
 
 # Boiler switches: position of the flag in the hex string, and the command code.
 BOILER_SWITCHES = {
@@ -109,8 +109,10 @@ class ZoneState:
     away: bool
     reserved: bool
     reserve_hours: int
+    time_mode: bool             # heats a few minutes every hour instead of to a temperature
     current: int
     target: int
+    time_minutes: int = 10      # time mode: minutes of heating every hour (kept while the mode is off too)
 
 
 @dataclass
@@ -189,8 +191,10 @@ def decode_zones(blob: bytes) -> dict[str, ZoneState]:
             away=bool(st & 0x10),
             reserved=bool(st & 0x08),
             reserve_hours=blob[slot.stat + 1],
+            time_mode=bool(st & 0x04),
             current=cur,
             target=target,
+            time_minutes=blob[slot.stat + 5] if len(blob) > slot.stat + 5 else 10,
         )
     return out
 
@@ -299,6 +303,15 @@ def decode_mode(payload: bytes) -> HubMode | None:
 # Hot water preheat never turns itself off and fires the burner every ten minutes or so while it is on; the hub
 # turns it off after this many minutes (0 = never). The same choices as on the hub's admin page.
 PREHEAT_OFF_CHOICES = [*range(1, 61), 0]   # minutes, 0 = never
+# time mode: minutes of heating every hour (f09 da, two hex digits) — the Rinnai app offers exactly these
+TIME_MINUTES_CHOICES = [5, 10, 20, 30, 40, 50, 60]
+
+
+def time_minutes(n: int | None) -> int:
+    """A device or remembered value -> the nearest choice (10 when unknown)."""
+    if not n or n < 1:
+        return 10
+    return min(TIME_MINUTES_CHOICES, key=lambda v: (abs(v - n), v))
 
 
 def preheat_off_option(minutes: int) -> str:

@@ -133,8 +133,15 @@ async def test_commands_reach_the_hub(hass: HomeAssistant, entry, fake_hub):
     await call("water_heater", "set_temperature", f"water_heater.boiler_{BOILER}_hot_water", temperature=45)
     assert fake_hub.requests.pop() == f"f06@{BOILER} d1=2D,df=0"
 
-    await call("number", "set_value", "number.living_room_reservation_hours", value=5)
-    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,96=1,97=05"
+    await hass.services.async_call("number", "set_value", {
+        "entity_id": "number.living_room_reservation_hours", "value": 5}, blocking=True)
+    await asyncio.sleep(0.1)
+    assert not fake_hub.requests                  # reservation is off: only remembered (no accidental start)
+    await _settle(hass, lambda: hass.states.get("number.living_room_reservation_hours").state == "5")
+    await call("switch", "turn_on", "switch.living_room_reservation")
+    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,96=1,97=05"     # starts with the remembered length
+    await call("climate", "set_temperature", "climate.living_room", temperature=5)
+    assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,d4=05"          # rooms go down to 5 C
     await call("switch", "turn_off", "switch.living_room_reservation")
     assert fake_hub.requests.pop() == f"f09@{THERMO} a0=7,96=0"
 
@@ -315,14 +322,62 @@ async def test_boiler_mode_set_on_the_hub(hass: HomeAssistant, boiler_only, fake
     await _settle(hass, lambda: s.get(sel) is not None)
 
 
-async def test_preheat_time_left(hass: HomeAssistant, entry, fake_hub):
+async def test_time_mode_and_preheat_time_left(hass: HomeAssistant, entry, fake_hub):
     s = hass.states
+    assert s.get("switch.room_1_timed_heating").state == "off"
+
+    async def press(domain, service, entity_id, **data):
+        fake_hub.requests.clear()
+        await hass.services.async_call(domain, service, {"entity_id": entity_id, **data}, blocking=True)
+        await _settle(hass, lambda: bool(fake_hub.requests))
+        await asyncio.sleep(0.05)
+        return list(fake_hub.requests)
+
+    # room 1 is on (temperature): time mode is only b4=1
+    assert await press("switch", "turn_on", "switch.room_1_timed_heating") == [f"f09@{THERMO} a0=1,b4=1"]
+    blob = bytearray(bytes.fromhex(f09()))
+    blob[0] |= 0x04                                                   # the thermostat reports time mode
+    await fake_hub.push_state(9, THERMO, blob.hex())
+    await _settle(hass, lambda: s.get("switch.room_1_timed_heating").state == "on")
+    assert s.get("climate.room_1").state == "off"                     # one of the two is on
+    assert await press("climate", "turn_on", "climate.room_1") == [f"f09@{THERMO} a0=1,b4=0"]
+    assert await press("switch", "turn_off", "switch.room_1_timed_heating") == [f"f09@{THERMO} a0=1,b1=0"]
+
     sel = f"select.boiler_{BOILER}_hot_water_preheat_auto_off"
     await fake_hub.push(0x0C, bytes([20, 0, 14]))                     # preheat on, 14 minutes left
     await _settle(hass, lambda: s.get(sel).state == "14")
     await fake_hub.push(0x0C, bytes([20, 0, 0]))                      # off again: the default
     await _settle(hass, lambda: s.get(sel).state == "20")
+    assert await press("select", "select_option", sel, option="7") == ["hub preoff=7"]
+
+
+async def test_time_mode_minutes(hass: HomeAssistant, entry, fake_hub):
+    """Minutes per hour (f09 da): remembered while the room is not in time mode, sent when the time switch goes on."""
+    s = hass.states
+    sel = "select.room_1_timed_heating_minutes_per_hour"
+    assert s.get(sel).state == "10"                                   # unknown (0) -> 10
+
+    async def press(domain, service, entity_id, **data):
+        fake_hub.requests.clear()
+        await hass.services.async_call(domain, service, {"entity_id": entity_id, **data}, blocking=True)
+        await _settle(hass, lambda: bool(fake_hub.requests))
+        await asyncio.sleep(0.05)
+        return list(fake_hub.requests)
+
     fake_hub.requests.clear()
-    await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": "7"}, blocking=True)
-    await _settle(hass, lambda: bool(fake_hub.requests))
-    assert fake_hub.requests == ["hub preoff=7"]
+    await hass.services.async_call("select", "select_option", {"entity_id": sel, "option": "30"}, blocking=True)
+    await asyncio.sleep(0.2)
+    assert fake_hub.requests == []                                    # not in time mode: only remembered
+    await _settle(hass, lambda: s.get(sel).state == "30")
+    assert await press("switch", "turn_on", "switch.room_1_timed_heating") == [
+        f"f09@{THERMO} a0=1,b4=1", f"f09@{THERMO} a0=1,da=1e"]
+    blob = bytearray(bytes.fromhex(f09()))
+    blob[0] |= 0x04
+    blob[5] = 30
+    await fake_hub.push_state(9, THERMO, blob.hex())
+    await _settle(hass, lambda: s.get("switch.room_1_timed_heating").state == "on")
+    assert s.get(sel).state == "30"
+    assert await press("select", "select_option", sel, option="5") == [f"f09@{THERMO} a0=1,da=05"]
+    blob[5] = 5
+    await fake_hub.push_state(9, THERMO, blob.hex())
+    await _settle(hass, lambda: s.get(sel).state == "5")

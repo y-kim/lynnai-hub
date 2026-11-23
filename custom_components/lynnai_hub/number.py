@@ -57,7 +57,8 @@ class HeatSetpoint(BoilerEntity, NumberEntity):
 
 
 class ReservationHours(ZoneEntity, NumberEntity):
-    """Setting this starts a reservation of that many hours (the device has no 'length only' command)."""
+    """Length of the room's reservation. While the reservation runs, changing it restarts it with the new length;
+    while it is off the value is only remembered and used when the reservation is switched on."""
 
     _attr_native_min_value = 1
     _attr_native_max_value = 24
@@ -67,17 +68,12 @@ class ReservationHours(ZoneEntity, NumberEntity):
 
     def __init__(self, hass: HomeAssistant, hub, entry_id: str, mac: str, zone_id: str) -> None:
         super().__init__(hass, hub, entry_id, mac, zone_id, "reservation_hours")
-        self._last = 1
 
     @property
     def native_value(self) -> float | None:
-        zone = self.zone
-        if zone is None:
+        if self.zone is None:
             return None
-        if zone.reserved and 1 <= zone.reserve_hours <= 24:
-            self._last = zone.reserve_hours
-        return self._last
+        return self.hub.zone_reserve_hours(self.mac, self.zone_id)
 
     async def async_set_native_value(self, value: float) -> None:
-        self._last = int(value)
-        await self.hub.set_zone_reservation(self.mac, self.zone_id, self._last)
+        await self.hub.set_zone_reserve_hours(self.mac, self.zone_id, int(value))

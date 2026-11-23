@@ -34,6 +34,8 @@ class LynnaiHub:
         self.preheat_off: int | None = None                     # preheat auto-off minutes (0 = never), one for the hub
         self.preheat_left: int | None = None                    # 0 preheat off, 1-60 minutes left, 255 on without limit
         self.boiler_mode = p.BOILER_MODE_UNSET                  # set on the hub: heating water / floor-room / not set
+        self.reserve_hours: dict[tuple[str, str], int] = {}     # reservation length picked while the reservation was off
+        self.time_minutes: dict[tuple[str, str], int] = {}      # time-mode minutes picked while the room was not in time mode
         self._on_update: Callable[[], None] = lambda: None
         self._on_new: Callable[[], None] = lambda: None
 
@@ -216,9 +218,12 @@ class LynnaiHub:
         v = p.snap(value, p.HOT_WATER_TEMPS, self.boilers[mac].hot_water_setpoint)
         await self._send([p.boiler_cmd(mac, "d1", f"{v:02X},df=0")])
 
-    async def set_zone_power(self, tmac: str, zone_id: str, on: bool) -> None:
-        """Turning a room on means 'heat this room': wake its boiler and leave away mode first."""
+    async def set_zone_power(self, tmac: str, zone_id: str, on: bool, time_mode: bool = False) -> None:
+        """Turning a room on means 'heat this room': wake its boiler and leave away mode first.
+        time_mode=True heats it a few minutes every hour (b4=1); plain on goes back to a temperature (b4=0).
+        Off is just off."""
         requests = []
+        zone = self.zones.get(tmac, {}).get(zone_id)
         if on:
             bmac = self.boiler_of(tmac)
             boiler = self.boilers.get(bmac) if bmac else None
@@ -226,10 +231,17 @@ class LynnaiHub:
                 requests.append(p.boiler_cmd(bmac, "80", "1"))
             if boiler and not boiler.heat:
                 requests.append(p.boiler_cmd(bmac, "b1", "1"))
-            zone = self.zones.get(tmac, {}).get(zone_id)
             if zone and zone.away:
                 requests.append(p.zone_cmd(tmac, zone_id, "b3=0"))
-        requests.append(p.zone_cmd(tmac, zone_id, f"b1={p.onoff(on)}"))
+        if not (on and zone and zone.on and (time_mode or zone.time_mode)):   # only switching time <-> temperature
+            requests.append(p.zone_cmd(tmac, zone_id, f"b1={p.onoff(on)}"))
+        if on and time_mode:
+            requests.append(p.zone_cmd(tmac, zone_id, "b4=1"))
+            want = self.time_minutes.get((tmac, zone_id))       # minutes picked while it was off: send them now
+            if want and zone and p.time_minutes(want) != zone.time_minutes:
+                requests.append(p.zone_cmd(tmac, zone_id, f"da={p.time_minutes(want):02x}"))
+        elif on and zone and zone.time_mode:
+            requests.append(p.zone_cmd(tmac, zone_id, "b4=0"))
         await self._send(requests)
 
     async def set_zone_target(self, tmac: str, zone_id: str, value: float) -> None:
@@ -238,6 +250,45 @@ class LynnaiHub:
 
     async def set_zone_away(self, tmac: str, zone_id: str, on: bool) -> None:
         await self._send([p.zone_cmd(tmac, zone_id, f"b3={p.onoff(on)}")])
+
+    def zone_time_minutes(self, tmac: str, zone_id: str) -> int:
+        """Time-mode minutes to show: the device's while the room heats in time mode, else the one picked last."""
+        zone = self.zones.get(tmac, {}).get(zone_id)
+        if zone and zone.on and zone.time_mode:
+            self.time_minutes.pop((tmac, zone_id), None)
+            return p.time_minutes(zone.time_minutes)
+        return p.time_minutes(self.time_minutes.get((tmac, zone_id)) or (zone.time_minutes if zone else None))
+
+    async def set_zone_time_minutes(self, tmac: str, zone_id: str, minutes: int) -> None:
+        """In time mode the minutes go to the thermostat right away (like the Rinnai app). Otherwise only remember
+        them and send them when time mode is switched on (same rule as the reservation length)."""
+        if minutes not in p.TIME_MINUTES_CHOICES:
+            return
+        zone = self.zones.get(tmac, {}).get(zone_id)
+        if zone and zone.on and zone.time_mode:
+            await self._send([p.zone_cmd(tmac, zone_id, f"da={minutes:02x}")])
+        else:
+            self.time_minutes[(tmac, zone_id)] = minutes
+            self._on_update()
+
+    def zone_reserve_hours(self, tmac: str, zone_id: str) -> int:
+        """Reservation length to show and to start with: the device's while it runs, else the one picked last."""
+        zone = self.zones.get(tmac, {}).get(zone_id)
+        if zone and zone.reserved and 1 <= zone.reserve_hours <= 24:
+            self.reserve_hours[(tmac, zone_id)] = zone.reserve_hours
+        return self.reserve_hours.get((tmac, zone_id)) or (
+            zone.reserve_hours if zone and 1 <= zone.reserve_hours <= 24 else 1)
+
+    async def set_zone_reserve_hours(self, tmac: str, zone_id: str, hours: int) -> None:
+        """Changes a running reservation. While it is off only remember the length (no command: touching the slider
+        by mistake must not start a reservation and switch the room on)."""
+        h = max(1, min(24, int(hours)))
+        self.reserve_hours[(tmac, zone_id)] = h
+        zone = self.zones.get(tmac, {}).get(zone_id)
+        if zone and zone.reserved:
+            await self.set_zone_reservation(tmac, zone_id, h)
+        else:
+            self._on_update()
 
     async def set_zone_reservation(self, tmac: str, zone_id: str, hours: int | None) -> None:
         """hours = 1..24 starts a reservation of that length; None cancels it."""

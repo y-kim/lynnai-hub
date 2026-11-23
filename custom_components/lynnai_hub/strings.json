@@ -136,6 +136,18 @@
           "60": "60 minutes",
           "unlimited": "Never"
         }
+      },
+      "time_minutes": {
+        "name": "Timed heating minutes per hour",
+        "state": {
+          "5": "5 min",
+          "10": "10 min",
+          "20": "20 min",
+          "30": "30 min",
+          "40": "40 min",
+          "50": "50 min",
+          "60": "60 min"
+        }
       }
     },
     "sensor": {
@@ -185,6 +197,9 @@
       },
       "auto_fallback": {
         "name": "Standalone while the cloud is unreachable"
+      },
+      "time_mode": {
+        "name": "Timed heating"
       }
     },
     "water_heater": {

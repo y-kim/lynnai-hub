@@ -27,14 +27,14 @@ import time
 CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_PAIRS = 0x00, 0x01, 0x02, 0x07
 CMD_BOILCFG = 0x0C              # 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)][보일러 모드 0 정하지 않음/1 난방수/2 온돌·실내]
 BOILER_MODES = {"": 0, "water": 1, "room": 2}   # 환경변수 BOILER_MODE (ESP32 는 초기 설정·관리 화면에서 고름)
-OK_CODES = {"80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97"}   # ESP32 code_allowed 와 같게
+OK_CODES = {"80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97", "da"}   # ESP32 code_allowed 와 같게
 PREOFF_CHOICES = (*range(1, 61), 0)        # 1~60분, 0 = 무제한
 PEND_WAIT_S, PEND_TRIES, PEND_ANY_S = 2.5, 3, 0.3
 # 확인할 칸: f06 = (니블 위치, 두 니블 값인가), f09 = 방(a0) stat 바이트 기준의 (비트 | 바이트 오프셋)
 F06_CHECK = {"80": (0, False), "b1": (2, False), "d7": (3, False), "b6": (5, False), "b4": (7, False),
              "d1": (10, True), "d2": (13, True), "d4": (15, True)}
-F09_BIT = {"b1": 0x02, "b3": 0x10, "96": 0x08}
-F09_BYTE = {"97": 1, "d4": 4}
+F09_BIT = {"b1": 0x02, "b3": 0x10, "96": 0x08, "b4": 0x04}   # b4 = 시간 모드(2026-11-23 앱 캡처)
+F09_BYTE = {"97": 1, "d4": 4, "da": 5}   # da = 시간 난방 분(1시간에 N분)
 
 
 def _nib(b, i):

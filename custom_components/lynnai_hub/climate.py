@@ -62,7 +62,8 @@ class RoomClimate(ZoneEntity, ClimateEntity):
         zone = self.zone
         if zone is None:
             return None
-        return HVACMode.HEAT if zone.on and self._heating_possible() else HVACMode.OFF
+        # time mode has its own switch: here the room shows off (one of the two is on, as in SmartThings)
+        return HVACMode.HEAT if zone.on and not zone.time_mode and self._heating_possible() else HVACMode.OFF
 
     @property
     def hvac_action(self) -> HVACAction | None:

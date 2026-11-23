@@ -21,6 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
     def make():
         out = [BoilerSwitch(hass, hub, entry.entry_id, mac, name) for mac in hub.boilers for name in BOILER_SWITCHES]
         out += [ReservationSwitch(hass, hub, entry.entry_id, mac, z) for mac, zones in hub.zones.items() for z in zones]
+        out += [TimeModeSwitch(hass, hub, entry.entry_id, mac, z) for mac, zones in hub.zones.items() for z in zones]
         if hub.mode is not None:
             out.append(AutoFallbackSwitch(hub, entry.entry_id))
         return out
@@ -60,6 +61,25 @@ class BoilerSwitch(BoilerEntity, SwitchEntity):
         await self._set(False)
 
 
+class TimeModeSwitch(ZoneEntity, SwitchEntity):
+    """Heat the room a few minutes every hour (minutes set on the thermostat) instead of to a temperature.
+    Turning it on switches temperature heating off and the other way round; turning it off turns the room off."""
+
+    def __init__(self, hass: HomeAssistant, hub, entry_id: str, mac: str, zone_id: str) -> None:
+        super().__init__(hass, hub, entry_id, mac, zone_id, "time_mode")
+
+    @property
+    def is_on(self) -> bool | None:
+        zone = self.zone
+        return zone.on and zone.time_mode if zone else None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.hub.set_zone_power(self.mac, self.zone_id, True, time_mode=True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.hub.set_zone_power(self.mac, self.zone_id, False)
+
+
 class ReservationSwitch(ZoneEntity, SwitchEntity):
     """Run the room for a number of hours (set with the 'reservation hours' number), then stop."""
 
@@ -71,9 +91,7 @@ class ReservationSwitch(ZoneEntity, SwitchEntity):
         return self.zone.reserved if self.zone else None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        zone = self.zone
-        hours = zone.reserve_hours if zone and 1 <= zone.reserve_hours <= 24 else 1
-        await self.hub.set_zone_reservation(self.mac, self.zone_id, hours)
+        await self.hub.set_zone_reservation(self.mac, self.zone_id, self.hub.zone_reserve_hours(self.mac, self.zone_id))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.hub.set_zone_reservation(self.mac, self.zone_id, None)

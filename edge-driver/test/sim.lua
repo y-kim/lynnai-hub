@@ -440,8 +440,86 @@ core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z2"], { 
 check(last_cmd_has("a0=2,96=1,97=18"), "스위치 켬 → 마지막으로 고른 시간(24시간) 사용")
 sent_cmds = {}
 core.capability_handlers["connectbook02461.reserveHours"]["setHours"](nil, driver._children["td4e5f6_z1"], { component = "reserve", args = { hours = 3 } })
+check(#sent_cmds == 0, "예약이 꺼진 방1 에서 시간을 바꾸면 아무것도 보내지 않음")
+check(lastv("td4e5f6_z1", "reserve", "hours").value == 3, "고른 3시간은 슬라이더에 그대로(기억)")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z1"], { component = "reserve" })
 local j1 = table.concat(sent_cmds, " | ")
-check(j1:find("a0=1,96=1,97=03", 1, true) and not j1:find("b1=", 1, true), "꺼진 방1 에 3시간 → 켜는 명령 없이 97=03")
+check(j1:find("a0=1,96=1,97=03", 1, true) and not j1:find("b1=", 1, true), "방1 예약을 켜면 기억한 3시간으로, 켜는 명령 없이 97=03")
+
+print("[15b] 방 온도는 5~40도")
+sent_cmds = {}
+core.capability_handlers["thermostatHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children["td4e5f6_z1"], { component = "main", args = { setpoint = 3 } })
+check(last_cmd_has("a0=1,d4=05"), "3도 → 5도(d4=05)")
+core.capability_handlers["thermostatHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children["td4e5f6_z1"], { component = "main", args = { setpoint = 40 } })
+check(last_cmd_has("a0=1,d4=28"), "40도 → d4=28")
+
+print("[15c] 시간 모드: 외출 위의 '시간' 스위치 — 난방과 하나만 켜짐, 끄면 그냥 꺼짐")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06)
+local tm = f09_rooms(true, false, true)
+state(9, "d4e5f6", tm)
+local zc = driver._children["td4e5f6_z1"]
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, zc, { component = "timemode" })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=1,b4=1", "켜진 방에서 시간 켬 → b4=1 만")
+state(9, "d4e5f6", "87" .. tm:sub(3))                                -- 0x87 = 켜짐 + 시간 모드
+check(lastv("td4e5f6_z1", "main", "switch") == "off" and lastv("td4e5f6_z1", "timemode", "switch") == "on",
+  "시간 모드: 난방 스위치 꺼짐, 시간 스위치 켜짐")
+check((lastv("td4e5f6_z1", "main", "roomStatus") or ""):find("시간 난방", 1, true), "요약 글 '시간 난방'")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, zc, { component = "main" })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=1,b4=0", "시간 모드에서 난방 켬 → b4=0 만(온도로)")
+sent_cmds = {}
+core.capability_handlers["switch"]["off"](nil, zc, { component = "timemode" })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=1,b1=0", "시간 끔 → 그냥 방 끔(b1=0)")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, driver._children["td4e5f6_z2"], { component = "timemode" })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=2,b1=1;f09@d4e5f6 a0=2,b4=1", "꺼진 방2 에서 시간 켬 → 켜고(b1=1) 시간 모드(b4=1)")
+
+print("[15d] 시간 모드의 분(1시간에 5·10·20…60분, f09 da) — 시간 모드가 아니면 기억만, 켤 때 보냄")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06)
+local function with_tmin(hex, slot, v)                               -- 슬롯 6번째 바이트(분)
+  local pos = slot * 7 + 5
+  return hex:sub(1, pos * 2) .. string.format("%02x", v) .. hex:sub(pos * 2 + 3)
+end
+local base = with_tmin(f09_rooms(true, false, false), 0, 10)
+state(9, "d4e5f6", base)
+local zc = driver._children["td4e5f6_z1"]
+-- (모의 기기는 시험마다 ID 를 다시 써서, 앞 시험에서 이미 보낸 값은 걸러진다 — 새 값으로 확인)
+state(9, "d4e5f6", with_tmin(base, 1, 0x14))
+check(lastv("td4e5f6_z2", "timemode", "mode") == "20분", "기기 값 14 → 20분")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, zc, { component = "timemode", args = { mode = "30분" } })
+check(#sent_cmds == 0, "시간 모드가 아닐 때 고르면 보내지 않음")
+check(lastv("td4e5f6_z1", "timemode", "mode") == "30분", "고른 값(30분)을 보여 줌")
+state(9, "d4e5f6", base)
+check(lastv("td4e5f6_z1", "timemode", "mode") == "30분", "새 보고가 와도 기억한 30분 그대로")
+core.capability_handlers["switch"]["on"](nil, zc, { component = "timemode" })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=1,b4=1;f09@d4e5f6 a0=1,da=1e", "시간 켬 → b4=1 다음 da=1e(30분)")
+local tmode = with_tmin("87" .. base:sub(3), 0, 30)
+state(9, "d4e5f6", tmode)
+check(lastv("td4e5f6_z1", "timemode", "mode") == "30분", "시간 모드: 기기 값 30분")
+check((lastv("td4e5f6_z1", "main", "roomStatus") or ""):find("시간 난방 30분", 1, true), "요약 글 '시간 난방 30분'")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, zc, { component = "timemode", args = { mode = "5분" } })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=1,da=05", "시간 모드에서 고르면 바로 da=05")
+sent_cmds = {}
+core.capability_handlers["mode"]["setMode"](nil, zc, { component = "timemode", args = { mode = "15분" } })
+check(#sent_cmds == 0, "목록에 없는 값은 무시")
+state(9, "d4e5f6", with_tmin(tmode, 0, 5))
+check(lastv("td4e5f6_z1", "timemode", "mode") == "5분", "기기 값을 따라감(5분)")
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, zc, { component = "main" })
+state(9, "d4e5f6", with_tmin(base, 0, 5))
+sent_cmds = {}
+core.capability_handlers["switch"]["on"](nil, zc, { component = "timemode" })
+check(table.concat(sent_cmds, " | ") == "f09@d4e5f6 a0=1,b4=1", "기억한 값이 없으면 시간 켬은 b4=1 만")
+state(9, "d4e5f6", with_tmin(base, 0, 7))
+check(lastv("td4e5f6_z1", "timemode", "mode") == "5분", "목록 밖 기기 값(7)은 가까운 5분으로")
 
 print("[16] 재시작 직후: 연결된 조절기가 다 보고하기 전엔 자동화 판단 안 함")
 reset()

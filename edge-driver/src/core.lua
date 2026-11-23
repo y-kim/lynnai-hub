@@ -25,13 +25,13 @@ local KIND_F06, KIND_F09 = 6, 9
 -- 기기가 리포트하는 슬롯만 보인다(decode_rooms 가 거른다). 이름은 슬롯(a0)대로 방1~방6/거실.
 -- 슬롯 간격 7바이트(stat=base, cur=base+3, set=base+4). z1~z3 은 기존 그대로(기기 안 바뀌게).
 local ZONES = {
-  z1 = { label = "방1", stat = 0,  cur = 3,  set = 4,  a0 = 1, max = 30, n = 1 },
-  z2 = { label = "방2", stat = 7,  cur = 10, set = 11, a0 = 2, max = 30, n = 2 },
-  z3 = { label = "거실", stat = 42, cur = 45, set = 46, a0 = 7, max = 30, n = 3 },
-  z4 = { label = "방3", stat = 14, cur = 17, set = 18, a0 = 3, max = 30, n = 4 },
-  z5 = { label = "방4", stat = 21, cur = 24, set = 25, a0 = 4, max = 30, n = 5 },
-  z6 = { label = "방5", stat = 28, cur = 31, set = 32, a0 = 5, max = 30, n = 6 },
-  z7 = { label = "방6", stat = 35, cur = 38, set = 39, a0 = 6, max = 30, n = 7 },
+  z1 = { label = "방1", stat = 0,  cur = 3,  set = 4,  a0 = 1, max = 40, n = 1 },
+  z2 = { label = "방2", stat = 7,  cur = 10, set = 11, a0 = 2, max = 40, n = 2 },
+  z3 = { label = "거실", stat = 42, cur = 45, set = 46, a0 = 7, max = 40, n = 3 },
+  z4 = { label = "방3", stat = 14, cur = 17, set = 18, a0 = 3, max = 40, n = 4 },
+  z5 = { label = "방4", stat = 21, cur = 24, set = 25, a0 = 4, max = 40, n = 5 },
+  z6 = { label = "방5", stat = 28, cur = 31, set = 32, a0 = 5, max = 40, n = 6 },
+  z7 = { label = "방6", stat = 35, cur = 38, set = 39, a0 = 6, max = 40, n = 7 },
 }
 local ZONE_ORDER = { "z1", "z2", "z3", "z4", "z5", "z6", "z7" }
 
@@ -167,8 +167,11 @@ local function decode_rooms(blob)
       -- stat 비트: 0x02 켜짐, 0x40 난방 중, 0x10 외출, 0x08 반복예약. stat 다음 바이트 = 저장된 예약 값(97)
       -- (실기기: 예약 켬 → 0x8b·다음 01 유지, 96=0 → 0x83·다음 01 그대로, 방 끔 → 0x81·다음 00)
       local resv = blob:byte(z.stat + 2) or 0
+      -- 0x04 = 시간 모드(한 시간에 몇 분씩 난방, 조절기에서 분을 정함) — 2026-11-23 앱이 방1 에 f09 a0=1,b4=1 을 보내자 0x43 → 0x47
+      -- 슬롯 6번째 바이트 = 시간 모드의 '1시간에 몇 분'(f09 da, 꺼져 있어도 기억된 값 — 기본 0a; 2026-11-23 거실 조절기에서 05 → 0a)
       out[id] = { on = (st & 0x02) ~= 0, heating = (st & 0x40) ~= 0, outing = (st & 0x10) ~= 0,
-                  reserve = (st & 0x08) ~= 0, resv = resv, current = cur, target = set }
+                  reserve = (st & 0x08) ~= 0, time = (st & 0x04) ~= 0, resv = resv, current = cur, target = set,
+                  tmin = blob:byte(z.stat + 6) }
     end
   end
   return out
@@ -391,11 +394,27 @@ local function resv_hours(n)                                   -- 기억해 둔 
   return n < 1 and 1 or n > 24 and 24 or n
 end
 
+-- 시간 모드의 '1시간에 몇 분'(f09 da = 분 16진 2자리). 린나이 앱 목록과 같게 5·10·20·30·40·50·60분
+local TIME_CHOICES = { 5, 10, 20, 30, 40, 50, 60 }
+local function time_min(n)                                     -- 기기·기억 값 → 목록에서 가장 가까운 값(없으면 10분)
+  n = tonumber(n)
+  if not n or n < 1 then return 10 end
+  local best = TIME_CHOICES[1]
+  for _, v in ipairs(TIME_CHOICES) do
+    if math.abs(v - n) < math.abs(best - n) then best = v end
+  end
+  return best
+end
+local function time_label(n) return time_min(n) .. "분" end
+-- 보여 줄 분: 시간 모드가 꺼져 있을 때 고른 값(기억)이 있으면 그것, 없으면 기기 값
+local function zone_tmin(child, z) return time_min(child and child:get_field("tmin") or (z and z.tmin)) end
+
 local function zone_text(m, z)
   local what
   if z.outing then what = "외출"                                    -- 존별 외출(f09)
   elseif z.reserve then what = "예약 " .. resv_hours(z.resv) .. "시간"   -- 존별 예약(f09 96, 시간 97)
   elseif (m and (not m.power or not m.heat)) or not z.on then what = "꺼짐"
+  elseif z.time then what = "시간 난방 " .. time_label(z.tmin)
   else what = "난방 " .. deg(z.target) end
   return deg(z.current) .. " · " .. what
 end
@@ -523,8 +542,19 @@ local function refresh_zone(parent, mac, id)
   mark_online(child)
   local _, m = the_boiler(parent, mac)   -- 짝 보일러(지정 or 암묵)
   local heating = z.on and (not m or (m.power and m.heat))
-  emit(child, "main", heating and capabilities.switch.switch.on() or capabilities.switch.switch.off())
-  emit(child, "main", sp_range({ 10, ZONES[id].max }))
+  -- 난방(온도)과 시간은 하나만 켜짐으로: 시간 모드면 난방 스위치는 꺼짐, 시간 스위치가 켜짐
+  emit(child, "main", (heating and not z.time) and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+  emit(child, "timemode", (heating and z.time) and capabilities.switch.switch.on() or capabilities.switch.switch.off())
+  -- 1시간에 몇 분: 시간 모드면 기기 값(기억도 그 값으로), 아니면 기억한 값 — 꺼져 있을 때 고르면 기억만 했다가 켤 때 보낸다
+  if z.time and z.on and z.tmin then child:set_field("tmin", nil, { persist = true }) end
+  if child:supports_capability_by_id("mode", "timemode") then
+    local list = {}
+    for _, v in ipairs(TIME_CHOICES) do list[#list + 1] = time_label(v) end
+    emit(child, "timemode", capabilities.mode.supportedModes(list, { visibility = { displayed = false } }))
+    emit(child, "timemode", capabilities.mode.supportedArguments(list, { visibility = { displayed = false } }))
+    emit(child, "timemode", capabilities.mode.mode(time_label(zone_tmin(child, z))))
+  end
+  emit(child, "main", sp_range({ 5, ZONES[id].max }))
   emit(child, "main", setpoint(z.target))
   emit_group(child, "main", { { capabilities.temperatureMeasurement.temperature, { value = z.current, unit = "C" } } })
   emit(child, "outing", z.outing and capabilities.switch.switch.on() or capabilities.switch.switch.off())  -- 존별 외출(f09 stat bit 0x10)
@@ -628,6 +658,8 @@ local function wanted_caps(parent, key)
     return water and "lynnai-boiler-water" or "lynnai-boiler", out
   elseif kind == "zone" then
     local out = { { "main", pick({ { BIT.room_on, "switch" }, { BIT.room_set, "thermostatHeatingSetpoint" } }) } }
+    local timemode = pick({ { BIT.room_on, "switch" }, { BIT.room_on, "mode" } })   -- 시간 모드(분 목록 포함)는 켜기 스위치와 같이 보이고 숨긴다
+    if #timemode > 0 then out[#out + 1] = { "timemode", timemode } end
     local outing = pick({ { BIT.room_out, "switch" } })
     if #outing > 0 then out[#out + 1] = { "outing", outing } end
     local reserve = pick({ { BIT.room_resv, "switch" }, { BIT.room_resv, "connectbook02461.reserveHours" } })
@@ -1139,8 +1171,12 @@ local function on_switch(on)
       local z = ZONES[id]
       return boiler_cmds(parent, { string.format("f09@%s a0=%d,b3=%s", mac, z.a0, on and "1" or "0") })
     end
+    -- 시간 모드(f09 b4): 켜면 그 방을 시간 모드로(꺼진 방이면 먼저 켬, 앱 캡처 f09 a0=1,b4=1). 끄면 그냥 방을 끈다.
+    -- 난방(main)을 켜면 시간 모드를 풀고 온도로(b4=0). 화면에서는 둘 중 하나만 켜짐.
     local z = ZONES[id]
+    local zs = (hub_state(parent).thermos[mac] or {})[id]
     local list = {}
+    local time = cmd.component == "timemode"
     if on then
       -- 방을 켜면 '이 방 난방' 뜻: 짝 보일러(지정 or 하나뿐)가 꺼져 있으면 같이 켠다
       local bmac, m = the_boiler(parent, mac)
@@ -1149,13 +1185,24 @@ local function on_switch(on)
         if m.power == false then list[#list + 1] = "f06@" .. bmac .. " 80=1" end
         if m.heat == false then list[#list + 1] = "f06@" .. bmac .. " b1=1" end
       end
-      local zs = (hub_state(parent).thermos[mac] or {})[id]
       if zs and zs.outing then list[#list + 1] = string.format("f09@%s a0=%d,b3=0", mac, z.a0) end   -- 이 방 외출 풀기
     end
-    list[#list + 1] = string.format("f09@%s a0=%d,b1=%s", mac, z.a0, on and "1" or "0")
+    if not (on and zs and zs.on and (time or zs.time)) then          -- 켜진 방에서 시간↔온도만 바꿀 때는 b1 을 안 보냄
+      list[#list + 1] = string.format("f09@%s a0=%d,b1=%s", mac, z.a0, on and "1" or "0")
+    end
+    if on and time then
+      list[#list + 1] = string.format("f09@%s a0=%d,b4=1", mac, z.a0)
+      local want = device:get_field("tmin")                       -- 꺼져 있을 때 고른 분이 있으면 켜면서 보낸다
+      if want and zs and time_min(want) ~= zs.tmin then
+        list[#list + 1] = string.format("f09@%s a0=%d,da=%02x", mac, z.a0, time_min(want))
+      end
+    elseif on and zs and zs.time then
+      list[#list + 1] = string.format("f09@%s a0=%d,b4=0", mac, z.a0)   -- 시간 → 온도
+    end
     boiler_cmds(parent, list)
     driver:call_with_delay(8, function()
       sent[table.concat({ device.id, "main", "switch", "switch" }, "|")] = nil
+      sent[table.concat({ device.id, "timemode", "switch", "switch" }, "|")] = nil
       refresh_zone(parent, mac, id)
     end)
   end
@@ -1166,7 +1213,7 @@ local function set_heating_setpoint(_, device, cmd)
   local v = math.floor(cmd.args.setpoint + 0.5)
   local kind, mac, id = parse_key(device.parent_assigned_child_key)
   if kind == "zone" then
-    v = math.max(10, math.min(ZONES[id].max, v))
+    v = math.max(5, math.min(ZONES[id].max, v))          -- 방 조절기는 5~40도
     return boiler_cmds(parent, { string.format("f09@%s a0=%d,d4=%02X", mac, ZONES[id].a0, v) })
   end
   if (kind ~= "boiler" and kind ~= "vboiler") or cmd.component ~= "heat" then return end
@@ -1179,13 +1226,42 @@ local function set_heating_setpoint(_, device, cmd)
 end
 
 -- 예약 시간 슬라이더: 고른 시간으로 예약을 건다(앱과 같다 — 시간만 바꾸고 예약은 안 거는 명령은 없다)
+-- 예약이 꺼져 있으면 시간만 기억하고 보내지 않는다(잘못 건드려 예약이 걸리고 방이 켜지지 않게 — 사용자 결정 2026-11-23).
+-- 기억한 시간은 예약을 켤 때 쓴다.
 local function set_reserve_hours(_, device, cmd)
   local parent = parent_of(device)
   local kind, mac, id = parse_key(device.parent_assigned_child_key)
   if kind ~= "zone" then return end
   local v = resv_hours(cmd.args.hours)
   device:set_field("resv_iv", v, { persist = true })
+  local zs = (hub_state(parent).thermos[mac] or {})[id]
+  if not (zs and zs.reserve) then
+    emit(device, "reserve", rh_cap.hours({ value = v, unit = "시간" }))
+    return
+  end
   return boiler_cmds(parent, { string.format("f09@%s a0=%d,96=1,97=%02x", mac, ZONES[id].a0, v) })
+end
+
+-- 시간 모드의 분(5~60): 시간 모드로 켜져 있으면 바로 보내고(f09 a0,da — 린나이 앱과 같다),
+-- 아니면 기억만 했다가 시간 스위치를 켤 때 보낸다(예약 시간과 같은 규칙 — 잘못 건드려 방이 켜지지 않게).
+local function set_time_minutes(parent, device, want)
+  local kind, mac, id = parse_key(device.parent_assigned_child_key)
+  if kind ~= "zone" then return end
+  local v
+  for _, c in ipairs(TIME_CHOICES) do
+    if time_label(c) == want then v = c end
+  end
+  if not v then
+    log.warn("모르는 시간 난방 분 무시: " .. tostring(want))
+    return
+  end
+  local zs = (hub_state(parent).thermos[mac] or {})[id]
+  if not (zs and zs.on and zs.time) then
+    device:set_field("tmin", v, { persist = true })
+    emit(device, "timemode", capabilities.mode.mode(time_label(v)))
+    return
+  end
+  return boiler_cmds(parent, { string.format("f09@%s a0=%d,da=%02x", mac, ZONES[id].a0, v) })
 end
 
 local function set_heat_type(_, device, cmd)
@@ -1366,6 +1442,9 @@ end
 local function set_hub_mode(_, device, cmd)
   local parent = parent_of(device)
   local want = cmd.args.mode
+  if is_child(device) and cmd.component == "timemode" then          -- 방의 시간 모드 → 1시간에 몇 분
+    return set_time_minutes(parent, device, want)
+  end
   if is_child(device) then                                           -- 보일러의 온수 예열 → 자동 끄기
     for _, v in ipairs(PREOFF_CHOICES) do
       if preoff_label(v) == want then return send_text(parent, "hub preoff=" .. v) end

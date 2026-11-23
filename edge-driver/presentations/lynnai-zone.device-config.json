@@ -50,6 +50,26 @@
       "patch": []
     },
     {
+      "component": "timemode",
+      "capability": "switch",
+      "version": 1,
+      "values": [],
+      "patch": []
+    },
+    {
+      "component": "timemode",
+      "capability": "mode",
+      "version": 1,
+      "values": [],
+      "patch": [
+        {
+          "op": "replace",
+          "path": "/0/label",
+          "value": "1시간에"
+        }
+      ]
+    },
+    {
       "component": "outing",
       "capability": "switch",
       "version": 1,
@@ -106,6 +126,28 @@
         "exclusion": []
       },
       {
+        "component": "timemode",
+        "capability": "switch",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "timemode",
+        "capability": "mode",
+        "version": 1,
+        "values": [],
+        "patch": [
+          {
+            "op": "replace",
+            "path": "/0/label",
+            "value": "1시간에"
+          }
+        ],
+        "exclusion": []
+      },
+      {
         "component": "outing",
         "capability": "switch",
         "version": 1,
@@ -153,6 +195,28 @@
         "version": 1,
         "values": [],
         "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "timemode",
+        "capability": "switch",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "timemode",
+        "capability": "mode",
+        "version": 1,
+        "values": [],
+        "patch": [
+          {
+            "op": "replace",
+            "path": "/0/label",
+            "value": "1시간에"
+          }
+        ],
         "exclusion": []
       },
       {

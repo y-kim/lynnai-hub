@@ -189,7 +189,7 @@ static bool chk_all(const chk_t *c, int n, const uint8_t *b, int bn)
 
 /* 명령 항목(code=value 들)에서 확인할 칸을 뽑는다. 돌려주는 값 = 칸 수(0 = 모르는 명령). key 에 칸 이름.
  *   f06: 80 전원(니블 0) b1 난방(2) d7 온수(3) b6 예열(5) b4 실내 모드(7) d1 온수 설정(10~11) d2 온돌 설정(13~14) d4 실내 설정(15~16)
- *   f09: a0 = 방 번호(1~7, stat 바이트 = (a0-1)*7) + b1 켜짐(0x02) b3 외출(0x10) 96 예약(0x08) 97 예약 시간(stat+1) d4 설정 온도(stat+4) */
+ *   f09: a0 = 방 번호(1~7, stat 바이트 = (a0-1)*7) + b1 켜짐(0x02) b3 외출(0x10) 96 예약(0x08) b4 시간 모드(0x04) 97 예약 시간(stat+1) d4 설정 온도(stat+4) */
 static int build_checks(uint8_t kind, char codes[][3], const uint32_t *vals, int n, chk_t *out, char *key, size_t keycap)
 {
     int nc = 0, zone = -1;
@@ -224,13 +224,15 @@ static int build_checks(uint8_t kind, char codes[][3], const uint32_t *vals, int
             }
         } else if (zone >= 0) {
             uint8_t st = (uint8_t)(zone * 7);
-            uint8_t bit = !strcmp(c, "b1") ? 0x02 : !strcmp(c, "b3") ? 0x10 : !strcmp(c, "96") ? 0x08 : 0;
+            uint8_t bit = !strcmp(c, "b1") ? 0x02 : !strcmp(c, "b3") ? 0x10 : !strcmp(c, "96") ? 0x08 : !strcmp(c, "b4") ? 0x04 : 0;
             if (bit) {
                 out[nc++] = (chk_t){ .type = CHK_BIT, .pos = st, .mask = bit, .want = v ? bit : 0 };
             } else if (!strcmp(c, "97")) {
                 out[nc++] = (chk_t){ .type = CHK_BYTE, .pos = (uint8_t)(st + 1), .want = v };
             } else if (!strcmp(c, "d4")) {
                 out[nc++] = (chk_t){ .type = CHK_BYTE, .pos = (uint8_t)(st + 4), .want = v };
+            } else if (!strcmp(c, "da")) {               /* 시간 난방: 1시간에 몇 분 */
+                out[nc++] = (chk_t){ .type = CHK_BYTE, .pos = (uint8_t)(st + 5), .want = v };
             }
         }
     }
@@ -724,11 +726,11 @@ static bool token_ok(const char *s, int n, int max)
 
 /* 기기에 보내도 되는 쓰기 코드(드라이버가 쓰는 것, 실기로 확인한 것). 새 기능은 여기에 더한다.
  *   80 전원  b1 난방  b3 외출  b4 난방 방식  d1 온수 온도  df (d1 과 같이)  d2 난방수 온도  d4 실내 온도
- *   a0 각방 번호  96 예약 켜기  97 예약 간격 */
+ *   a0 각방 번호  96 예약 켜기  97 예약 간격  da 시간 난방 분(1시간에 N분, 린나이 앱 5·10·20…60) */
 /* 드라이버(edge-driver/src/core.lua)가 보내는 코드와 같아야 한다 — 드라이버 시험(sim.lua)이 이 줄을 읽어 대조한다 */
 static bool code_allowed(const char *c)
 {
-    static const char *const OK[] = { "80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97" };
+    static const char *const OK[] = { "80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97", "da" };
     for (size_t i = 0; i < sizeof(OK) / sizeof(OK[0]); i++) {
         if (!strcmp(c, OK[i])) {
             return true;

@@ -130,6 +130,22 @@ def main():
     check(hub_rinnai.HubCore(log=lambda *a: None, boiler_mode="room").boiler_mode == 2, "room → 2")
     check(hub_rinnai.HubCore(log=lambda *a: None, boiler_mode="x").boiler_mode == 0, "모르는 값 → 정하지 않음(0)")
 
+    print("[8] 각방 시간 난방 분(da) — 방 슬롯 6번째 바이트로 확인")
+    core4 = hub_rinnai.HubCore(log=lambda *a: None, data_dir=tmp)
+    sent4 = []
+    ln4 = core4.link_open(lambda pkt: sent4.append(pkt))
+    base9 = "rinnai/RK/01/RK/f09/03/34:5F:45:D4:E5:F6"
+    core4.on_device_subscribe(ln4, base9 + "/set")
+    rooms = bytearray(54)
+    rooms[0], rooms[3], rooms[5] = 0x47, 20, 10                       # 방1 켜짐 + 시간 모드, 10분
+    core4.on_device_publish(ln4, base9 + "/inf", b'{"rpc":[{"id":"70","data":"%s"}]}' % rooms.hex().encode())
+    core4.command("f09@d4e5f6 a0=1,da=1e")
+    check(len(sent4) == 1 and b'"da","data":"1e"' in sent4[0], "da 를 보냄(허용 코드)")
+    check(core4.cmd_info()["pending"] == 1, "반영될 때까지 지켜봄")
+    rooms[5] = 30
+    core4.on_device_publish(ln4, base9 + "/inf", b'{"rpc":[{"id":"70","data":"%s"}]}' % rooms.hex().encode())
+    check(core4.cmd_info()["pending"] == 0, "슬롯 6번째 바이트가 30 이 되면 끝")
+
     print(f"\n== {'실패 %d' % fails if fails else '모두 통과'} ==")
     sys.exit(1 if fails else 0)
 
