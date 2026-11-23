@@ -110,7 +110,9 @@ end
 -- 기기 목록(boilerStatus)과 상세 화면(roomStatus) 두 곳에 같은 글
 local function show(device, text)
   device:emit_event(status_cap.status(text, { state_change = true }))
-  device:emit_event(room_cap.roomStatus(text, { state_change = true }))
+  if device:supports_capability_by_id(room_cap.ID) then      -- 상세 화면의 상태 칸은 허브가 모드를 알려 줄 때만 있다
+    device:emit_event(room_cap.roomStatus(text, { state_change = true }))
+  end
 end
 
 local function run(device)

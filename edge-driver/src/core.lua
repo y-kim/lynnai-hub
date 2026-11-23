@@ -931,15 +931,27 @@ local function on_plugins(parent, b)
   end
 end
 
--- Zigbee 허브 기기 자체의 온도(ESP32 칩 온도 — 방 온도와 다름)를 보일지. LAN 허브 기기엔 온도가 없다.
+-- 허브 기기 자체에 무엇을 보일지 — 허브 펌웨어가 하는 만큼만.
+--   상태·모드 칸: 허브가 동작 모드를 알려 준 적이 있을 때만(v0.5 까지의 펌웨어는 알려 주지 않는다 — 빈 칸과 눌러도
+--     아무 일 없는 모드 목록을 보이지 않게). 한 번 받으면 기억한다.
+--   허브 온도(ESP32 칩 온도 — 방 온도와 다름): 노출 설정에서 켰을 때. LAN 허브 기기엔 온도 구역이 없다.
+-- LAN 허브 기기의 목록 글(boilerStatus)은 "연결됨"·"연결 끊김"에도 쓰므로 늘 있다.
 local function apply_hub_caps(parent)
-  if parent.network_type ~= "DEVICE_ZIGBEE" then return end
-  local want = visible(parent, BIT.hub_temp) and { "temperatureMeasurement" } or {}
-  local sig = table.concat(want, ",")
+  local zigbee = parent.network_type == "DEVICE_ZIGBEE"
+  local main = {}
+  if parent:get_field("mode_seen") then
+    main = zigbee and { "connectbook02461.boilerStatus", "connectbook02461.roomStatus", "mode" }
+      or { "connectbook02461.roomStatus", "mode" }
+  end
+  local list = { { "main", main } }
+  if zigbee then
+    list[#list + 1] = { "chip", visible(parent, BIT.hub_temp) and { "temperatureMeasurement" } or {} }
+  end
+  local sig = table.concat(main, ",") .. "|" .. (list[2] and table.concat(list[2][2], ",") or "")
   if applied[parent.id] == sig then return end
   applied[parent.id] = sig
-  log.info("허브 온도 " .. (#want > 0 and "보임" or "숨김"))
-  parent:try_update_metadata({ profile = "lynnai-hub", optional_component_capabilities = { { "chip", want } } })
+  log.info("허브 기기 구성: " .. sig)
+  parent:try_update_metadata({ profile = zigbee and "lynnai-hub" or "lynnai-hub-lan", optional_component_capabilities = list })
 end
 
 -- 이 통로에 무엇을 보일지(관리 화면 '노출'). 종류별 컨트롤 마스크 + 기기·방별 숨김.
@@ -1233,6 +1245,13 @@ local function on_mode(parent, b)
   local since = #b >= 7 and string.unpack("<I4", b, 4) or 0
   local why, rc = #b >= 9 and b:byte(8) or 0, #b >= 9 and b:byte(9) or 0
   local value = standalone and MODE_STANDALONE or MODE_PROXY
+  if not parent:get_field("mode_seen") then        -- 모드를 알려 주는 펌웨어다 → 상태·모드 칸을 만든다
+    parent:set_field("mode_seen", true, { persist = true })
+    apply_hub_caps(parent)
+    -- 칸이 생기는 데는 시간이 걸린다(프로필 갱신은 비동기) → 조금 뒤에 다시 알려 달라고 한다
+    driver:call_with_delay(8, function() M.request_refresh(parent) end)
+  end
+  if not parent:supports_capability_by_id("mode", "main") then return end   -- 아직 칸이 없음: 다음에 받을 때 채운다
   if not parent:get_field("mode_lists") then   -- 목록은 한 번만(허브가 5분마다 다시 알려 준다)
     parent:emit_component_event(main, capabilities.mode.supportedModes({ MODE_PROXY, MODE_STANDALONE }, { visibility = { displayed = false } }))
     parent:emit_component_event(main, capabilities.mode.supportedArguments({ MODE_PROXY, MODE_STANDALONE }, { visibility = { displayed = false } }))

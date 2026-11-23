@@ -11,8 +11,10 @@ components:
         version: 1
       - id: connectbook02461.roomStatus     # 상세 화면 글
         version: 1
+        optional: true
       - id: mode                # 동작 모드: 프록시 / 단독 (허브가 알려 줄 때 채워진다, CMD 0x0b)
         version: 1
+        optional: true
       - id: refresh
         version: 1
     categories:

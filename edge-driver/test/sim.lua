@@ -377,6 +377,7 @@ core.on_message(hub, 0x0a, string.char(0) .. string.pack("<i2", 3400))
 check(count_chip() == n_chip + 1, "0.5°C 넘게 바뀌면 냄")
 core.on_message(hub, 0x0a, string.char(0))
 check(count_chip() == n_chip + 1, "온도가 없는 생존 신호(옛 펌웨어·꺼 둠)는 그대로 받음")
+check(not (hub._caps.main or {}).mode, "모드를 알려 주지 않는 펌웨어: 허브 기기에 상태·모드 칸 없음")
 
 print("[14] 각방 '예약' 스위치(f09 96/97)·상태(stat 0x08)")
 reset()
@@ -845,6 +846,9 @@ local function mode_msg(m, fb, since, why, rc)
   return string.char(m, fb, 1) .. string.pack("<I4", since or 0) .. (why and string.char(why, rc or 0) or "")
 end
 core.on_message(hub, MODE, mode_msg(0, 0))
+check(hub._caps.main and hub._caps.main.mode and hub._caps.main["connectbook02461.roomStatus"]
+  and hub._caps.main["connectbook02461.boilerStatus"], "모드를 알려 주는 펌웨어: 상태·모드 칸이 생김")
+check(hub._caps.chip ~= nil, "허브 온도 구역의 구성도 같이 보냄(지워지지 않게)")
 check(lastv("hub", "main", "mode") == "프록시", "프록시 모드로 보임")
 check(lastv("hub", "main", "status") == "프록시 모드", "상태 글 = 프록시 모드")
 local args = lastv("hub", "main", "supportedArguments")
@@ -894,8 +898,6 @@ check(last_cmd_has("hub mode=standalone"), "단독을 고르면 hub mode=standal
 core.on_message(hub, MODE, string.char(0))
 check(lastv("hub", "main", "mode") == "단독", "너무 짧은 메시지는 무시")
 
-print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
-os.exit(fail == 0 and 0 or 1)
 print("[32] 가스: 허브가 이번 청구 기간 사용량·청구액을 보내면 그 값을 쓴다(관리 화면과 같은 숫자)")
 reset()
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4", 1000, 50000, 0, 5000, 0, 10))
@@ -905,3 +907,5 @@ core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4I4I4", 1001, 50010, 0, 5
 check(lastv("gas", "main", "period").value == 9.14 and lastv("gas", "main", "periodText") == "9.14", "이번달 사용량 = 허브 값 9.14㎥")
 check(lastv("gas", "main", "month").value == 11004, "이번달 예상 금액 = 허브 값 11004원")
 
+print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
+os.exit(fail == 0 and 0 or 1)
