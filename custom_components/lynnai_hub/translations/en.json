@@ -88,6 +88,9 @@
       "gas_last_hour": {
         "name": "Last hour"
       },
+      "hub_temperature": {
+        "name": "Internal temperature"
+      },
       "hub_status": {
         "name": "Status"
       }

@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from . import LynnaiConfigEntry, protocol as p
-from .entity import HubModeEntity, PluginEntity, setup_dynamic
+from .entity import HubEntity, HubModeEntity, PluginEntity, setup_dynamic
 from .hub import LynnaiHub
 
 
@@ -79,6 +79,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
             out.append(HubSensor(hass, hub, entry.entry_id, d))
         if hub.mode is not None:
             out.append(HubStatus(hass, hub, entry.entry_id))
+        if hub.chip_temp is not None:
+            out.append(HubTemperature(hub, entry.entry_id))
         return out
 
     entry.async_on_unload(setup_dynamic(hass, entry.entry_id, async_add_entities, make))
@@ -155,3 +157,21 @@ class HubStatus(HubModeEntity, SensorEntity):
             if mode.reason == "refused":
                 attrs["refusal_code"] = mode.code
         return attrs or None
+
+
+class HubTemperature(HubEntity, SensorEntity):
+    """The hub's own temperature (its chip, not the room). The hub sends it only while "허브 내부 온도" is ticked
+    for the LAN channel on its admin page, so the entity appears once a value has arrived."""
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, hub: LynnaiHub, entry_id: str) -> None:
+        super().__init__(hub, entry_id, "hub_temperature")
+
+    @property
+    def native_value(self) -> float | None:
+        return self.hub.chip_temp

@@ -22,7 +22,7 @@
 #include <stdint.h>
 #include "hub_radio.h"
 
-bool hub_main_chip_temp(int16_t *c100);   /* 허브 칩 온도(1/100°C). 못 쟀거나 노출 설정에서 껐으면 false */
+bool hub_main_chip_temp(int ch, int16_t *c100);   /* 허브 칩 온도(1/100°C). 못 쟀거나 그 통로(EXPOSE_CH_*)의 노출 설정에서 껐으면 false */
 
 #define ESP_ZIGBEE_HA_TEMPERATURE_SENSOR_EP_ID (10)
 

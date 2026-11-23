@@ -29,6 +29,7 @@ class LynnaiHub:
         self.room: p.RoomSensorState | None = None
         self.gas: p.GasState | None = None
         self.plugins = p.PluginState()
+        self.chip_temp: float | None = None                     # the hub's own temperature, when it sends one
         self.mode: p.HubMode | None = None                      # None until the hub told us (older firmware never does)
         self._on_update: Callable[[], None] = lambda: None
         self._on_new: Callable[[], None] = lambda: None
@@ -83,6 +84,12 @@ class LynnaiHub:
         elif cmd == p.CMD_MODE:
             new = self.mode is None
             self.mode = p.decode_mode(payload) or self.mode
+        elif cmd == p.CMD_ALIVE:
+            temp = p.decode_alive(payload)
+            if temp is None or temp == self.chip_temp:
+                return              # nothing to show (older firmware, turned off on the hub, or unchanged)
+            new = self.chip_temp is None
+            self.chip_temp = temp
         elif cmd == p.CMD_FORGET and len(payload) >= 4:
             kind, mac = payload[0], payload[1:4].hex()
             if kind == p.KIND_BOILER:
@@ -90,7 +97,7 @@ class LynnaiHub:
             elif kind == p.KIND_THERMOSTAT:
                 self.zones.pop(mac, None)
         else:
-            return                  # alive, expose, tariff: nothing to show
+            return                  # expose, tariff: nothing to show
         if new:
             self._on_new()
         self._on_update()

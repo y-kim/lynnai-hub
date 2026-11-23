@@ -767,15 +767,19 @@ static void zb_task(void *arg)
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10000));
         if (xTaskGetTickCount() - last_alive >= pdMS_TO_TICKS(ALIVE_S * 1000)) {
             /* SmartThings 는 Zigbee 기기가 30분쯤 조용해야 오프라인으로 바꾼다. 드라이버가 먼저 알아채도록 짧게 자주 */
-            /* [0][칩 온도 s16, 1/100°C] — 온도는 노출 설정에서 켰을 때만 붙는다(없으면 1바이트) */
-            uint8_t alive[3] = { 0 };
-            int16_t chip;
-            bool has_chip = hub_main_chip_temp(&chip);
-            if (has_chip) {
-                memcpy(alive + 1, &chip, 2);
-            }
+            /* [0][칩 온도 s16, 1/100°C] — 온도는 그 통로의 노출 설정에서 켰을 때만 붙는다(없으면 1바이트) */
+            static const struct { int ch; uint8_t uplink; } ways[] = {
+                { EXPOSE_CH_ZIGBEE, HUB_UPLINK_ZIGBEE }, { EXPOSE_CH_LAN, HUB_UPLINK_LAN }, { EXPOSE_CH_MATTER, HUB_UPLINK_MATTER } };
             last_alive = xTaskGetTickCount();
-            hub_uplink_send(HUB_RK_CMD_ALIVE, alive, has_chip ? 3 : 1);
+            for (int w = 0; w < 3; w++) {
+                uint8_t alive[3] = { 0 };
+                int16_t chip;
+                bool has_chip = hub_main_chip_temp(ways[w].ch, &chip);
+                if (has_chip) {
+                    memcpy(alive + 1, &chip, 2);
+                }
+                hub_uplink_send_to(ways[w].uplink, HUB_RK_CMD_ALIVE, alive, has_chip ? 3 : 1);
+            }
         }
         bool beat = xTaskGetTickCount() - last_beat >= pdMS_TO_TICKS(HEARTBEAT_S * 1000);
         lock();

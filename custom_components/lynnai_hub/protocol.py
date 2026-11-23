@@ -201,6 +201,13 @@ def decode_room(payload: bytes) -> RoomSensorState | None:
     return RoomSensorState(round(t100 / 100, 1), None if h100 == NO_HUMIDITY else round(h100 / 100))
 
 
+def decode_alive(payload: bytes) -> float | None:
+    """[0][the hub's own chip temperature, s16 in 1/100 °C] - the temperature only when the hub is set to show it."""
+    if len(payload) < 3:
+        return None
+    return round(struct.unpack_from("<h", payload, 1)[0] / 100, 1)
+
+
 def decode_gas(payload: bytes) -> GasState | None:
     if len(payload) < 20:
         return None

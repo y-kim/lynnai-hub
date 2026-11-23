@@ -88,6 +88,9 @@
       "gas_last_hour": {
         "name": "1시간 사용량"
       },
+      "hub_temperature": {
+        "name": "내부 온도"
+      },
       "hub_status": {
         "name": "상태"
       }

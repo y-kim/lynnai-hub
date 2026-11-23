@@ -190,6 +190,20 @@ async def test_entities_survive_a_change_made_in_the_ui(hass: HomeAssistant, ent
     assert len(climates) == 1 and hass.states.get(climates[0]).state == "heat"
 
 
+async def test_hub_temperature_appears_when_the_hub_sends_it(hass: HomeAssistant, entry, fake_hub):
+    """The alive message carries the hub's chip temperature only when it is turned on for this channel."""
+    hub = f"lynnai_hub_{HUB_ID.lower()}"
+    temp = f"sensor.{hub}_internal_temperature"
+    await fake_hub.push(0x0A, bytes([0]))                           # older firmware, or turned off: nothing to show
+    await hass.async_block_till_done()
+    assert hass.states.get(temp) is None
+    await fake_hub.push(0x0A, bytes([0]) + struct.pack("<h", 3715))
+    await _settle(hass, lambda: hass.states.get(temp) is not None)
+    assert hass.states.get(temp).state in ("37.1", "37.2")          # 37.15 rounds to one decimal either way
+    await fake_hub.push(0x0A, bytes([0]) + struct.pack("<h", 4020))
+    await _settle(hass, lambda: hass.states.get(temp).state == "40.2")
+
+
 async def test_hub_mode_can_be_seen_and_changed(hass: HomeAssistant, entry, fake_hub):
     hub = f"lynnai_hub_{HUB_ID.lower()}"
     mode, fallback, auto = f"select.{hub}_operating_mode", f"binary_sensor.{hub}_running_without_the_cloud", \

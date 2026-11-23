@@ -200,11 +200,11 @@ static int16_t zb_temperature_to_s16(float temp) { return (int16_t)(temp * 100);
  * 가입 정보를 되살리거나 다시 가입하면 바인딩이 사라져 온도가 멈춘다(2026-11-21 이후 실제로 멈춰 있었음). */
 static volatile int16_t s_chip_c100 = INT16_MIN;
 
-bool hub_main_chip_temp(int16_t *c100)
+bool hub_main_chip_temp(int ch, int16_t *c100)
 {
     int16_t v = s_chip_c100;
-    if (v == INT16_MIN || !hub_expose_bit_on(EXPOSE_CH_ZIGBEE, EXPOSE_HUB_TEMP)) {
-        return false;                    /* 아직 못 쟀거나 관리 화면에서 허브 칩 온도를 끔 */
+    if (v == INT16_MIN || !hub_expose_bit_on(ch, EXPOSE_HUB_TEMP)) {
+        return false;                    /* 아직 못 쟀거나 관리 화면에서 그 통로의 허브 칩 온도를 끔 */
     }
     *c100 = v;
     return true;
