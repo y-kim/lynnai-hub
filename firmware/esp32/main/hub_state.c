@@ -1,5 +1,5 @@
 /*
- * hub_state.c -- 허브 설정 상태(NVS). Pi 판 appliance/core/state.py 를 옮긴 것.
+ * hub_state.c -- 허브 설정 상태(NVS).
  */
 #include <stdio.h>
 #include <string.h>

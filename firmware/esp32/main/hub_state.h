@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-/* 허브 설정 상태(NVS 네임스페이스 "lynnai"). Pi 판 appliance/core/state.py 와 같은 모델.
+/* 허브 설정 상태(NVS 네임스페이스 "lynnai").
  *  - device_id : 첫 부팅 때 HW 난수로 6글자. 공장초기화하면 새로 뽑힌다(양도 후 추적 불가).
  *  - 미설정이면 개방 설정 AP(LYNNAI-SETUP-<id>), 설정 후엔 집 Wi-Fi(STA) + WPA2 허브 AP.
  *  - 관리자 암호는 PBKDF2-HMAC-SHA256 해시만 저장. */

@@ -115,8 +115,6 @@ SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 �
 | `tools/hub_doctor.py` | PC 에서 허브 고장 진단(API · SmartThings CLI · USB 시리얼) |
 | `server/lynnai-nas/` | ESP32 없이 **NAS 도커**로 같은 일을 하는 LAN 전용 허브(파이썬 판, 프록시/단독). 집 네트워크의 DNS 서버를 바꿔야 한다 — [docs/nas-hub.md](docs/nas-hub.md) |
 | `server/lynnai-hub-watch/` | 허브 API 를 SQLite 로 모으는 NAS 기록기 |
-| `standalone/` | 클라우드를 대체하는 최소 MQTT 브로커 + DNS 하이재킹(Pi 시절 검증용, NAS 단독 모드가 재사용) |
-| `appliance/`, `plugins/` | 라즈베리 파이 판 제품(프로비저닝 포털·플러그인). ESP32 허브로 옮겨 오며 지금은 참고용 |
 
 ## 보안
 
@@ -175,7 +173,6 @@ and returns to proxy on its own.
 
 Tested with: Rinnai **WF-S6000** boiler controller, Rinnai **RICH-WCR(N)** room thermostat, ESP32‑C6‑DevKitC‑1 v1.2,
 SmartThings Station and Smart Home Hub (V4). Other models are untested.
-- `standalone/`, `appliance/`, `plugins/` — the earlier Raspberry Pi version, kept for reference.
 
 The firmware image carries no secrets: each hub generates its own device‑facing TLS key on first boot, and verifies
 the Rinnai cloud against its private CA. Stored data can optionally be encrypted (NVS, HMAC key burned into an eFuse block

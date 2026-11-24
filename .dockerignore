@@ -8,8 +8,6 @@
 .git/
 firmware/
 edge-driver*/
-appliance/
-plugins/
 docs/
 tools/
 review-no-commit.md

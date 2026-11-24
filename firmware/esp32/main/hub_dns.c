@@ -1,5 +1,5 @@
 /*
- * hub_dns.c -- 허브 AP 쪽 DNS 응답기(UDP 53). Pi 판 standalone/dns_hijack.py + dnsmasq 규칙을 옮긴 것.
+ * hub_dns.c -- 허브 AP 쪽 DNS 응답기(UDP 53).
  *
  *  - 캡티브(설정 중): 모든 이름의 A 질의를 허브 IP 로 답한다 → 폰 OS 의 인터넷 확인 요청이 허브로 와서
  *    설정 페이지가 자동으로 뜬다.

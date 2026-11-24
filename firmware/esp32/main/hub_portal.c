@@ -1,5 +1,5 @@
 /*
- * hub_portal.c -- 설정 포털(esp_http_server, :80). Pi 판 appliance/portal/portal.py 를 옮긴 것.
+ * hub_portal.c -- 설정 포털(esp_http_server, :80).
  *
  *  - 미설정: 첫 화면 = 설정 폼. 모르는 주소는 전부 설정 페이지로 302(캡티브: 폰이 접속하면 자동으로 뜸).
  *  - 설정 완료 응답 후 2초 뒤 Wi-Fi 를 다시 적용(설정 AP 닫고 집 Wi-Fi + 전용 AP), DNS 는 클라우드 이름만.

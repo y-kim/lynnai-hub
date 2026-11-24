@@ -5,7 +5,7 @@
 
 ESP32 허브 없이 NAS(도커) 하나로 린나이 보일러·각방 조절기를 받는 모드.
 **LAN 으로만 동작하는 허브**일 뿐, ESP32 허브와 동작이 같다(Wi-Fi AP·Zigbee·Matter·꽂는 센서만 빠짐).
-로직은 레포의 [`standalone/`](../../standalone) 와 ESP32 펌웨어를 옮긴 것이고, 이 폴더가 그걸 조립한다.
+로직은 ESP32 펌웨어를 파이썬으로 옮긴 것이다.
 
 ## proxy 모드 (기본, ESP32 허브와 동일)
 
@@ -29,7 +29,7 @@ SmartThings ◀─SSDP + TCP──────  NAS(:8484)  LAN Edge 드라이�
 | `hub_devices.py` | 버튼 길게(기기 등록 창) | 기기 등록부: 후보(메모리) → 승인(`data/devices.json`), ARP 표로 MAC 판정, `DEVICE_PAIR` 등록 창 |
 | `hub_bootstrap.py` | `hub_proxy.c`(`boot_fetch`) | 부트스트랩을 진짜 클라우드에 다시 묻기 |
 | `nas_hub.py` | `hub_main.c`(`app_main`) | 위를 공용 코어 하나로 조립(두 모드의 진입점) |
-| `standalone/dns_hijack.py` | `hub_dns.c` | 등록된 기기의 rkiot.net(과 하위 이름)만 가로챔(등록부를 질의마다 물음 — `is_src_ok`), 등록 안 된 출발지가 물으면 후보로(`on_unregistered`) |
+| `dns_hijack.py` | `hub_dns.c` | 등록된 기기의 rkiot.net(과 하위 이름)만 가로챔(등록부를 질의마다 물음 — `is_src_ok`), 등록 안 된 출발지가 물으면 후보로(`on_unregistered`) |
 
 ### 린나이 서버가 안 될 때 (자동 단독 동작)
 
@@ -58,7 +58,6 @@ ESP32 허브와 같은 규칙이다. proxy 모드에서 클라우드 쪽이 두 
 
 프록시로 등록했던 기기도 그대로 단독으로 옮겨 붙는다(단독 브로커는 아이디·암호를 따지지 않는다). 단독에서는 어느 기기든
 임시 아이디·암호를 받으므로, 단독에서 처음 등록한 기기는 나중에 프록시로 바꾸면 다시 등록이 필요할 수 있다.
-TLS 관문만 시험하려면 `GATE_TEST=1`(옛 `server_pi3.py`).
 
 ## 쓰기
 
@@ -155,7 +154,6 @@ DNS 도 모든 기기의 rkiot.net 질의를 가로챈다.
 | `BOILER_MODE` | `water`(난방수 모드 — 방마다 온도 조절기) / `room`(온돌·실내 모드 — 보일러 조절기 하나). 보일러 Wi-Fi 만 달린 집은 조절기가 있는지 알 수 없어서 여기서 정한다. 보일러가 실내 모드로 동작 중이면 이 값과 상관없이 온돌·실내 | 비움(조절기 연결로 짐작) |
 | `AUTO_FALLBACK` | proxy 인데 린나이 서버가 안 되면 그동안 NAS 가 기기를 직접 받는다(자동 단독 동작). `0` 이면 끔 | `1` |
 | `UPSTREAM_IP` | 진짜 클라우드 주소(이것만 쓴다). 비우면 `www.rkiot.net` 을 DNS 로 조회해 답에 든 주소들을 그 TTL 동안 쓴다 | 비움 |
-| `GATE_TEST` | 값이 있으면 TLS 핸드셰이크 성사/거부만 확인 | 꺼짐 |
 | `UPSTREAM_CA` | proxy 모드에서 클라우드 인증서를 검증할 CA(린나이 사설 CA "ckstack"), 컨테이너 안 경로(바꾸려면 `/data/…`). 파일이 없으면 클라우드에 붙지 않음 | `/app/lynnai-nas/cloud_ca.crt`(이 폴더) |
 | `UPSTREAM_CN` | 클라우드 인증서에 있어야 하는 이름(CN) | `dev2.ckpush.com` |
 
