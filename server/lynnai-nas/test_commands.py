@@ -153,6 +153,30 @@ def main():
     core4.on_device_publish(ln4, base9 + "/inf", b'{"rpc":[{"id":"70","data":"%s"}]}' % rooms.hex().encode())
     check(core4.cmd_info()["pending"] == 0, "슬롯 6번째 바이트가 30 이 되면 끝")
 
+    print("[9] 반영됐다 되돌아가면(보일러가 안 받음) 기록만 하고 재전송은 안 한다")
+    hub_rinnai.PEND_REVERT_S = 1.0
+    core5, ln5, sent5, _ = setup(tmp)
+    core5.command("f06@a1b2c3 b6=1")
+    report(core5, ln5, with_nib(F06, 5, "1"))                        # 모듈이 켜짐으로 반영(메아리)
+    wait(0.2)
+    i5 = core5.cmd_info()
+    check(i5["pending"] == 0 and i5["reverted"] == 0, "반영되면 pending 0, 아직 되돌림 아님")
+    n5 = len(sent5)
+    report(core5, ln5, F06)                                          # ~20초 뒤 꺼짐으로 되돌아감(원래 블롭 = 예열 0)
+    check(core5.cmd_info()["reverted"] == 1, "되돌아감을 셈")
+    check(len(sent5) == n5, "되돌림에는 다시 보내지 않는다")
+
+    print("[10] 반영된 채 유지되면 되돌림 없이 감시 창만 지나 비운다")
+    core6, ln6, sent6, _ = setup(tmp)
+    core6.command("f06@a1b2c3 b6=1")
+    report(core6, ln6, with_nib(F06, 5, "1"))                        # 반영
+    wait(0.2)
+    report(core6, ln6, with_nib(F06, 5, "1"))                        # 그대로 유지(되돌림 아님)
+    n6 = len(sent6)
+    wait(1.3)                                                        # 감시 창(1초)이 지남
+    i6 = core6.cmd_info()
+    check(i6["reverted"] == 0 and i6["pending"] == 0 and len(sent6) == n6, "되돌림 0·재전송 없음, 창 지나면 비움")
+
     print(f"\n== {'실패 %d' % fails if fails else '모두 통과'} ==")
     sys.exit(1 if fails else 0)
 

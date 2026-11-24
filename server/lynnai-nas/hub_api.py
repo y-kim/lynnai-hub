@@ -190,7 +190,8 @@ def build_metrics(core, hub_id):
         L.append(f'lynnai_link_up{{device="rooms",mac="{mac}"}} {int(linked)}')
     ci = core.cmd_info()
     L += ["# TYPE lynnai_cmd_resent_total counter", f"lynnai_cmd_resent_total {ci['resent']}",
-          "# TYPE lynnai_cmd_failed_total counter", f"lynnai_cmd_failed_total {ci['failed']}"]
+          "# TYPE lynnai_cmd_failed_total counter", f"lynnai_cmd_failed_total {ci['failed']}",
+          "# TYPE lynnai_cmd_reverted_total counter", f"lynnai_cmd_reverted_total {ci.get('reverted', 0)}"]
     L.append("# TYPE lynnai_boiler_on gauge")
     for mac, b, _l in boilers:
         bo = decode_boiler(b)

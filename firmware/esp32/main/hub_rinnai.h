@@ -53,12 +53,14 @@ bool hub_rinnai_forget(const char *mac6);
 /* 명령 확인·재전송 누계와 온수 예열 자동 끄기 설정(API·관리 화면용) */
 typedef struct {
     uint32_t tracked, resent, failed;   /* 켜진 뒤: 지켜본 명령 / 답이 없어 다시 보낸 횟수 / 3번 보내도 반영 안 된 명령 */
+    uint32_t reverted;                  /* 반영됐다가 ~20초 뒤 되돌아간 명령(보일러가 안 받음) — 지금은 기록만 */
     uint8_t pending;                    /* 지금 확인을 기다리는 명령 수 */
     uint8_t preheat_off_min;            /* 온수 예열 자동 끄기(분, 0 = 무제한) */
     uint32_t preheat_on_s;              /* 예열이 켜진 지 몇 초(꺼져 있으면 0) */
     uint32_t preheat_left_s;            /* 자동으로 꺼지기까지 남은 초(꺼져 있으면 0, 무제한이면 UINT32_MAX) */
     uint8_t boil_mode;                  /* 보일러 모드 0 정하지 않음 / 1 난방수 / 2 온돌·실내 */
     char last_fail[48];
+    char last_revert[48];               /* 반영됐다 되돌아간 마지막 명령 */
 } hub_cmd_info_t;
 void hub_rinnai_cmd_info(hub_cmd_info_t *out);
 void hub_rinnai_render(char *o, size_t cap);                          /* 관리 화면 카드 "보일러 명령" */

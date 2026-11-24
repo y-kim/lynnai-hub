@@ -173,6 +173,7 @@ static bool mac3_eq(const uint8_t *a, const uint8_t *b) { return !memcmp(a, b, 3
 #define PEND_TRIES    3
 #define PEND_QUEUE_MS 10000         /* 주입 큐에서 이만큼 못 나가면(연결이 막힘) 포기 */
 #define PEND_ANY_MS   300           /* 칸을 모르는 명령: 보낸 지 이만큼 지난 뒤의 보고만 답으로 친다 */
+#define PEND_REVERT_MS 25000        /* 반영이 확인된 뒤에도 이만큼 '되돌림'을 지켜본다(제어기가 ~20초 뒤 원래 값으로 되돌리는 경우) — 지금은 기록만 하고 재전송은 안 한다 */
 #define CHK_MAX       3
 enum { CHK_NIB, CHK_HEX2, CHK_BIT, CHK_BYTE };
 typedef struct {
@@ -189,13 +190,15 @@ typedef struct {
     uint16_t gen;
     uint16_t jlen;
     uint64_t made_ms, sent_ms;      /* 큐에 넣은 때 / 기기 쪽 소켓에 써 넣은 때(0 = 아직 큐에 있음) */
+    uint64_t ok_ms;                 /* 반영이 확인된 때(0 = 아직 확인 전, >0 = 되돌림 감시 중) */
     char key[24];                   /* 바꾸려는 칸 이름(코드들, 각방은 a0 값까지) — 같은 칸의 새 명령이 옛 명령을 밀어낸다 */
     char json[256];
 } pend_t;
 static pend_t s_pend[PEND_MAX];
 static uint16_t s_pend_gen;
-static uint32_t s_cmd_tracked, s_cmd_resent, s_cmd_failed;
+static uint32_t s_cmd_tracked, s_cmd_resent, s_cmd_failed, s_cmd_reverted;
 static char s_cmd_last_fail[48];    /* 끝내 반영되지 않은 마지막 명령(관리 화면용) */
+static char s_cmd_last_revert[48];  /* 반영됐다 되돌아간 마지막 명령(관리 화면용) */
 static uint8_t s_pre_off_min;       /* 온수 예열 자동 끄기(분, 0 = 끄지 않음) */
 static uint8_t s_boil_mode;         /* 보일러 모드: 0 정하지 않음(드라이버가 조절기 연결로 짐작), 1 난방수, 2 온돌·실내 */
 static volatile uint8_t s_test_drop; /* 시험: 다음 명령 n 개를 기기로 안 보냄 */
@@ -282,27 +285,41 @@ static int build_checks(uint8_t kind, char codes[][3], const uint32_t *vals, int
     return nc;
 }
 
-static void pend_done(pend_t *q, const char *how)
-{
-    if (q->tries > 1) {
-        ESP_LOGW(TAG, "명령 %s — f0%d %02x%02x%02x %s(%d번 보냄)", how, q->kind, q->mac3[0], q->mac3[1], q->mac3[2], q->key, q->tries);
-    }
-    q->used = false;
-}
-
-/* 기기가 상태(70)를 올렸다: 기다리던 명령이 반영됐는지 본다. 호출자가 lock 보유. */
-static void pend_report(uint8_t kind, const uint8_t *mac3, const uint8_t *blob, int bn)
+/* 기기가 상태(70)를 올렸다: 기다리던 명령이 반영됐는지 / 반영된 뒤 되돌아갔는지 본다. 호출자가 lock 보유.
+ * 되돌아간 명령 수를 돌려주고(각 '반영~되돌림' 초를 rev[]에 담는다). 이벤트는 호출자가 lock 밖에서 낸다. */
+static int pend_report(uint8_t kind, const uint8_t *mac3, const uint8_t *blob, int bn, int32_t *rev, int rev_cap)
 {
     uint64_t now = hub_trace_now_ms();
+    int nrev = 0;
     for (int i = 0; i < PEND_MAX; i++) {
         pend_t *q = &s_pend[i];
         if (!q->used || q->kind != kind || !mac3_eq(q->mac3, mac3)) {
             continue;
         }
-        if (q->nchk ? chk_all(q->chk, q->nchk, blob, bn) : (q->sent_ms && now - q->sent_ms >= PEND_ANY_MS)) {
-            pend_done(q, "반영됨");
+        if (!q->ok_ms) {                             /* 아직 반영 확인 전 */
+            if (q->nchk ? chk_all(q->chk, q->nchk, blob, bn) : (q->sent_ms && now - q->sent_ms >= PEND_ANY_MS)) {
+                if (q->tries > 1) {
+                    ESP_LOGW(TAG, "명령 반영됨 — f0%d %02x%02x%02x %s(%d번 보냄)",
+                             q->kind, q->mac3[0], q->mac3[1], q->mac3[2], q->key, q->tries);
+                }
+                if (q->nchk) {
+                    q->ok_ms = now;                  /* 칸을 아는 명령만 되돌림을 감시(PEND_REVERT_MS 동안) */
+                } else {
+                    q->used = false;                 /* 칸을 모르는 명령은 되돌림을 판정할 수 없다 */
+                }
+            }
+        } else if (!chk_all(q->chk, q->nchk, blob, bn)) {   /* 반영됐다 되돌아감(보일러가 안 받음) */
+            s_cmd_reverted++;
+            snprintf(s_cmd_last_revert, sizeof(s_cmd_last_revert), "f0%d %s", q->kind, q->key);
+            ESP_LOGW(TAG, "명령이 반영됐다 %llu초 뒤 되돌아감 — f0%d %02x%02x%02x %s(보일러가 안 받음)",
+                     (unsigned long long)((now - q->ok_ms) / 1000), q->kind, q->mac3[0], q->mac3[1], q->mac3[2], q->key);
+            if (rev && nrev < rev_cap) {
+                rev[nrev++] = (int32_t)((now - q->ok_ms) / 1000);
+            }
+            q->used = false;
         }
     }
+    return nrev;
 }
 
 /* base 토픽의 마지막 세그먼트(MAC "AA:BB:CC:A1:B2:C3")에서 끝 3바이트를 뽑는다 */
@@ -572,7 +589,8 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
         lock();
         rk_dev_t *d = dev_get(kind, t->mac3);
         bool changed = d && (d->n != bn || memcmp(d->blob, blob, bn));
-        pend_report(kind, t->mac3, blob, bn);
+        int32_t rev_secs[PEND_MAX];
+        int nrev = pend_report(kind, t->mac3, blob, bn, rev_secs, PEND_MAX);
         if (d) {
             d->seq = tseq;
             if (kind == HUB_KIND_F06 && bn > 2) {            /* 온수 예열이 켜진 때를 기억(자동 끄기) */
@@ -624,6 +642,13 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
             }
         }
         unlock();
+        if (nrev) {
+            uint8_t m6r[6] = { t->mac3[0], t->mac3[1], t->mac3[2], 0, 0, 0 };
+            for (int k = 0; k < nrev; k++) {
+                hub_event(EV_CMD_REVERT, m6r, kind, rev_secs[k]);
+            }
+            kick();
+        }
         if (changed) {
             ESP_LOGI(TAG, "f0%d %02x%02x%02x 상태 바뀜 (%d바이트)", kind, t->mac3[0], t->mac3[1], t->mac3[2], bn);
             uint8_t m6[6] = { t->mac3[0], t->mac3[1], t->mac3[2], 0, 0, 0 };   /* 이벤트 mac 은 6바이트 */
@@ -949,6 +974,13 @@ static bool pend_tick(void)
         if (!t) {                                    /* 연결이 끊겼다 — 다시 붙으면 기기가 자기 상태를 올린다 */
             q->used = false;
             continue;
+        }
+        if (q->ok_ms) {                              /* 반영된 뒤 되돌림 감시 중 — 창이 지나면 '그대로 유지'로 보고 놓아준다
+                                                        (되돌림은 pend_report 가 상태 보고로 잡는다, 재전송은 안 한다) */
+            if (now - q->ok_ms >= PEND_REVERT_MS) {
+                q->used = false;
+            }
+            continue;                                /* left 에 넣지 않는다 — 촘촘한 폴링은 필요 없다 */
         }
         if (!q->sent_ms) {
             if (now - q->made_ms > PEND_QUEUE_MS) {
@@ -1393,9 +1425,11 @@ void hub_rinnai_cmd_info(hub_cmd_info_t *o)
     o->tracked = s_cmd_tracked;
     o->resent = s_cmd_resent;
     o->failed = s_cmd_failed;
+    o->reverted = s_cmd_reverted;
     strlcpy(o->last_fail, s_cmd_last_fail, sizeof(o->last_fail));
+    strlcpy(o->last_revert, s_cmd_last_revert, sizeof(o->last_revert));
     for (int i = 0; i < PEND_MAX; i++) {
-        o->pending += s_pend[i].used ? 1 : 0;
+        o->pending += (s_pend[i].used && !s_pend[i].ok_ms) ? 1 : 0;   /* 아직 반영 확인 전인 것만 — ok_ms>0 은 되돌림 감시 중 */
     }
     preheat_left_locked(now, &o->preheat_left_s);
     for (int i = 0; i < MAX_DEV; i++) {              /* 예열이 켜져 있는 첫 보일러: 켜진 지 몇 초 */
@@ -1422,6 +1456,13 @@ void hub_rinnai_render(char *o, size_t cap)
     if (ci.last_fail[0]) {
         strlcat(o, " (마지막: <code>", cap);
         strlcat(o, ci.last_fail, cap);
+        strlcat(o, "</code>)", cap);
+    }
+    snprintf(line, sizeof(line), "<br>반영됐다 되돌아감(보일러가 안 받음) %lu번 — 지금은 기록만 합니다", (unsigned long)ci.reverted);
+    strlcat(o, line, cap);
+    if (ci.last_revert[0]) {
+        strlcat(o, " (마지막: <code>", cap);
+        strlcat(o, ci.last_revert, cap);
         strlcat(o, "</code>)", cap);
     }
     strlcat(o, "</p></div>", cap);

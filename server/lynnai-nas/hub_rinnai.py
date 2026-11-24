@@ -32,6 +32,7 @@ BOILER_MODES = {"": 0, "water": 1, "room": 2}   # 환경변수 BOILER_MODE (ESP3
 OK_CODES = {"80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97", "da"}   # ESP32 code_allowed 와 같게
 PREOFF_CHOICES = (*range(1, 61), 0)        # 1~60분, 0 = 무제한
 PEND_WAIT_S, PEND_TRIES, PEND_ANY_S = 2.5, 3, 0.3
+PEND_REVERT_S = 25          # 반영이 확인된 뒤에도 이만큼 '되돌림'을 지켜본다(제어기가 ~20초 뒤 원래 값으로 되돌림) — 기록만, 재전송 안 함
 # 확인할 칸: f06 = (니블 위치, 두 니블 값인가), f09 = 방(a0) stat 바이트 기준의 (비트 | 바이트 오프셋)
 F06_CHECK = {"80": (0, False), "b1": (2, False), "d7": (3, False), "b6": (5, False), "b4": (7, False),
              "d1": (10, True), "d2": (13, True), "d4": (15, True)}
@@ -72,6 +73,7 @@ class Pending:
     def __init__(self, kind, mac3, ln, pkt, checks, key, src):
         self.kind, self.mac3, self.ln, self.pkt, self.checks, self.key, self.src = kind, mac3, ln, pkt, checks, key, src
         self.tries, self.sent = 1, time.monotonic()
+        self.ok = 0.0            # 반영이 확인된 때(0 = 아직 확인 전, >0 = 되돌림 감시 중)
 KIND_F06, KIND_F09 = 6, 9
 HEARTBEAT_S = 300
 POLL_S = 30
@@ -126,8 +128,9 @@ class HubCore:
             log(f"[core] 모르는 BOILER_MODE={boiler_mode!r} — water/room 중 하나. 정하지 않음으로")
         self.data_dir = data_dir
         self.pending = []                 # 확인을 기다리는 명령(Pending)
-        self.counts = {"tracked": 0, "resent": 0, "failed": 0}
+        self.counts = {"tracked": 0, "resent": 0, "failed": 0, "reverted": 0}
         self.last_fail = ""
+        self.last_revert = ""
         self.preheat_off = self._load_preoff()
         self.pre_on = {}                  # (kind, mac3) -> 온수 예열이 켜진 것을 처음 본 때(monotonic)
         self.pre_try = {}                 # (kind, mac3) -> 자동 끄기를 마지막으로 보낸 때
@@ -392,17 +395,39 @@ class HubCore:
         ln.inject_cb(pkt)
 
     def _pend_report(self, kind, mac, blob):
+        """상태 보고가 오면 기다리던 명령이 반영됐는지 / 반영된 뒤 되돌아갔는지 본다."""
         now = time.monotonic()
         with self.lock:
             keep = []
             for q in self.pending:
-                done = q.kind == kind and q.mac3 == mac and (
-                    all(c(blob) for c in q.checks) if q.checks else now - q.sent >= PEND_ANY_S)
-                if done and q.tries > 1:
-                    self.log(f"[core] 명령 반영됨 — f0{kind} {mac.hex()} {q.key}({q.tries}번 보냄)")
-                if not done:
+                mine = q.kind == kind and q.mac3 == mac
+                if mine and not q.ok:                           # 아직 반영 확인 전
+                    done = all(c(blob) for c in q.checks) if q.checks else now - q.sent >= PEND_ANY_S
+                    if done:
+                        if q.tries > 1:
+                            self.log(f"[core] 명령 반영됨 — f0{kind} {mac.hex()} {q.key}({q.tries}번 보냄)")
+                        if q.checks:                            # 칸을 아는 명령만 되돌림을 감시
+                            q.ok = now
+                            keep.append(q)
+                        # 칸을 모르는 명령은 되돌림을 판정할 수 없다 — 여기서 끝낸다
+                    else:
+                        keep.append(q)
+                elif mine and q.checks and not all(c(blob) for c in q.checks):   # 반영됐다 되돌아감(보일러가 안 받음)
+                    self.counts["reverted"] += 1
+                    self.last_revert = f"f0{q.kind} {q.key}"
+                    self.log(f"[core] 명령이 반영됐다 {now - q.ok:.0f}초 뒤 되돌아감 — f0{q.kind} {q.mac3.hex()} {q.key}(보일러가 안 받음)")
+                    self._emit_revert(q.kind, q.mac3, int(now - q.ok))
+                else:
                     keep.append(q)
             self.pending = keep
+
+    def _emit_revert(self, kind, mac3, secs):
+        """되돌림을 이벤트로 알린다(허브 EV_CMD_REVERT 와 같은 뜻). 이벤트 수집기가 없으면 로그만."""
+        for fn in getattr(self, "event_cbs", []):
+            try:
+                fn("cmd_revert", kind, mac3, secs)
+            except Exception as e:
+                self.log(f"[core] revert 이벤트 콜백 오류: {e}")
 
     def _pend_tick(self):
         now = time.monotonic()
@@ -411,6 +436,10 @@ class HubCore:
             keep = []
             for q in self.pending:
                 if q.ln not in self.links:                # 연결이 끊김 — 다시 붙으면 기기가 자기 상태를 올린다
+                    continue
+                if q.ok:                                  # 반영된 뒤 되돌림 감시 중 — 창이 지나면 '그대로 유지'로 보고 놓아준다
+                    if now - q.ok < PEND_REVERT_S:        #   (되돌림은 _pend_report 가 상태 보고로 잡는다, 재전송 안 함)
+                        keep.append(q)
                     continue
                 if now - q.sent < PEND_WAIT_S:
                     keep.append(q)
@@ -521,7 +550,7 @@ class HubCore:
         now = time.monotonic()
         with self.lock:
             on = [now - t for k, t in self.pre_on.items() if k[0] == KIND_F06]
-            return {**self.counts, "pending": len(self.pending), "preheat_off_min": self.preheat_off,
+            return {**self.counts, "pending": sum(1 for q in self.pending if not q.ok), "preheat_off_min": self.preheat_off,
                     "preheat_on_s": int(max(on)) + 1 if on else 0, "boiler_mode": self.boiler_mode,
                     "preheat_left_s": self._left_s(now)}
 
