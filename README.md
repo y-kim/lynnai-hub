@@ -111,7 +111,7 @@ SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 �
 | `firmware/esp32/` | **ESP32-C6 허브 펌웨어**(ESP-IDF v5.5): 허브 AP·DNS·TLS 중계/단독 브로커·Zigbee·LAN·관리 화면·API·센서·진단 |
 | `edge-driver/` | SmartThings Edge 드라이버(Zigbee). 공통 로직 `src/core.lua`, 하드웨어 없는 시험 `test/` |
 | `edge-driver-lan/` | 같은 코어를 쓰는 LAN 드라이버(SSDP + TCP 8484) |
-| `docs/` | 설치·운영 안내: [ESP32 허브](docs/esp32-hub.md), [NAS 허브](docs/nas-hub.md) |
+| `docs/` | 설치·운영 안내: [ESP32 허브](docs/esp32-hub.md), [NAS 허브](docs/nas-hub.md) · [린나이 클라우드 API 규약](docs/rinnai-api.md) |
 | `tools/hub_doctor.py` | PC 에서 허브 고장 진단(API · SmartThings CLI · USB 시리얼) |
 | `server/lynnai-nas/` | ESP32 없이 **NAS 도커**로 같은 일을 하는 LAN 전용 허브(파이썬 판, 프록시/단독). 집 네트워크의 DNS 서버를 바꿔야 한다 — [docs/nas-hub.md](docs/nas-hub.md) |
 | `server/lynnai-hub-watch/` | 허브 API 를 SQLite 로 모으는 NAS 기록기 |
