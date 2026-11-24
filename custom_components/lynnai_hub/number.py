@@ -23,7 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
 
 
 class HeatSetpoint(BoilerEntity, NumberEntity):
-    """Heating water temperature (floor mode, 40-85) or room temperature (room mode, 5-40)."""
+    """Heating water temperature (floor mode, 40-85 or as the boiler model allows) or room temperature (room mode, 5-40)."""
 
     _attr_device_class = NumberDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
@@ -35,9 +35,11 @@ class HeatSetpoint(BoilerEntity, NumberEntity):
         if hub.boiler_water_mode(mac):       # with room thermostats the boiler only heats the water (same id, other name)
             self._attr_translation_key = "heating_water_setpoint"
 
-    def _allowed(self) -> list[int]:
+    def _allowed(self) -> list[float]:
         state = self.state_or_none
-        return p.ROOM_TEMPS if state and state.heat_mode == p.HEAT_MODE_ROOM else p.ONDOL_TEMPS
+        if state and state.heat_mode == p.HEAT_MODE_ROOM:
+            return p.ROOM_TEMPS
+        return self.hub.boiler_tables(self.mac).heat or p.ONDOL_TEMPS     # by model: 40-85, 35-85 or the 13-step table
 
     @property
     def native_min_value(self) -> float:

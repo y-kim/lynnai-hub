@@ -19,6 +19,7 @@ local CMD_TARIFF = 0x09
 local CMD_MODE = 0x0b
 local CMD_BOILCFG = 0x0c   -- 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)]. 바꾸기는 "hub preoff=<분>"
 local CMD_ALIVE = 0x0a
+local CMD_MODELS = 0x0d   -- 모델코드: ([종류][MAC끝3][모델코드 1바이트]) * n — 온수·난방수 온도 표를 고른다(허브 v0.8~)
 local KIND_F06, KIND_F09 = 6, 9
 
 -- 한 f09 안의 방 슬롯(7바이트, 슬롯 s 는 byte[7s]). 상태 0x02=켜짐, 0x40=난방 중. 명령 선택자 a0=슬롯+1.
@@ -62,6 +63,72 @@ for t = 35, 47 do HW_TEMPS[#HW_TEMPS + 1] = t end
 for _, t in ipairs({ 50, 55, 60 }) do HW_TEMPS[#HW_TEMPS + 1] = t end
 local RANGE = { ["온돌"] = { 40, 85 }, ["실내"] = { 5, 40 } }
 
+-- 모델코드별 온도 표 — 린나이 앱(v1.4.2)이 모델코드로 고르는 표와 같다(값은 앱 리소스, 고르는 규칙은 RinnaiUtil).
+-- 모델코드는 기기 토픽 rinnai/RK/01/RK/f06/<두 자리>/<MAC> 의 두 자리(우리 집 보일러 23, 각방 03).
+-- 허브가 모델코드를 알려 주지 않으면(옛 펌웨어) 위의 실측 표(ONDOL_TEMPS·HW_TEMPS)를 그대로 쓴다 — 23·03 의 표와 같다.
+local function list_of(...)
+  local out = {}
+  for _, part in ipairs({ ... }) do
+    if type(part) == "table" then
+      for _, v in ipairs(part) do out[#out + 1] = v end
+    else
+      out[#out + 1] = part
+    end
+  end
+  return out
+end
+local function span(a, b, step)
+  local out = {}
+  for v = a, b, step or 1 do out[#out + 1] = v end
+  return out
+end
+local HALF_37_42 = list_of(37, 37.5, 38, 38.5, 39, 39.5, 40, 40.5, 41, 41.5, 42, 42.5)
+local TABLES = {
+  heat = {                                       -- 온돌(f06 d2)·난방수(f09 d2) 설정
+    [22] = ONDOL_TEMPS,                          -- 40, 45~60, 65~85
+    [23] = list_of(35, ONDOL_TEMPS),             -- 35, 40, 45~60, 65~85
+    [13] = { 40, 45, 47, 50, 52, 55, 57, 60, 65, 70, 75, 80, 85 },
+  },
+  hw = {                                         -- 온수 설정(d1 + 소수 df). 3·7 은 온도가 아니라 '단'(1~3, 1~7)
+    [16] = HW_TEMPS,                             -- 35~47, 50, 55, 60
+    [21] = list_of(span(30, 47), 50, 55, 60),
+    [22] = list_of(35, 36, HALF_37_42, span(43, 47), 50, 55, 60),
+    [27] = list_of(span(30, 36), HALF_37_42, span(43, 47), 50, 55, 60),
+    [3] = span(1, 3),
+    [7] = span(1, 7),
+  },
+}
+local function code_set(str)
+  local t = {}
+  for c in str:gmatch("%S+") do t[c] = true end
+  return t
+end
+-- 보일러(f06): 온돌 표 23 인 모델(그 밖은 22), 온수 표(목록에 없으면 앱처럼 3단)
+local F06_HEAT23 = code_set("04 05 06 0b 0c 21 24 25 28 29 2b 31 33 35 37 39 40 41 42")
+local F06_HW = {}
+for c in ("00 01 02 0a 0d 0f 20 23 26 2a 30 32 34 36"):gmatch("%S+") do F06_HW[c] = 16 end
+for c in ("03 27 38"):gmatch("%S+") do F06_HW[c] = 22 end
+for c in ("04 05 0c 21 25 28 2b 31 33 35 37"):gmatch("%S+") do F06_HW[c] = 21 end
+for c in ("06 29 39"):gmatch("%S+") do F06_HW[c] = 27 end
+-- 각방(f09): 십의 자리 = 난방수 표(2x → 23, 4x → 13, 그 밖 22), 일의 자리 = 온수 표(십의 자리가 0·2·4 일 때만 1→7 2→22
+-- 3→16 4→21 5→27, 그 밖 3단). ff = 온수 전용(난방수 조절 없음).
+local F09_HW_ONES = { ["1"] = 7, ["2"] = 22, ["3"] = 16, ["4"] = 21, ["5"] = 27 }
+
+-- 그 기기의 표: { heat = 목록 또는 nil(난방수 조절 없음), hw = 목록, hw_level = 온도가 아니라 단인가, model = 코드 }
+local function tables_for(model, kind)
+  if not model then return { heat = ONDOL_TEMPS, hw = HW_TEMPS } end
+  local heat, hw
+  if kind == "f09" then
+    local tens, ones = model:sub(1, 1), model:sub(2, 2)
+    if model ~= "ff" then heat = tens == "2" and 23 or tens == "4" and 13 or 22 end   -- ff = 난방수 없음(nil)
+    hw = (tens == "0" or tens == "2" or tens == "4") and F09_HW_ONES[ones] or 3
+  else
+    heat = F06_HEAT23[model] and 23 or 22
+    hw = F06_HW[model] or 3
+  end
+  return { heat = heat and TABLES.heat[heat], hw = TABLES.hw[hw], hw_level = hw == 3 or hw == 7, model = model }
+end
+
 local status_cap = capabilities["connectbook02461.boilerStatus"]
 local room_cap = capabilities["connectbook02461.roomStatus"]
 -- 보일러의 조작 항목은 표준 capability 를 쓴다(앱이 표준 항목 전용 모양으로 그린다 — 린나이 공식 연동과 같은 구성):
@@ -82,6 +149,13 @@ local hubs = {}
 local function hub_state(parent)
   hubs[parent.id] = hubs[parent.id] or { boilers = {}, thermos = {}, online = {} }
   return hubs[parent.id]
+end
+
+-- 보일러(kind "boiler" = f06, "vboiler" = 각방 조절기만 있는 집의 f09)의 온도 표
+local function temps_of(parent, kind, mac)
+  local models = hub_state(parent).models or {}
+  if kind == "vboiler" then return tables_for(models["9:" .. mac], "f09") end
+  return tables_for(models["6:" .. mac], "f06")
 end
 
 -- 노출(펌웨어 hub_expose.h). 0x06 = [u32 마스크] + ([종류][MAC끝3][숨김 비트])*n
@@ -148,6 +222,8 @@ local function decode_boiler(blob)
   for k, s in pairs(SWITCH) do m[k] = ch(s.pos) == "1" end
   m.heat_mode = HEAT_MODES[ch(7) == "1" and 1 or 0]
   m.hw_set = hx(10, 12)
+  local point = tonumber(ch(12), 16)                -- 온수 설정의 소수 자리(앱 hotWaterSettingTempPoint) — 0.5도 표 모델
+  if m.hw_set and point and point > 0 and point < 10 then m.hw_set = m.hw_set + point / 10 end
   m.ondol_set = hx(13, 15)
   m.room_set = hx(15, 17)
   m.heat_temp = m.heat_mode == "실내" and m.room_set or m.ondol_set
@@ -184,6 +260,8 @@ end
 local function decode_vboiler(blob, rooms)
   local vb = { heating = false }
   if #blob >= 50 then vb.hw_set = blob:byte(50) end
+  local point = #blob >= 51 and (blob:byte(51) >> 4) or 0   -- 니블 100 = 온수 소수 자리
+  if vb.hw_set and point > 0 and point < 10 then vb.hw_set = vb.hw_set + point / 10 end
   for _, z in pairs(rooms or {}) do if z.heating then vb.heating = true end end
   return vb
 end
@@ -369,6 +447,20 @@ local function setpoint(v) return capabilities.thermostatHeatingSetpoint.heating
 local function sp_range(r)
   return capabilities.thermostatHeatingSetpoint.heatingSetpointRange({ value = { minimum = r[1], maximum = r[2], step = 1 }, unit = "C" })
 end
+local function has_half(list)
+  for _, v in ipairs(list) do if v % 1 ~= 0 then return true end end
+  return false
+end
+-- 온수 설정 범위: 그 모델의 표 처음~끝(0.5도 표면 0.5 단위, 3단·7단 모델은 1~3·1~7)
+local function hw_range(t)
+  return hw_cap.heatingSetpointRange({ value = { minimum = t.hw[1], maximum = t.hw[#t.hw],
+    step = has_half(t.hw) and 0.5 or 1 }, unit = "C" })
+end
+-- 난방 설정 범위: 실내는 5~40, 온돌·난방수는 그 모델의 표 처음~끝
+local function heat_range(t, mode)
+  if mode ~= "실내" and t.heat then return sp_range({ t.heat[1], t.heat[#t.heat] }) end
+  return sp_range(RANGE[mode] or RANGE["온돌"])
+end
 
 local RES_LABEL = { [0] = "예약", [1] = "예약(24시간)", [2] = "예약(패턴)" }
 local function main_text(m)
@@ -517,9 +609,10 @@ local function refresh_boiler(parent, mac)
   emit(child, "outing", m.outing and on() or off())
   emit(child, "heat", tm_cap.supportedThermostatModes({ "ondol", "heat" }, { visibility = { displayed = false } }))
   emit(child, "heat", tm_cap.thermostatMode(TM_OF[m.heat_mode] or "ondol"))
-  emit(child, "heat", sp_range(RANGE[m.heat_mode]))
+  local t = temps_of(parent, "boiler", mac)
+  emit(child, "heat", heat_range(t, m.heat_mode))
   if m.heat_temp then emit(child, "heat", setpoint(m.heat_temp)) end
-  emit(child, "hotwater", hw_cap.heatingSetpointRange({ value = { minimum = 35, maximum = 60, step = 1 }, unit = "C" }))
+  emit(child, "hotwater", hw_range(t))
   if m.hw_set then emit(child, "hotwater", hw_cap.heatingSetpoint({ value = m.hw_set, unit = "C" })) end
   local preoff = preoff_of(parent)
   if preoff ~= nil and child:supports_capability_by_id("mode", "preheat") then
@@ -621,8 +714,9 @@ function refresh_vboiler(parent, mac)
   if not s.online["9:" .. mac] then return go_offline(child) end
   local vb = s.vboilers and s.vboilers[mac]
   mark_online(child)
+  apply_caps(parent, child)            -- 모델코드를 알게 되면 온수 전용(ff)은 난방수 설정을 거둔다(바뀔 때만 실제로 적용)
   if vb and vb.hw_set and vb.hw_set > 0 then
-    emit(child, "hotwater", hw_cap.heatingSetpointRange({ value = { minimum = 35, maximum = 60, step = 1 }, unit = "C" }))
+    emit(child, "hotwater", hw_range(temps_of(parent, "vboiler", mac)))
     emit(child, "hotwater", hw_cap.heatingSetpoint({ value = vb.hw_set, unit = "C" }))
   end
   emit_text(child, vb and vb.heating and "난방 중" or "대기")
@@ -641,7 +735,9 @@ local function wanted_caps(parent, key)
     local water = kind == "boiler" and water_mode(parent, mac)
     local heat = { { BIT.heat_mode, "switch" } }
     if not water then heat[#heat + 1] = { BIT.heat_type, "thermostatMode" } end
-    heat[#heat + 1] = { BIT.heat_temp, "thermostatHeatingSetpoint" }
+    if temps_of(parent, kind, mac).heat then             -- 온수 전용 각방 모델(ff)은 난방수 설정이 없다
+      heat[#heat + 1] = { BIT.heat_temp, "thermostatHeatingSetpoint" }
+    end
     local comps = {
       { "main", { { BIT.power, "switch" } } },
       { "heat", heat },
@@ -751,6 +847,25 @@ local function on_pairs(parent, b)
   refresh_all(parent)
 end
 
+-- 모델코드: ([종류][MAC끝3][모델]) * n — 바뀌면 표(설정 범위·고를 수 있는 값)를 다시 그린다
+local function on_models(parent, b)
+  local s = hub_state(parent)
+  s.models = s.models or {}
+  local changed = false
+  for i = 1, #b - 4, 5 do
+    local kind = b:byte(i)
+    if kind == KIND_F06 or kind == KIND_F09 then
+      local key = kind .. ":" .. string.format("%02x%02x%02x", b:byte(i + 1), b:byte(i + 2), b:byte(i + 3))
+      local code = string.format("%02x", b:byte(i + 4))
+      if s.models[key] ~= code then
+        s.models[key] = code
+        changed = true
+      end
+    end
+  end
+  if changed then refresh_all(parent) end
+end
+
 local function on_links(parent, b)
   local s = hub_state(parent)
   s.online = {}
@@ -771,7 +886,8 @@ local function on_links(parent, b)
 end
 
 -- 허브에 직접 꽂은 센서(허브 1개당 하나) — 식별 MAC 없음, 키 고정
--- 허브가 고장으로 본 센서(플러그인 알림의 둘째 바이트: 1 온습도계 응답 없음, 2 난방 중인데 가스 펄스 없음)는 오프라인.
+-- 허브가 고장으로 본 센서(플러그인 알림의 둘째 바이트: 1 온습도계 응답 없음, 2 보일러를 쓰는데 가스 펄스 없음).
+-- 온습도계는 오프라인. 가스 계량기의 '펄스 없음'은 경고라 온라인 그대로 두고 알린다(멈춤만 오프라인).
 local FAULT_ROOM, FAULT_GAS = 1, 2
 local function faulty(parent, bit) return ((hub_state(parent).plug_fault or 0) & bit) ~= 0 end
 
@@ -975,7 +1091,8 @@ function show_gas(parent)
   local function limit(key) return tonumber(child.preferences and child.preferences[key]) or 0 end
   local lim_m, lim_d = limit("gasWarnCost"), limit("gasWarnDayCost")
   local warn = (lim_m > 0 and month_won >= lim_m) or (lim_d > 0 and day_won >= lim_d)
-  emit(child, "main", status_cap.status((warn and "⚠ 사용량 경고 · " or "") .. "1D " .. f(day) .. " · 1H " .. f(hour)))
+  emit(child, "main", status_cap.status((no_pulse and "⚠ 계량기 펄스 없음 · " or "") .. (warn and "⚠ 사용량 경고 · " or "")
+    .. "1D " .. f(day) .. " · 1H " .. f(hour)))
   emit(child, "main", alert_cap.alert(warn and "warning" or "normal"))
   -- 요금 칸 막대의 끝값 = 경고 기준. 기준이 없으면 값이 들어가는 둥근 수(1·2·5×10ⁿ, 최소 off_min). 값이 끝값을 넘으면
   -- 끝값을 값에 맞춘다(앱이 숫자를 끝값으로 잘라 보여 주지 않게).
@@ -1229,7 +1346,9 @@ local function set_heating_setpoint(_, device, cmd)
   if m.heat_mode == "실내" then
     boiler_cmds(parent, { string.format("%s d4=%02X", boiler_prefix(kind, mac), snap(v, ROOM_TEMPS, m.room_set)) })
   else
-    boiler_cmds(parent, { string.format("%s d2=%02X", boiler_prefix(kind, mac), snap(v, ONDOL_TEMPS, m.ondol_set)) })
+    local heat = temps_of(parent, kind, mac).heat
+    if not heat then return end                          -- 온수 전용 모델(ff): 난방수 조절 없음
+    boiler_cmds(parent, { string.format("%s d2=%02X", boiler_prefix(kind, mac), snap(v, heat, m.ondol_set)) })
   end
 end
 
@@ -1288,8 +1407,13 @@ local function set_hw_setpoint(_, device, cmd)
   local kind, mac = parse_key(device.parent_assigned_child_key)
   if kind ~= "boiler" and kind ~= "vboiler" then return end
   local m = bstate(parent, kind, mac) or {}
-  local v = snap(math.floor(cmd.args.setpoint + 0.5), HW_TEMPS, m.hw_set)
-  boiler_cmds(parent, { string.format("%s d1=%02X,df=0", boiler_prefix(kind, mac), v) })
+  local t = temps_of(parent, kind, mac)
+  local want = cmd.args.setpoint
+  want = has_half(t.hw) and math.floor(want * 2 + 0.5) / 2 or math.floor(want + 0.5)
+  local v = snap(want, t.hw, m.hw_set)
+  local whole = math.floor(v)
+  -- 앱과 같이 정수 부분은 d1, 소수 자리(0.5 → 5)는 df 로(3단·7단 모델은 d1 = 단)
+  boiler_cmds(parent, { string.format("%s d1=%02X,df=%X", boiler_prefix(kind, mac), whole, math.floor((v - whole) * 10 + 0.5)) })
 end
 
 local function do_refresh(_, device)
@@ -1486,7 +1610,7 @@ end
 
 local HANDLERS = { [CMD_ALIVE] = on_alive, [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
   [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
-  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode, [CMD_BOILCFG] = on_boilcfg }
+  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode, [CMD_BOILCFG] = on_boilcfg, [CMD_MODELS] = on_models }
 
 function M.info_changed(_, device)
   if not is_child(device) then return end

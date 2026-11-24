@@ -387,3 +387,19 @@ async def test_time_mode_minutes(hass: HomeAssistant, entry, fake_hub):
     blob[5] = 5
     await fake_hub.push_state(9, THERMO, blob.hex())
     await _settle(hass, lambda: s.get(sel).state == "5")
+
+
+async def test_boiler_model_picks_the_temperature_tables(hass: HomeAssistant, entry, fake_hub):
+    hot = f"water_heater.boiler_{BOILER}_hot_water"
+    heat = f"number.boiler_{BOILER}_heating_water_temperature"
+    assert hass.states.get(hot).attributes["min_temp"] == 35          # no model code yet: the measured tables
+    assert hass.states.get(heat).attributes["min"] == 40
+    await fake_hub.push(0x0D, bytes([6]) + bytes.fromhex(BOILER) + b"\x06")   # model 06: 35-85 floor, 30-60 by halves
+    await _settle(hass, lambda: hass.states.get(hot).attributes["min_temp"] == 30)
+    from homeassistant.components import water_heater
+    if hasattr(water_heater, "ATTR_TARGET_TEMP_STEP"):         # older HA (2025.1) has no step for water heaters
+        assert hass.states.get(hot).attributes.get("target_temp_step") == 0.5
+    assert hass.states.get(heat).attributes["min"] == 35
+    await hass.services.async_call("water_heater", "set_temperature", {"entity_id": hot, "temperature": 37.5}, blocking=True)
+    await _settle(hass, lambda: bool(fake_hub.requests))
+    assert fake_hub.requests.pop() == f"f06@{BOILER} d1=25,df=5"

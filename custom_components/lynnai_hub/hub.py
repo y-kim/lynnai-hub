@@ -26,6 +26,7 @@ class LynnaiHub:
         self.zones: dict[str, dict[str, p.ZoneState]] = {}      # thermostat mac -> zone id -> state
         self.pairs: dict[str, str] = {}
         self.links: set[tuple[int, str]] | None = None          # None until the hub told us
+        self.models: dict[tuple[int, str], str] = {}            # (kind, mac) -> model code ("23"), from hub v0.8
         self.room: p.RoomSensorState | None = None
         self.gas: p.GasState | None = None
         self.plugins = p.PluginState()
@@ -73,6 +74,11 @@ class LynnaiHub:
                 return
         elif cmd == p.CMD_LINKS:
             self.links = p.decode_links(payload)
+        elif cmd == p.CMD_MODELS:
+            models = {**self.models, **p.decode_models(payload)}
+            if models == self.models:
+                return
+            self.models = models
         elif cmd == p.CMD_ROOM:
             room = p.decode_room(payload)
             if room is None:
@@ -205,18 +211,22 @@ class LynnaiHub:
     async def set_boiler_heat_mode(self, mac: str, mode: str) -> None:
         await self._send([p.boiler_cmd(mac, "b4", "1" if mode == p.HEAT_MODE_ROOM else "0")])
 
+    def boiler_tables(self, mac: str) -> p.TempTables:
+        """Temperature tables of this boiler's model (the measured ones while the hub does not tell the model)."""
+        return p.tables_for(self.models.get((p.KIND_BOILER, mac)), p.KIND_BOILER)
+
     async def set_boiler_heat_setpoint(self, mac: str, value: float) -> None:
         state = self.boilers[mac]
         if state.heat_mode == p.HEAT_MODE_ROOM:
             v = p.snap(value, p.ROOM_TEMPS, state.room_setpoint)
-            await self._send([p.boiler_cmd(mac, "d4", f"{v:02X}")])
+            await self._send([p.boiler_cmd(mac, "d4", f"{int(v):02X}")])
         else:
-            v = p.snap(value, p.ONDOL_TEMPS, state.ondol_setpoint)
-            await self._send([p.boiler_cmd(mac, "d2", f"{v:02X}")])
+            v = p.snap(value, self.boiler_tables(mac).heat or p.ONDOL_TEMPS, state.ondol_setpoint)
+            await self._send([p.boiler_cmd(mac, "d2", f"{int(v):02X}")])
 
     async def set_hot_water_setpoint(self, mac: str, value: float) -> None:
-        v = p.snap(value, p.HOT_WATER_TEMPS, self.boilers[mac].hot_water_setpoint)
-        await self._send([p.boiler_cmd(mac, "d1", f"{v:02X},df=0")])
+        v = p.snap(value, self.boiler_tables(mac).hot_water, self.boilers[mac].hot_water_setpoint)
+        await self._send([p.boiler_cmd(mac, "d1", p.hot_water_value(v))])
 
     async def set_zone_power(self, tmac: str, zone_id: str, on: bool, time_mode: bool = False) -> None:
         """Turning a room on means 'heat this room': wake its boiler and leave away mode first.

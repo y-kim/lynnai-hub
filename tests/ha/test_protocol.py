@@ -75,3 +75,29 @@ def test_requests_and_lines():
     assert p.parse_line("01 06a1b2c3\n") == (1, bytes.fromhex("06a1b2c3"))
     assert p.parse_line("0a 00") == (0x0A, b"\x00")
     assert p.parse_line("ping") is None and p.parse_line("zz 00") is None
+
+
+def test_model_code_picks_the_tables():
+    ours = p.tables_for("23")                       # our boiler: the measured tables
+    assert ours.heat == p.ONDOL_TEMPS and ours.hot_water == p.HOT_WATER_TEMPS and ours.hot_water_step == 1
+    assert p.tables_for(None) == ours               # older hub firmware: no model code
+    t = p.tables_for("06")
+    assert t.heat[0] == 35 and t.hot_water[0] == 30 and 37.5 in t.hot_water and t.hot_water_step == 0.5
+    assert p.tables_for("03").hot_water[:4] == [35, 36, 37, 37.5]
+    assert p.tables_for("07").hot_water == [1, 2, 3] and p.tables_for("07").hot_water_steps   # unknown code: 3 steps, as the app
+    assert p.tables_for("03", p.KIND_THERMOSTAT).hot_water == p.HOT_WATER_TEMPS              # our thermostat controller
+    assert p.tables_for("41", p.KIND_THERMOSTAT).heat[2] == 47                               # 13-step heating water
+    assert p.tables_for("41", p.KIND_THERMOSTAT).hot_water == list(range(1, 8))
+    assert p.tables_for("ff", p.KIND_THERMOSTAT).heat is None                                # hot water only
+    payload = bytes([6]) + bytes.fromhex("a1b2c3") + b"\x23" + bytes([9]) + bytes.fromhex("d4e5f6") + b"\x03" + b"\x06"
+    assert p.decode_models(payload) == {(6, "a1b2c3"): "23", (9, "d4e5f6"): "03"}
+
+
+def test_half_degree_hot_water():
+    raw = list(F06_ON)
+    raw[10:13] = "255"                              # 0x25 = 37 and tenths 5
+    assert p.decode_boiler(bytes.fromhex("".join(raw))).hot_water_setpoint == 37.5
+    half = p.tables_for("03").hot_water
+    assert p.snap(37.4, half, 36) == 37.5
+    assert p.snap(43.5, half, 60) == 43             # not in the table: step down
+    assert p.hot_water_value(37.5) == "25,df=5" and p.hot_water_value(45) == "2D,df=0"

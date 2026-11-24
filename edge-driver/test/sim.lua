@@ -136,7 +136,7 @@ core.setup(driver, { send = function(_, text) sent_cmds[#sent_cmds + 1] = text; 
                      on_hub_init = function() end })
 
 ----------------------------------------------------------------- 메시지 빌더
-local CMD = { STATE = 0x01, LINKS = 0x02, ROOM = 0x03, GAS = 0x04, PLUGINS = 0x05, EXPOSE = 0x06, PAIRS = 0x07, TARIFF = 0x09 }
+local CMD = { STATE = 0x01, LINKS = 0x02, ROOM = 0x03, GAS = 0x04, PLUGINS = 0x05, EXPOSE = 0x06, PAIRS = 0x07, TARIFF = 0x09, MODELS = 0x0d }
 local function mac3(hex)      -- "a1b2c3" -> 3 bytes
   return string.char(tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16))
 end
@@ -787,7 +787,7 @@ check(#sent_cmds == 0, "방1 이 다시 보임 → 명령 없음")
 state(9, "d4e5f6", f09_rooms(false, false, false))
 check(last_cmd_has("f06@a1b2c3 b1=0"), "방1 을 실제로 끄면 난방 끔")
 
-print("[25] 허브가 고장으로 본 센서는 오프라인(플러그인 알림 둘째 바이트), 풀리면 다시 온라인")
+print("[25] 허브가 고장으로 본 센서: 온습도계는 오프라인, 가스 '펄스 없음'은 경고(온라인 그대로), 풀리면 원래대로")
 reset()
 core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2250, 4000))
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 305, 0xFFFFFFFF, 0, 0, 0))
@@ -1078,6 +1078,78 @@ check(lastv("gas", "main", "period").value == 0, "허브 값이 없으면(옛 �
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4I4I4I4", 1001, 50010, 0, 5000, 0, 10, 9140, 11004))
 check(lastv("gas", "main", "period").value == 9.14 and lastv("gas", "main", "periodText") == "9.14", "이번달 사용량 = 허브 값 9.14㎥")
 check(lastv("gas", "main", "month").value == 11004, "이번달 예상 금액 = 허브 값 11004원")
+
+print("[33] 모델코드(0x0d)로 온수·난방수 온도 표를 고른다(린나이 앱과 같은 표)")
+reset()
+local function models(list)    -- {{6,"c0ffee",0x23}}
+  local b = {} for _, e in ipairs(list) do b[#b + 1] = string.char(e[1]) .. mac3(e[2]) .. string.char(e[3]) end
+  msg(CMD.MODELS, table.concat(b))
+end
+local function hw_set(dev, v)
+  sent_cmds = {}
+  core.capability_handlers["thermostatWaterHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children[dev], { component = "hotwater", args = { setpoint = v } })
+end
+local function heat_set(dev, v)
+  sent_cmds = {}
+  core.capability_handlers["thermostatHeatingSetpoint"]["setHeatingSetpoint"](nil, driver._children[dev], { component = "heat", args = { setpoint = v } })
+end
+links({ { 6, "c0ffee" } })
+state(6, "c0ffee", F06)
+state(6, "c0ffee", F06)                                   -- 첫 상태는 기기를 만들고, 둘째부터 값이 그려진다
+local r = lastv("bc0ffee", "hotwater", "heatingSetpointRange")
+check(r and r.value.minimum == 35 and r.value.maximum == 60 and r.value.step == 1, "모델코드를 모르면(옛 펌웨어) 실측 표 35~60")
+hw_set("bc0ffee", 48)
+check(last_cmd_has("f06@c0ffee d1=2F,df=0"), "모를 때 60 에서 48 로 내리면 → 47(실측 표에 48·49 없음, 내리는 쪽으로)")
+models({ { 6, "c0ffee", 0x23 } })
+r = lastv("bc0ffee", "hotwater", "heatingSetpointRange")
+check(r.value.minimum == 35 and r.value.maximum == 60 and r.value.step == 1, "우리 집 보일러 23: 온수 16단 35~60")
+r = lastv("bc0ffee", "heat", "heatingSetpointRange")
+check(r.value.minimum == 40 and r.value.maximum == 85, "보일러 23: 온돌 22단 40~85(35 없음)")
+heat_set("bc0ffee", 36)
+check(last_cmd_has("f06@c0ffee d2=28"), "23 에서 온돌 36 → 40(35 는 표에 없음)")
+models({ { 6, "c0ffee", 0x03 } })
+r = lastv("bc0ffee", "hotwater", "heatingSetpointRange")
+check(r.value.minimum == 35 and r.value.maximum == 60 and r.value.step == 0.5, "보일러 03: 온수 22단 — 0.5 단위")
+hw_set("bc0ffee", 37.5)
+check(last_cmd_has("f06@c0ffee d1=25,df=5"), "37.5 → d1=25(37), df=5")
+hw_set("bc0ffee", 43.5)
+check(last_cmd_has("f06@c0ffee d1=2B,df=0"), "43.5 는 22단 표에 없음 → 60 에서 내리는 쪽으로 43")
+state(6, "c0ffee", F06:sub(1, 10) .. "255" .. F06:sub(14))
+check(lastv("bc0ffee", "hotwater", "heatingSetpoint").value == 37.5, "상태의 소수 자리(니블 12) → 37.5")
+models({ { 6, "c0ffee", 0x06 } })
+r = lastv("bc0ffee", "heat", "heatingSetpointRange")
+check(r.value.minimum == 35 and r.value.maximum == 85, "보일러 06: 온돌 23단 35~85")
+r = lastv("bc0ffee", "hotwater", "heatingSetpointRange")
+check(r.value.minimum == 30 and r.value.maximum == 60 and r.value.step == 0.5, "보일러 06: 온수 27단 30~60, 0.5 단위")
+models({ { 6, "c0ffee", 0x07 } })
+r = lastv("bc0ffee", "hotwater", "heatingSetpointRange")
+check(r.value.minimum == 1 and r.value.maximum == 3, "표에 없는 보일러 모델(07): 앱처럼 온수 3단(1~3)")
+hw_set("bc0ffee", 2)
+check(last_cmd_has("f06@c0ffee d1=02,df=0"), "3단 모델: 2단 → d1=02")
+print("     각방 조절기만 있는 집(가상 보일러): 각방 모델코드")
+reset()
+links({ { 9, "beef01" } })
+state(9, "beef01", F09)
+state(9, "beef01", F09)
+models({ { 9, "beef01", 0x41 } })
+r = lastv("vbeef01", "hotwater", "heatingSetpointRange")
+check(r and r.value.minimum == 1 and r.value.maximum == 7, "각방 41: 온수 7단")
+models({ { 9, "beef01", 0x22 } })
+r = lastv("vbeef01", "hotwater", "heatingSetpointRange")
+check(r.value.minimum == 35 and r.value.step == 0.5, "각방 22: 온수 22단(0.5 단위)")
+state(9, "beef01", F09:sub(1, 98) .. "255" .. F09:sub(102))
+check(lastv("vbeef01", "hotwater", "heatingSetpoint").value == 37.5, "각방 상태의 소수 자리(니블 100) → 37.5")
+hw_set("vbeef01", 38.5)
+check(last_cmd_has("f09@beef01 d1=26,df=5"), "가상 보일러 38.5 → f09 d1=26,df=5")
+local vcaps0 = driver._children["vbeef01"]._caps or {}
+check(vcaps0.heat and vcaps0.heat["thermostatHeatingSetpoint"], "보통 각방 모델: 난방수 설정 있음")
+models({ { 9, "beef01", 0xff } })
+local vcaps1 = driver._children["vbeef01"]._caps or {}
+check(vcaps1.heat and not vcaps1.heat["thermostatHeatingSetpoint"], "각방 ff(온수 전용): 난방수 설정을 거둠")
+heat_set("vbeef01", 60)
+check(#sent_cmds == 0, "ff 에 난방수 명령은 보내지 않음")
+msg(CMD.MODELS, string.char(9) .. mac3("beef01"))
+check(true, "짧은 메시지는 무시(오류 없음)")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

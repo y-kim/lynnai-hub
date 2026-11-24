@@ -297,6 +297,18 @@ static void legacy_snapshot(uint8_t *f06, int *n06, uint8_t *f09, int *n09, uint
     }
 }
 
+/* "model":"23" (토픽의 모델코드 두 자리) — 모르면 null. 앱은 이것으로 온수·난방수 온도 표를 고른다 */
+static void model_json(httpd_req_t *req, const hub_dev_t *d)
+{
+    char m[24];
+    if (d->model >= 0) {
+        snprintf(m, sizeof(m), "\"model\":\"%02x\"", d->model);
+    } else {
+        snprintf(m, sizeof(m), "\"model\":null");
+    }
+    httpd_resp_sendstr_chunk(req, m);
+}
+
 #define CHUNK(...) do { snprintf(line, sizeof(line), __VA_ARGS__); httpd_resp_sendstr_chunk(req, line); } while (0)
 
 static esp_err_t state_get(httpd_req_t *req)
@@ -381,8 +393,10 @@ static esp_err_t state_get(httpd_req_t *req)
               b.hotwater ? "true" : "false", b.preheat ? "true" : "false");
         CHUNK("\"heat_mode\":\"%s\",\"heat_set\":%d,\"hw_set\":%d,\"raw\":\"%s\",", b.indoor ? "indoor" : "ondol",
               b.indoor ? b.room_set : b.ondol_set, b.hw_set, raw);
-        CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu}", (unsigned long)dev[i].seq, (unsigned long)dev[i].chg_seq,
+        CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu,", (unsigned long)dev[i].seq, (unsigned long)dev[i].chg_seq,
               (unsigned long long)dev[i].chg_ms);
+        model_json(req, &dev[i]);
+        CHUNK("}");
     }
     CHUNK("],\"thermostats\":[");
     int nt = 0;
@@ -393,6 +407,8 @@ static esp_err_t state_get(httpd_req_t *req)
         hex(raw, dev[i].blob, dev[i].n);
         CHUNK("%s{\"mac\":\"%02x%02x%02x\",\"linked\":%s,\"raw\":\"%s\",", nt++ ? "," : "",
               dev[i].mac3[0], dev[i].mac3[1], dev[i].mac3[2], dev[i].linked ? "true" : "false", raw);
+        model_json(req, &dev[i]);
+        CHUNK(",");
         CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu,\"zones\":[", (unsigned long)dev[i].seq,
               (unsigned long)dev[i].chg_seq, (unsigned long long)dev[i].chg_ms);
         for (int z = 0, k = 0; z < NZONES; z++) {

@@ -160,13 +160,13 @@ def build_state(core, hub_id):
             linked_b = linked_b or linked
             d = _boiler_json(blob)
             if d:
-                d["mac"], d["linked"] = mac, linked
+                d["mac"], d["linked"], d["model"] = mac, linked, core.model_of(kind, mac)
                 boilers.append(d)
         elif kind == KIND_F09:
             linked_r = linked_r or linked
             d = _rooms_json(blob)
             if d:
-                d["mac"], d["linked"] = mac, linked
+                d["mac"], d["linked"], d["model"] = mac, linked, core.model_of(kind, mac)
                 thermostats.append(d)
     return {"v": 1, "id": hub_id, "up_s": int(t - T0), "time": int(t),
             "links": {"boiler": linked_b, "rooms": linked_r},

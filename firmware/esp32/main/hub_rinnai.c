@@ -100,6 +100,49 @@ static const uint8_t RK_ZCUR[RK_NZ]  = { 3, 10, 17, 24, 31, 38, 45 };
 static int bnib(const uint8_t *b, int i) { return i % 2 ? b[i / 2] & 0xf : b[i / 2] >> 4; }
 static rk_dev_t s_dev[MAX_DEV];
 
+/* 기기 모델코드(토픽 …/f06/<두 자리>/<MAC> 의 두 자리 16진수) — 앱은 이것으로 온수·난방수 온도 표를 고른다.
+ * 연결이 끊겨도 기억한다(재부팅하면 다음 연결 때 다시 배운다). */
+typedef struct {
+    bool used;
+    uint8_t kind;
+    uint8_t mac3[3];
+    uint8_t model;
+} rk_model_t;
+static rk_model_t s_model[MAX_DEV];
+
+static void remember_model(uint8_t kind, const uint8_t mac3[3], const char *base)
+{
+    const char *p = strstr(base, kind == HUB_KIND_F06 ? "/f06/" : "/f09/");
+    unsigned v;
+    if (!p || sscanf(p + 5, "%2x", &v) != 1 || !isxdigit((unsigned char)p[5]) || !isxdigit((unsigned char)p[6]) || p[7] != '/') {
+        return;
+    }
+    rk_model_t *free_slot = NULL;
+    for (int i = 0; i < MAX_DEV; i++) {
+        if (s_model[i].used && s_model[i].kind == kind && !memcmp(s_model[i].mac3, mac3, 3)) {
+            s_model[i].model = v;
+            return;
+        }
+        if (!s_model[i].used && !free_slot) {
+            free_slot = &s_model[i];
+        }
+    }
+    if (free_slot) {
+        *free_slot = (rk_model_t){ .used = true, .kind = kind, .model = v };
+        memcpy(free_slot->mac3, mac3, 3);
+    }
+}
+
+static int model_of(uint8_t kind, const uint8_t mac3[3])   /* 잠금 안에서. 모르면 -1 */
+{
+    for (int i = 0; i < MAX_DEV; i++) {
+        if (s_model[i].used && s_model[i].kind == kind && !memcmp(s_model[i].mac3, mac3, 3)) {
+            return s_model[i].model;
+        }
+    }
+    return -1;
+}
+
 static bool s_links_dirty = true;   /* 연결 목록을 다시 보낼지 */
 static bool s_expose_dirty;         /* 노출 마스크를 다시 보낼지(refresh 가 표시, zb_task 가 보냄) */
 static TaskHandle_t s_task;
@@ -429,6 +472,7 @@ static void learn_base(hub_link_tap_t *t, const char *topic, const char *slash)
     memcpy(t->base, topic, slash - topic);
     t->base[slash - topic] = 0;
     parse_mac3(t->base, t->mac3);
+    remember_model(kind, t->mac3, t->base);
     s_links_dirty = true;
     unlock();
     ESP_LOGI(TAG, "링크 = f0%d (%s) mac %02x%02x%02x", kind, t->base, t->mac3[0], t->mac3[1], t->mac3[2]);
@@ -1115,6 +1159,25 @@ static int build_links(uint8_t *out, int cap)
     return n;
 }
 
+/* 연결된 기기의 모델코드: ([종류][MAC끝3][모델]) * n — 모르는 기기는 뺀다 */
+static int build_models(uint8_t *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_TAPS && n + 5 <= cap; i++) {
+        if (!s_taps[i].used || !s_taps[i].kind) {
+            continue;
+        }
+        int m = model_of(s_taps[i].kind, s_taps[i].mac3);
+        if (m >= 0) {
+            out[n++] = s_taps[i].kind;
+            memcpy(out + n, s_taps[i].mac3, 3);
+            n += 3;
+            out[n++] = (uint8_t)m;
+        }
+    }
+    return n;
+}
+
 static void send_boilcfg(void);
 
 static void zb_task(void *arg)
@@ -1172,17 +1235,21 @@ static void zb_task(void *arg)
             poll_status(false);         /* 단독 모드에서 막 구독한 기기 */
         }
         /* 연결 목록 */
-        uint8_t links[MAX_TAPS * 4];
-        int ln;
+        uint8_t links[MAX_TAPS * 4], models[MAX_TAPS * 5];
+        int ln, mn;
         bool send_links;
         lock();
         ln = build_links(links, sizeof(links));
+        mn = build_models(models, sizeof(models));
         send_links = s_links_dirty || beat;
         s_links_dirty = false;
         unlock();
         if (send_links) {
             ESP_LOGI(TAG, "→ 연결 %d대", ln / 4);
             hub_uplink_send(HUB_RK_CMD_LINKS, links, ln);
+            if (mn) {
+                hub_uplink_send(HUB_RK_CMD_MODELS, models, mn);   /* 온도 표 고르기용(옛 드라이버는 무시) */
+            }
             uint8_t pairs[MAX_PAIRS_BYTES];
             int pn = hub_pairs_blob(pairs, sizeof(pairs));
             hub_uplink_send(HUB_RK_CMD_PAIRS, pairs, pn);   /* 짝(없으면 0바이트 = 전부 단독/암묵) */
@@ -1235,6 +1302,7 @@ int hub_rinnai_snapshot(hub_dev_t *out, int max)
         out[n].seq = s_dev[i].seq;
         out[n].chg_seq = s_dev[i].chg_seq;
         out[n].chg_ms = s_dev[i].chg_ms;
+        out[n].model = (int16_t)model_of(s_dev[i].kind, s_dev[i].mac3);
         n++;
     }
     unlock();
@@ -1275,6 +1343,11 @@ bool hub_rinnai_forget(const char *mac6)
             s_taps[i].base[0] = 0;
             s_taps[i].pending = false;
             s_links_dirty = true;
+        }
+    }
+    for (int i = 0; i < MAX_DEV; i++) {
+        if (s_model[i].used && mac3_eq(s_model[i].mac3, m)) {
+            s_model[i].used = false;
         }
     }
     for (int i = 0; i < MAX_DEV; i++) {

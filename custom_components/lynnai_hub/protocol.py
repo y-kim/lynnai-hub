@@ -10,6 +10,7 @@ The hub relays the Rinnai devices' cloud link and forwards what it sees:
                                                          (gas "faulty" = boiler burning but no meter pulses: a warning)
                 0x07 pairs    ([f09 mac3][f06 mac3]) * n   which thermostat belongs to which boiler
                 0x08 forget   [kind][mac3]             device deleted on the hub
+                0x0d models   ([kind][mac3][model code]) * n   two-hex-digit model code from the device topic (hub v0.8+)
                 0x0a alive    keep-alive
     us -> hub   0x00 request  text: "f06@<mac> b1=1", "f09@<mac> a0=7,d4=17", "refresh"
 
@@ -35,6 +36,7 @@ CMD_TARIFF = 0x09
 CMD_ALIVE = 0x0A
 CMD_MODE = 0x0B
 CMD_BOILCFG = 0x0C   # boiler settings: [hot water preheat auto-off, minutes, 0 = never]
+CMD_MODELS = 0x0D    # model codes: ([kind][mac3][code]) * n — picks the temperature tables
 
 KIND_BOILER = 6
 KIND_THERMOSTAT = 9
@@ -52,6 +54,72 @@ HEAT_MODE_ROOM = "room"     # room temperature control, 5-40 C
 ONDOL_TEMPS = [40, 45, *range(46, 61), 65, 70, 75, 80, 85]   # 35 is not taken (bounces back to 40)
 ROOM_TEMPS = list(range(5, 41))
 HOT_WATER_TEMPS = [*range(35, 48), 50, 55, 60]   # the only values the boiler takes (others bounce back after ~20 s)
+
+# Temperature tables per model code — the same tables the Rinnai app (v1.4.2) picks by the two-digit model code in the
+# device topic rinnai/RK/01/RK/f06/<code>/<MAC> (our boiler 23, thermostat controller 03). The measured tables above are
+# the ones for 23/03 and stay the default while the hub does not tell the code (older firmware).
+_HALF_37_42 = [37, 37.5, 38, 38.5, 39, 39.5, 40, 40.5, 41, 41.5, 42, 42.5]
+HEAT_TABLES: dict[int, list[float]] = {
+    22: ONDOL_TEMPS,
+    23: [35, *ONDOL_TEMPS],
+    13: [40, 45, 47, 50, 52, 55, 57, 60, 65, 70, 75, 80, 85],
+}
+HOT_WATER_TABLES: dict[int, list[float]] = {     # 3 and 7 are steps (1-3, 1-7), not degrees
+    16: HOT_WATER_TEMPS,
+    21: [*range(30, 48), 50, 55, 60],
+    22: [35, 36, *_HALF_37_42, *range(43, 48), 50, 55, 60],
+    27: [*range(30, 37), *_HALF_37_42, *range(43, 48), 50, 55, 60],
+    3: [1, 2, 3],
+    7: list(range(1, 8)),
+}
+_F06_HEAT_23 = set("04 05 06 0b 0c 21 24 25 28 29 2b 31 33 35 37 39 40 41 42".split())
+_F06_HOT_WATER = {
+    **dict.fromkeys("00 01 02 0a 0d 0f 20 23 26 2a 30 32 34 36".split(), 16),
+    **dict.fromkeys("03 27 38".split(), 22),
+    **dict.fromkeys("04 05 0c 21 25 28 2b 31 33 35 37".split(), 21),
+    **dict.fromkeys("06 29 39".split(), 27),
+}
+_F09_HOT_WATER_ONES = {"1": 7, "2": 22, "3": 16, "4": 21, "5": 27}
+
+
+@dataclass(frozen=True)
+class TempTables:
+    heat: list[float] | None        # floor / heating water setpoint (None = hot water only model)
+    hot_water: list[float]
+    hot_water_steps: bool = False   # 1-3 / 1-7 steps instead of degrees
+
+    @property
+    def hot_water_step(self) -> float:
+        return 0.5 if any(v % 1 for v in self.hot_water) else 1
+
+
+def tables_for(code: str | None, kind: int = 6) -> TempTables:
+    """Tables for a boiler (kind 6) or a thermostat controller (kind 9) model code, as the Rinnai app picks them."""
+    if code is None:
+        return TempTables(ONDOL_TEMPS, HOT_WATER_TEMPS)
+    if kind == KIND_THERMOSTAT:
+        tens, ones = code[0], code[1]
+        heat = None if code == "ff" else 23 if tens == "2" else 13 if tens == "4" else 22
+        hot = _F09_HOT_WATER_ONES.get(ones, 3) if tens in "024" else 3
+    else:
+        heat = 23 if code in _F06_HEAT_23 else 22
+        hot = _F06_HOT_WATER.get(code, 3)
+    return TempTables(HEAT_TABLES[heat] if heat else None, HOT_WATER_TABLES[hot], hot in (3, 7))
+
+
+def decode_models(payload: bytes) -> dict[tuple[int, str], str]:
+    """(kind, mac) -> two-digit model code."""
+    return {
+        (payload[i], payload[i + 1 : i + 4].hex()): f"{payload[i + 4]:02x}"
+        for i in range(0, len(payload) - 4, 5)
+        if payload[i] in (KIND_BOILER, KIND_THERMOSTAT)
+    }
+
+
+def hot_water_value(value: float) -> str:
+    """d1 (whole degrees or step) plus df (tenths), as the app sends them."""
+    whole = int(value)
+    return f"{whole:02X},df={round((value - whole) * 10):X}"
 ZONE_MIN_TEMP = 5
 ZONE_MAX_TEMP = 40
 
@@ -92,7 +160,7 @@ class BoilerState:
     hotwater: bool = False
     preheat: bool = False
     heat_mode: str = HEAT_MODE_ONDOL
-    hot_water_setpoint: int | None = None
+    hot_water_setpoint: float | None = None
     ondol_setpoint: int | None = None
     room_setpoint: int | None = None
     heat_burning: bool = False
@@ -183,6 +251,9 @@ def decode_boiler(blob: bytes) -> BoilerState | None:
     s.heat_burning = flag(8)
     s.hot_water_burning = flag(9)
     s.hot_water_setpoint = num(10, 12)
+    point = int(raw[12], 16)                      # tenths of the hot water setpoint (models with 0.5 degree steps)
+    if 0 < point < 10:
+        s.hot_water_setpoint += point / 10
     s.ondol_setpoint = num(13, 15)
     s.room_setpoint = num(15, 17)
     return s
@@ -257,9 +328,9 @@ def decode_pairs(payload: bytes) -> dict[str, str]:
     return {payload[i : i + 3].hex(): payload[i + 3 : i + 6].hex() for i in range(0, len(payload) - 5, 6)}
 
 
-def snap(value: float, allowed: list[int], current: int | None = None) -> int:
+def snap(value: float, allowed: list[float], current: float | None = None) -> float:
     """Pick the allowed temperature for a request; step in the direction of the change."""
-    v = round(value)
+    v = round(value * 2) / 2 if any(a % 1 for a in allowed) else round(value)
     if current is not None and v > current:
         for a in allowed:
             if a >= v:

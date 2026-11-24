@@ -25,6 +25,8 @@ import threading
 import time
 
 CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_PAIRS = 0x00, 0x01, 0x02, 0x07
+CMD_MODELS = 0x0D               # 모델코드: ([종류][MAC끝3][모델코드 1바이트 = 토픽의 두 자리 16진수]) * n — 드라이버가 온도 표를 고른다
+_MODEL = re.compile(r"/f0[69]/([0-9A-Fa-f]{2})/")
 CMD_BOILCFG = 0x0C              # 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)][보일러 모드 0 정하지 않음/1 난방수/2 온돌·실내]
 BOILER_MODES = {"": 0, "water": 1, "room": 2}   # 환경변수 BOILER_MODE (ESP32 는 초기 설정·관리 화면에서 고름)
 OK_CODES = {"80", "b1", "b3", "b4", "b6", "d1", "d7", "df", "d2", "d4", "a0", "96", "97", "da"}   # ESP32 code_allowed 와 같게
@@ -138,6 +140,7 @@ class HubCore:
         self.lock = threading.Lock()
         self.links = []
         self.state = {}       # (kind, mac3) -> blob(bytes)
+        self.models = {}      # (kind, mac3) -> 모델코드(토픽의 두 자리 16진수) — 온수·난방수 온도 표를 가른다
         self.senders = []     # 내보내기 대상(LAN uplink 등): fn(cmd_id, data_bytes)
         self._last_mask = None
         threading.Thread(target=self._heartbeat, daemon=True).start()
@@ -178,12 +181,29 @@ class HubCore:
                 out += bytes([ln.kind]) + ln.mac3
         return out
 
+    def _models_blob(self):
+        out = b""
+        for ln in self.links:
+            if ln.kind and len(ln.mac3) == 3:
+                m = self.models.get((ln.kind, bytes(ln.mac3)))
+                if m is not None:
+                    out += bytes([ln.kind]) + ln.mac3 + bytes([m])
+        return out
+
+    def model_of(self, kind, mac_hex):
+        """모델코드 두 자리("23") — 모르면 None. 연결이 끊겨도 기억한다."""
+        m = self.models.get((kind, bytes.fromhex(mac_hex)))
+        return None if m is None else f"{m:02x}"
+
     def _send_links(self):
         b = self._links_blob()
         if b != self._last_mask:
             self._last_mask = b
             self.log(f"[core] 연결 {len(b)//4}대")
         self._emit(CMD_LINKS, b)
+        m = self._models_blob()
+        if m:
+            self._emit(CMD_MODELS, m)     # 옛 드라이버는 모르는 메시지를 무시한다
         self._emit(CMD_PAIRS, b"")        # NAS 는 수동 짝 저장 없음 → 빈 목록(드라이버 암묵 연동)
 
     # ---- relay 가 부른다 ----
@@ -208,6 +228,9 @@ class HubCore:
         if kind and ln.kind != kind:
             ln.kind, ln.base = kind, seg[0]
             ln.mac3 = _mac3(seg[0])
+            mm = _MODEL.search(seg[0] + "/")
+            if mm and len(ln.mac3) == 3:
+                self.models[(kind, bytes(ln.mac3))] = int(mm.group(1), 16)
             self.log(f"[core] 링크 = f0{kind} {ln.mac3.hex()} ({ln.base})")
             self._send_links()
         return kind

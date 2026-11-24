@@ -384,7 +384,7 @@ python3 tools/hub_doctor.py --st               # SmartThings CLI 로 ST 기기 �
 |---|---|
 | `/api/stats` | 실제 Zigbee 가입 여부(`zb_joined_now`), 초기 상태 여부, 메모리, LED 코드, 저장 오류, 이벤트 횟수 |
 | `/api/events?since=N` | 최근 이벤트(접속·끊김·TLS·가입 실패 등, 부팅 후 ms 기준) |
-| `/api/v1/state` | 보일러·방 상태(해독값 + 원본), 온습도, 가스. `cmd` = 명령 확인 누계(`resent` 답이 없어 다시 보낸 횟수, `failed` 3번 보내도 반영 안 된 명령)와 온수 예열 자동 끄기(`preheat_off_min`, 0 = 무제한) |
+| `/api/v1/state` | 보일러·방 상태(해독값 + 원본, `model` = 기기 토픽의 모델코드 두 자리 — 온도 표를 가른다), 온습도, 가스. `cmd` = 명령 확인 누계(`resent` 답이 없어 다시 보낸 횟수, `failed` 3번 보내도 반영 안 된 명령)와 온수 예열 자동 끄기(`preheat_off_min`, 0 = 무제한) |
 
 ### 6.4 자주 겪은 문제
 

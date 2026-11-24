@@ -22,8 +22,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
 
 class HotWater(BoilerEntity, WaterHeaterEntity):
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_min_temp = p.HOT_WATER_TEMPS[0]
-    _attr_max_temp = p.HOT_WATER_TEMPS[-1]
     _attr_operation_list = [STATE_OFF, STATE_GAS]
     _attr_supported_features = (
         WaterHeaterEntityFeature.TARGET_TEMPERATURE
@@ -33,6 +31,23 @@ class HotWater(BoilerEntity, WaterHeaterEntity):
 
     def __init__(self, hass: HomeAssistant, hub, entry_id: str, mac: str) -> None:
         super().__init__(hass, hub, entry_id, mac, "hot_water")
+
+    # the boiler model picks the table (35-60 by 1, 30-60 / 35-60 with half degrees, or steps 1-3 / 1-7)
+    @property
+    def min_temp(self) -> float:
+        return self.hub.boiler_tables(self.mac).hot_water[0]
+
+    @property
+    def max_temp(self) -> float:
+        return self.hub.boiler_tables(self.mac).hot_water[-1]
+
+    @property
+    def target_temperature_step(self) -> float:
+        return self.hub.boiler_tables(self.mac).hot_water_step
+
+    @property
+    def precision(self) -> float:
+        return self.hub.boiler_tables(self.mac).hot_water_step
 
     @property
     def current_operation(self) -> str | None:

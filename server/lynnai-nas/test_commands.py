@@ -54,6 +54,13 @@ def main():
     tmp = tempfile.mkdtemp(prefix="lynnai-nas-cmd-")
     hub_rinnai.PEND_WAIT_S = 0.5                     # 시험은 빨리
 
+    print("[0] 모델코드: 토픽의 두 자리를 기억해 0x0d 로 알리고 상태 API 에 싣는다")
+    core, ln, sent, emitted = setup(tmp)
+    check(core.model_of(6, "a1b2c3") == "23", "토픽 …/f06/23/… → 모델코드 23")
+    models = [d for c, d in emitted if c == hub_rinnai.CMD_MODELS]
+    check(bool(models) and models[-1] == bytes([6]) + bytes.fromhex("a1b2c3") + b"\x23", "0x0d [6][a1b2c3][23] 를 보냄")
+    check(core.model_of(9, "a1b2c3") is None, "모르는 기기는 None")
+
     print("[1] 반영되면 한 번만")
     core, ln, sent, _ = setup(tmp)
     core.command("f06@a1b2c3 b6=1")
