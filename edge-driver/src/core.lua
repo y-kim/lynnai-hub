@@ -240,8 +240,9 @@ local function decode_rooms(blob)
   local out = {}
   for id, z in pairs(ZONES) do
     local st, cur, set = blob:byte(z.stat + 1), blob:byte(z.cur + 1), blob:byte(z.set + 1)
-    if st and cur and set and (st ~= 0 or cur ~= 0) then    -- stat·현재온도 다 0 = 그 슬롯에 방 없음(안 리포트)
-      -- stat 비트: 0x02 켜짐, 0x40 난방 중, 0x10 외출, 0x08 반복예약. stat 다음 바이트 = 저장된 예약 값(97)
+    if st and cur and set and (st & 0x01) ~= 0 then         -- stat 비트0(0x01) = 지금 이 자리에 조절기가 응답함(린나이 서버/앱 기준).
+                                                            -- 방 번호를 바꾸면 뺀 자리에 찌꺼기(0x42 처럼 켜짐·난방만 남거나 현재온도만 남음)가 남는데 비트0 이 꺼져 방 아님
+      -- stat 비트: 0x01 응답함, 0x02 켜짐, 0x40 난방 중, 0x10 외출, 0x08 반복예약, 0x80 중앙(Wi-Fi) 조절기. stat 다음 바이트 = 저장된 예약 값(97)
       -- (실기기: 예약 켬 → 0x8b·다음 01 유지, 96=0 → 0x83·다음 01 그대로, 방 끔 → 0x81·다음 00)
       local resv = blob:byte(z.stat + 2) or 0
       -- 0x04 = 시간 모드(한 시간에 몇 분씩 난방, 조절기에서 분을 정함) — 2026-11-23 앱이 방1 에 f09 a0=1,b4=1 을 보내자 0x43 → 0x47
@@ -632,7 +633,7 @@ local function refresh_zone(parent, mac, id)
   local s = hub_state(parent)
   if not s.online["9:" .. mac] then return go_offline(child, true) end
   local z = s.thermos[mac] and s.thermos[mac][id]
-  if not z then return end
+  if not z then return go_offline(child, true) end   -- 설치 비트가 꺼짐(방을 뺌) → 장치 해제(오프라인). 삭제는 on_state 에서 10분 뒤
   mark_online(child)
   local _, m = the_boiler(parent, mac)   -- 짝 보일러(지정 or 암묵)
   local heating = z.on and (not m or (m.power and m.heat))
@@ -804,21 +805,28 @@ local function on_state(parent, b)
     s.vboilers[mac] = decode_vboiler(blob, s.thermos[mac])
     update_outing(parent)                                             -- 방 상태가 바뀌었으니 외출 집계부터
     s.absent = s.absent or {}
+    s.gone_at = s.gone_at or {}                                       -- 방이 미설치로 바뀐 시각(os.time) — 10분 뒤 삭제
     for _, id in ipairs(ZONE_ORDER) do
       local zk = zkey(mac, id)
       local c = parent:get_child_by_parent_assigned_key(zk)
-      if not shown(parent, KIND_F09, mac, ZONES[id].n) then           -- 숨긴 방: 바로 정리
-        s.absent[zk] = nil
+      if not shown(parent, KIND_F09, mac, ZONES[id].n) then           -- 숨긴 방(노출 설정): 바로 정리
+        s.absent[zk], s.gone_at[zk] = nil, nil
         if c then delete_child(c) end
-      elseif s.thermos[mac][id] then                                  -- 기기가 리포트한 방만 생성
-        s.absent[zk] = nil
+      elseif s.thermos[mac][id] then                                  -- 설치된 방(stat 0x01)만 생성·유지
+        s.absent[zk], s.gone_at[zk] = nil, nil
         s.had = s.had or {}
         s.had[zk] = true
         create_zone(parent, mac, id)
-      else                                                            -- 안 보이는 방: 3번 연속일 때만 정리(기기 ID 유지)
-        s.absent[zk] = (s.absent[zk] or 0) + 1
+      else                                                            -- 미설치(설치 비트 꺼짐) 또는 빈 슬롯
+        s.absent[zk] = (s.absent[zk] or 0) + 1                        -- auto_boiler 가 '방금 안 보임=모름'으로 1~2회 판단 보류하는 데만 씀
         if s.absent[zk] >= 3 and s.had then s.had[zk] = nil end
-        if c and s.absent[zk] >= 3 then delete_child(c) end
+        if c then                                                     -- 전에 있던 방이 미설치로 바뀜: refresh_zone 이 오프라인(장치 해제), 10분 뒤 삭제
+          s.gone_at[zk] = s.gone_at[zk] or os.time()
+          if os.time() - s.gone_at[zk] >= 600 then
+            s.gone_at[zk] = nil
+            delete_child(c)
+          end
+        end
       end
       refresh_zone(parent, mac, id)
     end

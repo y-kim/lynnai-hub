@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
@@ -113,6 +115,21 @@ class ZoneEntity(LynnaiEntity):
     @property
     def available(self) -> bool:
         return self.zone is not None and self.hub.device_online(p.KIND_THERMOSTAT, self.mac)
+
+    @callback
+    def _on_hub_update(self) -> None:
+        # The room reported uninstalled: it goes unavailable at once (zone is None above), and after 10 minutes the
+        # entity is removed. If it comes back the hub clears the note and this is a normal update again.
+        gone = self.hub.zone_gone.get((self.mac, self.zone_id))
+        if gone is not None and time.monotonic() - gone >= 600:
+            forget_entity(self.unique_id)              # ...and let setup_dynamic add it again if the room returns
+            registry = er.async_get(self.hass)
+            if self.registry_entry and registry.async_get(self.entity_id):
+                registry.async_remove(self.entity_id)
+            else:
+                self.hass.async_create_task(self.async_remove(force_remove=True))
+            return
+        super()._on_hub_update()
 
 
 class HubEntity(LynnaiEntity):

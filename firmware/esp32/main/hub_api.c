@@ -59,8 +59,10 @@ static const struct {
     { "z3", "거실", 42, 45, 46 },
 };
 #define NZONES 7
-/* 온도 조절기가 리포트하는 방만(상태·현재 온도 둘 다 0 = 그 슬롯에 방 없음, 드라이버와 같은 기준) */
-static bool zone_present(const uint8_t *b, int n, int z) { return ZONES[z].set < n && (b[ZONES[z].stat] || b[ZONES[z].cur]); }
+/* 지금 응답하는 방만(stat 비트0 0x01 = 이 자리에 조절기가 지금 답함 — 린나이 서버/앱과 같은 기준, 드라이버와 같음).
+ * 방 번호를 바꾸면 뺀 자리에 찌꺼기(0x42 처럼 켜짐·난방 비트만 남거나 현재온도만 남음)가 남는데, 비트0 이 꺼져 있어
+ * 방으로 세지 않는다 */
+static bool zone_present(const uint8_t *b, int n, int z) { return ZONES[z].set < n && (b[ZONES[z].stat] & 0x01); }
 #define ZONE_JSON "{\"id\":\"%s\",\"name\":\"%s\",\"on\":%s,\"heating\":%s,\"outing\":%s,\"reserve\":%s,\"interval\":%d,\"current\":%d,\"target\":%d}"
 #define ZONE_ARGS(b, z) ZONES[z].id, ZONES[z].name, (b)[ZONES[z].stat] & 0x02 ? "true" : "false", \
     (b)[ZONES[z].stat] & 0x40 ? "true" : "false", (b)[ZONES[z].stat] & 0x10 ? "true" : "false", \

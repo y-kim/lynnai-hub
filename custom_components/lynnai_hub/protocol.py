@@ -266,8 +266,9 @@ def decode_zones(blob: bytes) -> dict[str, ZoneState]:
         if len(blob) < slot.stat + 5:
             continue
         st, cur, target = blob[slot.stat], blob[slot.stat + 3], blob[slot.stat + 4]
-        if st == 0 and cur == 0:        # empty slot: no room there
-            continue
+        if not st & 0x01:               # bit0 = the controller answers for this slot now (the Rinnai server/app filters by
+            continue                    # the same bit). A slot left after a room is renumbered keeps its on/heat or
+                                        # current-temp bytes but not bit0, so it is no longer a room.
         out[zone_id] = ZoneState(
             on=bool(st & 0x02),
             heating=bool(st & 0x40),

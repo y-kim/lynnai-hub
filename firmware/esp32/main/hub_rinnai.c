@@ -93,10 +93,9 @@ typedef struct {
     uint8_t out_mask;   /* f09: 마지막 존별 외출 비트 — 바뀐 존만 이벤트 */
 } rk_dev_t;
 
-/* f06 연소·f09 외출 추출용. 각방 stat/현재온도 바이트 위치(hub_api.c ZONES 와 같은 순서 z1,z2,z4,z5,z6,z7,z3) */
+/* f06 연소·f09 외출 추출용. 각방 stat 바이트 위치(hub_api.c ZONES 와 같은 순서 z1,z2,z4,z5,z6,z7,z3) */
 #define RK_NZ 7
 static const uint8_t RK_ZSTAT[RK_NZ] = { 0, 7, 14, 21, 28, 35, 42 };
-static const uint8_t RK_ZCUR[RK_NZ]  = { 3, 10, 17, 24, 31, 38, 45 };
 static int bnib(const uint8_t *b, int i) { return i % 2 ? b[i / 2] & 0xf : b[i / 2] >> 4; }
 static rk_dev_t s_dev[MAX_DEV];
 
@@ -632,7 +631,7 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
             } else if (kind == HUB_KIND_F09) {
                 for (int z = 0; z < RK_NZ; z++) {
                     int st = RK_ZSTAT[z];
-                    bool present = st < bn && (blob[st] || (RK_ZCUR[z] < bn && blob[RK_ZCUR[z]]));
+                    bool present = st < bn && (blob[st] & 0x01);   /* 응답 비트(0x01)만 방으로 — 뺀 자리 찌꺼기 슬롯 제외 */
                     uint8_t bit = (present && (blob[st] & 0x10)) ? (uint8_t)(1 << z) : 0;
                     if (bit != (d->out_mask & (1 << z))) {
                         d->out_mask = (uint8_t)((d->out_mask & ~(1 << z)) | bit);

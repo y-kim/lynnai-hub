@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+import time
 
 from . import protocol as p
 from .client import HubClient
@@ -24,6 +25,7 @@ class LynnaiHub:
         self.problem: str | None = None
         self.boilers: dict[str, p.BoilerState] = {}
         self.zones: dict[str, dict[str, p.ZoneState]] = {}      # thermostat mac -> zone id -> state
+        self.zone_gone: dict[tuple[str, str], float] = {}       # (mac, zone) -> when it went uninstalled (monotonic); entity removed after 10 min
         self.pairs: dict[str, str] = {}
         self.links: set[tuple[int, str]] | None = None          # None until the hub told us
         self.models: dict[tuple[int, str], str] = {}            # (kind, mac) -> model code ("23"), from hub v0.8
@@ -68,8 +70,16 @@ class LynnaiHub:
                 zones = p.decode_zones(blob)
                 known = self.zones.get(mac, {})
                 new = any(z not in known for z in zones)
-                # keep a room that is briefly missing from a report (the SmartThings driver waits three reports)
-                self.zones[mac] = {**{z: s for z, s in known.items() if z not in zones}, **zones}
+                # A room keeps its installed bit (0x01) until it is really removed, so a dropped room means it was
+                # removed, not a missed report: drop it at once (its entity goes unavailable) and note the time so the
+                # entity is removed after 10 minutes. A room that comes back clears the note.
+                now = time.monotonic()
+                for z in known:
+                    if z not in zones:
+                        self.zone_gone.setdefault((mac, z), now)
+                for z in zones:
+                    self.zone_gone.pop((mac, z), None)
+                self.zones[mac] = zones
             else:
                 return
         elif cmd == p.CMD_LINKS:
