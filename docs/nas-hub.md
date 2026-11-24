@@ -3,7 +3,7 @@
 ESP32 보드 없이 NAS(도커) 하나로 린나이 보일러 조절기·온도 조절기를 SmartThings 에 붙이는 방법입니다.
 동작은 [ESP32 허브](esp32-hub.md)와 같고, 전용 Wi-Fi AP·Zigbee·꽂는 센서만 없습니다.
 
-![NAS 허브 구성도: 집 안 기기는 공유기가 알려 준 DNS 서버(NAS 를 가리킴)에 주소를 묻는다. NAS 에 DNS 서버와 LYNNAI 허브가 Docker 로 돈다. 린나이 기기(보일러 제어기·각방 온도 조절기)의 rkiot.net 은 NAS 주소로 답해 LYNNAI 허브로, 스마트폰의 rkiot.net·google.com 은 진짜 주소 그대로 인터넷으로 간다. 허브 → LAN → SmartThings, 프록시 모드에서는 허브 → 린나이 클라우드](overview-nas.svg)
+![NAS 허브 구성도: 집 안 기기는 공유기가 알려 준 DNS 서버(NAS 를 가리킴)에 주소를 묻는다. NAS 에 DNS 서버와 LYNNAI 허브가 Docker 로 돈다. 린나이 기기(보일러 제어기·각방 온도 조절기)의 rkiot.net 은 NAS 주소로 답해 LYNNAI 허브로, 스마트폰의 rkiot.net·google.com 은 진짜 주소 그대로 인터넷으로 간다. 허브 → LAN → SmartThings, 프록시 모드에서는 허브 → 린나이 클라우드](../images/overview-nas.svg)
 
 > ## ⚠️ 먼저 읽기: 집 네트워크의 DNS 서버를 바꿉니다
 >

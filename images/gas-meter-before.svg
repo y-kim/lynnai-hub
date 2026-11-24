@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="800" height="800" viewBox="0 0 640 640" role="img" aria-labelledby="title description">
+  <title id="title">리드 스위치 장착 전 가스계량기</title>
+  <desc id="description">짙은 회색 바탕에 아이보리색 가스계량기를 정면에서 본 모습. 위쪽에는 직선 배관과 굽은 배관이 있고, 기계식 숫자창의 빨간 소수점 자리 아래에는 빈 리드 스위치 장착 홈이 있다.</desc>
+  <defs>
+    <g id="union">
+      <path d="M-19 0h38v12l-5 4h-28l-5-4z" fill="#aba99d"/>
+      <path d="M-19 0h10v12l4 4h-9l-5-4z" fill="#d9d6c9"/>
+      <path d="M8 0h11v12l-5 4H4l4-4z" fill="#bcb9ac"/>
+      <rect x="-24" y="12" width="48" height="12" rx="1" fill="#ccc9bc"/>
+      <path d="M-24 12h48v2h-48z" fill="#e6e2d6"/>
+      <path d="M-15 24h30v12h-30z" fill="#b5b2a4"/>
+      <path d="M-15 24h8v12h-8z" fill="#d1cfc1"/>
+    </g>
+    <g id="cover-screw">
+      <circle r="9" fill="#e1decf"/>
+      <circle cy="0.7" r="6.2" fill="#b9b6a8"/>
+      <circle cy="-0.4" r="5.6" fill="#ceccbe"/>
+      <path d="m-2.4 1.5 4.8-3" fill="none" stroke="#a8a698" stroke-width="1.25" stroke-linecap="round"/>
+    </g>
+    <pattern id="bars" patternUnits="userSpaceOnUse" x="245" width="9" height="12">
+      <path d="M0 0h2v12H0zm4 0h3v12H4z" fill="#444541"/>
+    </pattern>
+  </defs>
+
+  <rect id="background" width="640" height="640" fill="#303738"/>
+
+  <g id="pipes">
+    <path d="M251 54h31v149h-31z" fill="#e5e2d3"/>
+    <path d="M267 54h11v149h-11z" fill="#d3d0c2"/>
+    <path d="M250 54h3v149h-3z" fill="#f0edde"/>
+    <rect x="242" y="98" width="49" height="12" rx="1" fill="#cecbbf"/>
+    <path d="M242 98h49v2h-49z" fill="#e0ddd1"/>
+    <path d="M362 202v-34a69 69 0 0 1 69-69h45v32h-45a37 37 0 0 0-37 37v34z" fill="#e5e2d3"/>
+    <path d="M377 202v-34a54 54 0 0 1 54-54h45v10h-45a44 44 0 0 0-44 44v34z" fill="#d4d1c3"/>
+    <path d="M474 99h3v32h-3z" fill="#eeeada"/>
+    <g id="pipe-fittings">
+      <use xlink:href="#union" x="266.5" y="173"/>
+      <use xlink:href="#union" x="378" y="173"/>
+    </g>
+  </g>
+
+  <g id="meter-head">
+    <rect x="201" y="206" width="238" height="117" rx="26" fill="#dcd9c9"/>
+    <rect x="209" y="214" width="222" height="104" rx="20" fill="#f4f1e4"/>
+    <circle cx="317" cy="233" r="5" fill="#d85a42"/>
+    <circle cx="315.8" cy="231.8" r="2" fill="#ec8266"/>
+    <g id="inspection-seal" transform="translate(410 237)">
+      <circle r="10" fill="#d1cec1"/>
+      <circle r="7.2" fill="none" stroke="#eeeadc" stroke-width="1.7" stroke-dasharray="1.6 3"/>
+      <circle r="4.2" fill="#e5e2d4"/>
+    </g>
+    <rect x="245" y="245" width="129" height="8" fill="url(#bars)"/>
+    <text x="382" y="252" fill="#63665e" font-family="sans-serif" font-size="8">m³</text>
+  </g>
+
+  <g id="counter">
+    <rect x="241" y="255" width="158" height="30" rx="3" fill="#d2cfc1"/>
+    <rect x="245" y="258" width="150" height="24" rx="2" fill="#434744"/>
+    <path d="M246 259h104v5H246z" fill="#555953"/>
+    <path d="M246 278h104v3H246z" fill="#323733"/>
+    <rect x="351" y="258" width="44" height="24" rx="1.5" fill="#bc4c39"/>
+    <path d="M352 259h42v5h-42z" fill="#d16853"/>
+    <path d="M267 259v22m21-22v22m21-22v22m21-22v22m21-22v22m22-22v22" fill="none" stroke="#242825" opacity=".65"/>
+    <g id="digits" transform="translate(0 261.5)" fill="none" stroke="#faf6e9"
+       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Mechanical numerals as paths so their appearance is independent of fonts. -->
+      <rect x="252" y="2" width="7.5" height="13" rx="3.5"/>
+      <path d="m273 5 4-3v13m-3 0h6"/>
+      <path d="M293 5q.9-3 4-3c4 0 5 4 2 7l-6 6h8"/>
+      <path d="M314 3q2-1.4 4-1.1c4.8.4 4.8 5.6.4 6.3 5.2.1 5.1 6.9-.1 7.1q-2.9.1-4.8-1.7"/>
+      <path d="m342 15 0-13-7.7 9.4h10"/>
+      <path d="M366 2h-7l-.7 6q2.6-1.8 5.3-.8c4.7 2 2.8 8.2-1.6 8q-2.4.1-4.1-1.6"/>
+      <path d="M387.5 2.3c-5.3-1.2-8.4 3.9-8.2 9 .2 5.3 7.9 5.1 8.2.2.4-4.8-5.1-5.3-7.8-2.7"/>
+    </g>
+  </g>
+
+  <g id="reed-switch-slot">
+    <rect x="351" y="287" width="44" height="12" rx="2.5" fill="#d1cec0"/>
+    <rect x="354" y="289" width="38" height="7" rx="1.3" fill="#666961"/>
+    <path d="M355 290h36v2h-36z" fill="#4e524d"/>
+    <path d="M354 297h38" stroke="#faf7e9" stroke-width="1.5"/>
+  </g>
+
+  <g id="meter-body">
+    <path d="M212 302h216q27 0 27 27v100q0 6-1 12l-23 96q-4 23-27 23H236q-23 0-27-23l-23-96q-1-6-1-12V329q0-27 27-27z" fill="#e0ddce"/>
+    <path d="M213 310h214q20 0 20 20v98q0 5-1 11l-23 95q-3 17-20 17H237q-17 0-20-17l-23-95q-1-6-1-11v-98q0-20 20-20z" fill="#f5f2e6"/>
+    <path d="M238 330h164a23 23 0 0 0 23 23v63a23 23 0 0 0-19 31l-13 58a23 23 0 0 0-26 24h-94a23 23 0 0 0-26-24l-13-58a23 23 0 0 0-19-31v-63a23 23 0 0 0 23-23z" fill="#e4e1d3"/>
+    <g id="diaphragm-cover">
+      <circle cx="320" cy="427" r="66" fill="#cfcdbf"/>
+      <circle cx="320" cy="427" r="63.5" fill="#e4e1d3"/>
+      <circle cx="320" cy="427" r="57" fill="#f4f1e4"/>
+    </g>
+    <g id="fasteners">
+      <use xlink:href="#cover-screw" x="215" y="331"/>
+      <use xlink:href="#cover-screw" x="425" y="331"/>
+      <use xlink:href="#cover-screw" x="215" y="437"/>
+      <use xlink:href="#cover-screw" x="425" y="437"/>
+      <use xlink:href="#cover-screw" x="249" y="529"/>
+      <use xlink:href="#cover-screw" x="391" y="529"/>
+    </g>
+  </g>
+</svg>

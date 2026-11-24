@@ -1079,7 +1079,7 @@ static esp_err_t dbgkey_post(httpd_req_t *req)
     return admin_page(req, note, ok);
 }
 
-/* ---------- 아이콘: 탭 아이콘과 제목 옆 그림(원본은 docs/icon.svg 하나, 빌드 때 그대로 담는다) ---------- */
+/* ---------- 아이콘: 탭 아이콘과 제목 옆 그림(원본은 images/icon.svg 하나, 빌드 때 그대로 담는다) ---------- */
 extern const char icon_svg[] asm("_binary_icon_svg_start");
 
 static esp_err_t icon_get(httpd_req_t *req)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SmartThings 상세 화면 카드 그림(docs/screen-*.svg)을 만든다. README 의 '스크린샷' 절에 쓴다.
+"""SmartThings 상세 화면 카드 그림(images/screen-*.svg)을 만든다. README 의 '스크린샷' 절에 쓴다.
 
 실제 캡처가 아니라 앱 화면을 따라 그린 그림이다. 드라이버의 프로필·화면 구성(edge-driver/profiles, presentations)을
 바꾸면 아래 SCREENS 를 같이 고치고 다시 돌린다:  python3 tools/make_card_svgs.py
@@ -320,9 +320,9 @@ def devices():
 
 
 if __name__ == "__main__":
-    docs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs")
+    docs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
     for name, fn in (("screen-boiler.svg", boiler), ("screen-thermostat.svg", thermostat), ("screen-gas.svg", gas),
                      ("screen-devices.svg", devices)):
         with open(os.path.join(docs, name), "w", encoding="utf-8") as f:
             f.write(fn())
-        print("wrote docs/" + name)
+        print("wrote images/" + name)

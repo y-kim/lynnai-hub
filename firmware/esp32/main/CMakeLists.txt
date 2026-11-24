@@ -1,5 +1,5 @@
 idf_component_register(SRC_DIRS "."
-                       EMBED_TXTFILES "cloud_ca.crt" "gas_ca.pem" "room_wiring.js" "../../../docs/icon.svg"
+                       EMBED_TXTFILES "cloud_ca.crt" "gas_ca.pem" "room_wiring.js" "../../../images/icon.svg"
                        PRIV_INCLUDE_DIRS "."
                        PRIV_REQUIRES vfs nvs_flash esp_wifi esp_netif esp_event esp_http_server esp_http_client esp-tls esp_timer mbedtls lwip wolfssl led_strip esp_driver_i2c esp_driver_gpio esp_driver_uart esp_app_format efuse nvs_sec_provider bootloader_support app_update)
 

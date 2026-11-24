@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="512" height="512"
+     role="img" aria-labelledby="title">
+  <title id="title">LYNNAI Hub 아이콘</title>
+  <rect width="128" height="128" rx="27" fill="#16474a"/>
+  <g id="symbol" transform="translate(20 24) scale(.82)">
+    <path fill="#fbf7ea" d="M2 0h49q2 0 2 2v32h31V2q0-2 2-2h19q2 0 2 2v75
+      a16 16 0 0 0-23-2V50H53v10q0 2-2 2H37q-2 0-2-2V17H18v62h63
+      a16 16 0 0 0 1 18H2q-2 0-2-2V2q0-2 2-2Z"/>
+    <circle cx="95" cy="87" r="11.5" fill="#ed693e"/>
+  </g>
+</svg>

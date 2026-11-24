@@ -3,7 +3,7 @@
 ESP32-C6 보드 하나로 린나이 보일러 조절기·온도 조절기를 SmartThings 에 붙이는 허브의
 펌웨어 쓰기, 첫 설정, 연결, 초기화, 고장 분석 방법을 정리했습니다.
 
-![구성도: 보일러 제어기(WF-S6000 등)·각방 온도 조절기(RICH-WCR(N) 등) → Wi-Fi(허브 AP) → LYNNAI 허브(ESP32-C6) → 집 Wi-Fi → 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 허브 → Zigbee → SmartThings 허브 → SmartThings 앱](overview.svg)
+![구성도: 보일러 제어기(WF-S6000 등)·각방 온도 조절기(RICH-WCR(N) 등) → Wi-Fi(허브 AP) → LYNNAI 허브(ESP32-C6) → 집 Wi-Fi → 공유기 → 인터넷 → 린나이 클라우드(프록시 모드), 허브 → Zigbee → SmartThings 허브 → SmartThings 앱](../images/overview.svg)
 
 ## 목차
 

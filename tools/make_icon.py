@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LYNNAI Hub 아이콘(docs/icon.svg)을 만든다.
+"""LYNNAI Hub 아이콘(images/icon.svg)을 만든다.
 
 주황 바탕 위에 흰 선 하나가 육각형을 한 바퀴 돌고, 맨 아래 꼭짓점에서 안으로 꺾여 올라가 불꽃을 그린다.
 SVG 하나가 그려지는 크기에 따라 선 굵기를 스스로 바꾼다(안의 @media):
@@ -7,7 +7,7 @@ SVG 하나가 그려지는 크기에 따라 선 굵기를 스스로 바꾼다(�
     32~95px    선 11  · 같은 모양
     31px 이하  선 17  · 말림 없이 닫힌 불꽃(탭 아이콘, 허브 웹의 제목 옆)
 
-    python3 tools/make_icon.py            docs/icon.svg 를 다시 쓴다(허브 펌웨어가 이 파일을 그대로 담는다)
+    python3 tools/make_icon.py            images/icon.svg 를 다시 쓴다(허브 펌웨어가 이 파일을 그대로 담는다)
     python3 tools/make_icon.py <폴더>     크기를 고정한 세 벌(icon-large/medium/small.svg)도 그 폴더에 쓴다 — PNG 로 구울 때
                                           (Home Assistant 의 brand/icon.png 는 화면에 40~80px 로 나오므로 medium 으로 굽는다)
 """
@@ -55,7 +55,7 @@ def fixed(width, curl):
 
 
 if __name__ == "__main__":
-    with open(os.path.join(ROOT, "docs", "icon.svg"), "w") as f:
+    with open(os.path.join(ROOT, "images", "icon.svg"), "w") as f:
         f.write(adaptive())
     if len(sys.argv) > 1:
         for name, width, curl in (("large", 7, True), ("medium", 11, True), ("small", 17, False)):

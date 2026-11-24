@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NAS 허브 구성도(docs/overview-nas.svg, 영어판 overview-nas.en.svg)를 만든다.
+"""NAS 허브 구성도(images/overview-nas.svg, 영어판 overview-nas.en.svg)를 만든다.
 
 배치: 왼쪽 린나이 기기, 가운데 위 스마트폰 · 공유기 · 그 아래 NAS(DNS 서버 + LYNNAI 허브), 오른쪽 인터넷 · SmartThings.
 실선 = 물리 연결, 색 점선 = 트래픽(꺾이는 곳은 둥글게). 좌표를 고치면 이 파일을 다시 돌린다:
@@ -169,7 +169,7 @@ def build(t):
 
 
 if __name__ == "__main__":
-    docs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs")
+    docs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
     for lang, name in (("ko", "overview-nas.svg"), ("en", "overview-nas.en.svg")):
         with open(os.path.join(docs, name), "w", encoding="utf-8") as f:
             f.write(build(T[lang]))
