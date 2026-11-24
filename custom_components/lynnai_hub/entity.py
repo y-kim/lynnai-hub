@@ -144,7 +144,7 @@ class PluginEntity(LynnaiEntity):
     def available(self) -> bool:
         # Older firmware never sends the plugin notice; then being connected is all we know.
         known = self.hub.plugins.enabled != 0
-        return self.hub.connected and (not known or self.hub.plugins.ok(self._bit))
+        return self.hub.connected and (not known or self.hub.plugins.usable(self._bit))
 
 
 _GONE: set[str] = set()     # unique ids of entities that removed themselves (see forget_entity)

@@ -43,6 +43,9 @@
       },
       "cloud_fallback": {
         "name": "Running without the cloud"
+      },
+      "gas_no_pulse": {
+        "name": "No meter pulses"
       }
     },
     "number": {

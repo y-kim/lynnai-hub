@@ -63,6 +63,7 @@ cap("connectbook02461.gasBill", { "month", "today", "monthRange", "todayRange" }
 cap("connectbook02461.gasUsed", { "day", "hour", "period", "dayText", "hourText", "periodText" }, {})
 cap("connectbook02461.gasFlowRate", { "flow", "flowText" }, {})
 cap("connectbook02461.gasAlert", { "alert" }, {})
+cap("connectbook02461.gasMeterSignal", { "signal" }, {})
 
 package.loaded["st.capabilities"] = capabilities
 package.loaded["log"] = { info = function() end, warn = function() end, error = function() end }
@@ -796,20 +797,22 @@ core.on_message(hub, CMD.PLUGINS, string.char(3))                  -- 옛 펌웨
 check(room._online == true and gas._online == true, "옛 펌웨어 알림(1바이트) → 그대로 온라인")
 core.on_message(hub, CMD.PLUGINS, string.char(3, 1))               -- 온습도계 응답 없음
 check(room._online == false and gas._online == true, "온습도계 고장 → 온습도계만 오프라인")
-core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 가스도: 난방 중인데 펄스 없음
-check(gas._online == false, "가스 고장 → 가스 계량기 오프라인")
-check(lastv("gas", "main", "status") == "펄스 없음 — 센서 확인", "가스 기기에 이유 표시")
+check(lastv("gas", "main", "signal") == "normal", "계량기 신호 = 정상")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 가스도: 보일러를 쓰는데 펄스 없음
+local function gas_warned() return (lastv("gas", "main", "status") or ""):find("^⚠ 계량기 펄스 없음 · 1D ") ~= nil end
+check(gas._online == true, "가스 펄스 없음 → 경고일 뿐 온라인 그대로")
+check(lastv("gas", "main", "signal") == "noPulse" and gas_warned(), "계량기 신호 = 펄스 없음(루틴 조건), 요약 글자 앞에 ⚠")
 core.on_message(hub, CMD.PLUGINS, string.char(3, 3, 2))            -- 가스는 사용자가 멈춘 것(셋째 바이트)
 check(driver._children["gas"]._online == false and lastv("gas", "main", "status") == "멈춤", "멈춘 센서 → 오프라인, 이유는 '멈춤'")
-core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 다시 고장 상태(멈춤 아님)
-check(lastv("gas", "main", "status") == "펄스 없음 — 센서 확인", "멈춤이 풀리고 고장만 남으면 이유가 되돌아옴")
+core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 다시 펄스 없음(멈춤 아님)
+check(gas._online == true and gas_warned(), "멈춤이 풀리면 온라인, 경고는 그대로")
 core.on_message(hub, CMD.GAS, string.pack("<I4I4I4I4I4", 305, 0xFFFFFFFF, 0, 0, 0))
-check(gas._online == false, "고장 중 1분마다 오는 가스 값으로 온라인이 되지 않음")
+check(gas_warned() and lastv("gas", "main", "signal") == "noPulse", "경고 중 1분마다 오는 가스 값으로 경고가 지워지지 않음")
 core.info_changed(nil, room)
 check(room._online == false, "기기 정보가 바뀌어 다시 그려도 고장이면 오프라인")
 core.on_message(hub, CMD.PLUGINS, string.char(3, 2))               -- 온습도계가 다시 응답(허브는 '정상' 을 값보다 먼저 보낸다)
 core.on_message(hub, CMD.ROOM, string.pack("<i2i2", 2190, 3900))
-check(room._online == true and gas._online == false, "온습도계 복구 → 온라인, 가스는 그대로")
+check(room._online == true and lastv("gas", "main", "signal") == "noPulse", "온습도계 복구 → 온라인, 가스 경고는 그대로")
 defer_timers = true
 core.on_message(hub, CMD.PLUGINS, string.char(3, 3))               -- 3초 안에 풀리면 오프라인으로 남지 않는다
 core.on_message(hub, CMD.PLUGINS, string.char(3, 2))
@@ -817,7 +820,7 @@ run_timers()
 defer_timers = false
 check(room._online == true, "오프라인 예약 뒤 3초 안에 풀림 → 온라인 유지")
 core.on_message(hub, CMD.PLUGINS, string.char(3, 0))               -- 펄스가 다시 옴
-check(gas._online == true, "가스 복구 → 온라인")
+check(gas._online == true and lastv("gas", "main", "signal") == "normal" and not gas_warned(), "펄스가 다시 옴 → 신호 정상, ⚠ 없어짐")
 core.on_message(hub, CMD.PLUGINS, string.char(2, 1))               -- 온습도계 플러그인을 뺌: 기기 삭제(고장 비트는 의미 없음)
 check(deleted["room"] and driver._children["gas"] ~= nil, "플러그인을 빼면 그 기기만 삭제")
 

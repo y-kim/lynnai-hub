@@ -37,6 +37,13 @@
     },
     {
       "component": "main",
+      "capability": "connectbook02461.gasMeterSignal",
+      "version": 1,
+      "values": [],
+      "patch": []
+    },
+    {
+      "component": "main",
       "capability": "connectbook02461.gasFlowRate",
       "version": 1,
       "values": [],
@@ -78,6 +85,14 @@
       {
         "component": "main",
         "capability": "gasMeter",
+        "version": 1,
+        "values": [],
+        "patch": [],
+        "exclusion": []
+      },
+      {
+        "component": "main",
+        "capability": "connectbook02461.gasMeterSignal",
         "version": 1,
         "values": [],
         "patch": [],

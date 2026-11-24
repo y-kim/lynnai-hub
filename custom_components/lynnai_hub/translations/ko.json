@@ -43,6 +43,9 @@
       },
       "cloud_fallback": {
         "name": "클라우드 없이 동작 중"
+      },
+      "gas_no_pulse": {
+        "name": "계량기 펄스 없음"
       }
     },
     "number": {

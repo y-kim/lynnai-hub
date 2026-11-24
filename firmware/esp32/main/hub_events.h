@@ -24,6 +24,7 @@ typedef enum {
     EV_STORE_BAD,       /* 저장 데이터 오류(hub_store). a=이번 부팅 누적 건수 — 자세한 내용은 /api/stats store_errors */
     EV_BOIL_BURN,       /* 보일러 연소 바뀜: a=비트(1 난방연소 2 온수연소), b=그 시점 가스 누적펄스. 가스↔연소 상관용 */
     EV_ROOM_OUT,        /* 각방 외출 바뀜: mac=f09 끝3, a=존 번호(0~6), b=1 외출 켬 / 0 끔 */
+    EV_GAS_NO_PULSE,    /* 가스 계량기 '펄스 없음' 경고: a=1 시작(b=그동안 연소·난방한 초) / 0 풀림(펄스가 다시 옴) */
     EV__COUNT
 } hub_ev_t;
 

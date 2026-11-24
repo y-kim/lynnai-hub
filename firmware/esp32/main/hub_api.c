@@ -231,6 +231,21 @@ bool hub_api_heating(void)
     return heating && (!boiler || boiler_on);
 }
 
+int hub_api_burning(void)
+{
+    hub_dev_t dev[6];
+    int nd = hub_rinnai_snapshot(dev, 6), r = -1;
+    for (int i = 0; i < nd; i++) {
+        if (dev[i].linked && dev[i].kind == HUB_KIND_F06) {
+            boiler_t b = decode_boiler(dev[i].blob, dev[i].n);
+            if (b.ok) {
+                r = (r > 0 ? r : 0) | (b.heat_burn ? 1 : 0) | (b.hw_burn ? 2 : 0);
+            }
+        }
+    }
+    return r;
+}
+
 static void hex(char *out, const uint8_t *b, int n)
 {
     for (int i = 0; i < n; i++) {
@@ -416,8 +431,15 @@ static esp_err_t state_get(httpd_req_t *req)
         } else {
             CHUNK("\"meter_m3\":null,");
         }
-        CHUNK("\"hour_l\":%lu,\"day_l\":%lu,\"flow_lph\":%lu,\"closed_ms\":%lu,\"closed_now\":%s}", (unsigned long)g.hour_l,
+        CHUNK("\"hour_l\":%lu,\"day_l\":%lu,\"flow_lph\":%lu,\"closed_ms\":%lu,\"closed_now\":%s,", (unsigned long)g.hour_l,
               (unsigned long)g.day_l, (unsigned long)g.flow_lph, (unsigned long)g.closed_ms, g.closed_now ? "true" : "false");
+        /* no_pulse: 보일러를 쓰는데 펄스가 없음(경고) · burn_s: 마지막 펄스 뒤로 보일러가 연소한 시간 */
+        char bp[200];
+        hub_sensors_gas_burn_json(bp, sizeof(bp));
+        /* burn_per_pulse: 펄스마다 센 '직전 펄스 뒤 연소한 시간' 분포(난방만 / 온수 낌) — 경고 한도를 정하려고 */
+        CHUNK("\"no_pulse\":%s,\"burn_s\":%lu,\"burn_per_pulse\":", g.no_pulse ? "true" : "false", (unsigned long)g.burn_s);
+        httpd_resp_sendstr_chunk(req, bp);
+        httpd_resp_sendstr_chunk(req, "}");
     } else {
         CHUNK("\"gas\":null");
     }
@@ -547,6 +569,11 @@ static esp_err_t metrics_get(httpd_req_t *req)
     }
     if (hub_plugin_enabled("gas")) {
         CHUNK("lynnai_sensor_fault{sensor=\"gas\"} %d\n", (hub_sensors_faults() & PLUG_GAS) != 0);
+        gas_view_t gv;
+        uint32_t st;
+        if (hub_sensors_gas(&gv, &st)) {
+            CHUNK("# TYPE lynnai_gas_burn_no_pulse_seconds gauge\nlynnai_gas_burn_no_pulse_seconds %lu\n", (unsigned long)gv.burn_s);
+        }
     }
     float tc, rh;
     int age;

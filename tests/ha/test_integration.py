@@ -159,8 +159,14 @@ async def test_unavailable_when_the_device_or_hub_goes_away(hass: HomeAssistant,
     await _settle(hass, lambda: hass.states.get("climate.room_1").state == "unavailable")
     assert hass.states.get(f"switch.boiler_{BOILER}_power").state == "on"
 
+    no_pulse = "binary_sensor.gas_meter_no_meter_pulses"
+    assert hass.states.get(no_pulse).state == "off"
+    await fake_hub.push(0x05, bytes([3, 2, 0]))                            # boiler burns but the meter gives no pulses
+    await _settle(hass, lambda: hass.states.get(no_pulse).state == "on")
+    assert hass.states.get("sensor.gas_meter_flow").state == "0.86"       # only a warning: the values stay
     await fake_hub.push(0x05, bytes([3, 2, 2]))                            # gas meter paused on the hub
     await _settle(hass, lambda: hass.states.get("sensor.gas_meter_flow").state == "unavailable")
+    assert hass.states.get(no_pulse).state == "unavailable"
     assert hass.states.get("sensor.room_sensor_temperature").state == "25.3"
 
     for w in fake_hub.writers:                                             # the hub itself goes away

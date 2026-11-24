@@ -73,6 +73,7 @@ local cost_cap = capabilities["connectbook02461.gasBill"]
 local usage_cap = capabilities["connectbook02461.gasUsed"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
 local flow_cap = capabilities["connectbook02461.gasFlowRate"]     -- 지금 유량
 local alert_cap = capabilities["connectbook02461.gasAlert"]   -- 사용량 경고(normal/warning) — 루틴 조건용
+local signal_cap = capabilities["connectbook02461.gasMeterSignal"]   -- 계량기 신호(normal/noPulse) — 보일러를 쓰는데 펄스 없음
 
 local driver
 
@@ -894,13 +895,20 @@ end
 
 function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
-  if child and faulty(parent, FAULT_GAS) then
-    local paused = ((hub_state(parent).plug_pause or 0) & FAULT_GAS) ~= 0
-    emit(child, "main", status_cap.status(paused and "멈춤" or "펄스 없음 — 센서 확인"))
+  if not child then return end
+  local paused = ((hub_state(parent).plug_pause or 0) & FAULT_GAS) ~= 0
+  if paused then
+    emit(child, "main", status_cap.status("멈춤"))
     return go_offline(child, false, true)
   end
+  -- 보일러를 쓰는데(연소 10분) 펄스가 없음: 기기는 온라인 그대로, 신호 칸과 요약 글자로 알린다. 휴대폰 알림은 루틴으로.
+  local no_pulse = faulty(parent, FAULT_GAS)
+  emit(child, "main", signal_cap.signal(no_pulse and "noPulse" or "normal"))
   local v = hub_state(parent).gas
-  if not child or not v then return end
+  if not v then
+    if no_pulse then emit(child, "main", status_cap.status("⚠ 계량기 펄스 없음 — 센서 확인")) end
+    return
+  end
   local count, reading, hour, day, flow = table.unpack(v)
   mark_online(child)
   local step_m3 = (hub_state(parent).gas_step or 10) / 1000                   -- 1펄스 = 몇 ㎥

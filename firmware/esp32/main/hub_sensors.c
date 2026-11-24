@@ -52,15 +52,21 @@ static uint32_t s_step_l;
 #define GAS_POLL_MS  20
 #define FLOW_STOP_S  900              /* 이만큼 펄스가 없으면 유량 0 */
 /* 고장 판정. 온습도계: 읽기 실패하면 20초 뒤 다시, 3번 연속이면 오프라인(그 뒤로는 30초마다 다시 본다).
- * 가스 계량기: '난방 중' 인 시간(펄스가 오면 0부터 다시)이 한도를 넘도록 펄스가 없으면 오프라인.
- *   한도 = 1펄스 양(L) × 180초, 최소 30분 — 난방 중이면 평균 20 L/h 는 쓴다고 보고 넉넉히 잡는다(10 L 펄스 = 30분).
- *   버너가 켜졌다 꺼졌다 하는 것을 감안한 값. 온수만 쓸 때는 보일러 상태에 표시가 없어 감시하지 못한다. */
+ * 가스 계량기: 보일러를 쓰는 동안 펄스가 없으면 '펄스 없음' 경고(고장 비트). 펄스가 오면 0부터 다시 센다.
+ *   보일러 조절기 상태의 연소 표시(난방·온수)가 켜져 있던 시간을 더한다. 한도 = 1펄스 양(L) × 60초, 최소 10분.
+ *   실측(2026-11-24 새벽, 난방만): 연소 시작 → 첫 펄스 20~32초, 펄스 사이에 쌓인 연소 시간 보통 67~69초·가장 길게 85초.
+ *   온수만 쓸 때(약한 불)는 아직 못 봤다 — 펄스마다 '직전 펄스 뒤 연소 시간'을 난방/온수로 나눠 세어 두고(아래 bp_*,
+ *   플래시에 남음) 그 분포를 보면서 한도를 줄인다.
+ *   보일러 조절기가 연결돼 있지 않으면 예전처럼 각방 '난방 중' 시간으로: 한도 = 1펄스 양 × 180초, 최소 30분(버너가
+ *   켜졌다 꺼졌다 하는 것을 감안). */
 #define ROOM_FAIL_N       3
 #define ROOM_RETRY_S      20
 #define ROOM_RETRY_BAD_S  30
 #define GAS_FAULT_MIN_S   1800
 #define GAS_FAULT_S_PER_L 180
 #define GAS_WATCH_S       5
+#define GAS_BURN_MIN_S    600
+#define GAS_BURN_S_PER_L  60
 #define RING         1024             /* 최근 24시간 펄스 시각(초). 넘치면 '하루' 가 적게 나온다 */
 #define NS           "gas"
 #define UNSET        0xFFFFFFFFu
@@ -96,8 +102,24 @@ static int16_t s_room_t100, s_room_h100;      /* 마지막 온습도(서버 API 
 static int64_t s_room_at_us;
 static volatile bool s_room_fault, s_gas_fault;
 static volatile int s_room_fails;             /* 연속 읽기 실패 */
-static volatile uint32_t s_gas_heat_s;        /* 마지막 펄스 뒤로 '난방 중' 이었던 시간(초) */
+static volatile uint32_t s_gas_heat_s;        /* 마지막 펄스 뒤로 '난방 중' 이었던 시간(초) — 보일러 조절기가 없을 때만 */
+static volatile uint32_t s_gas_burn_s;        /* 마지막 펄스 뒤로 보일러가 연소한 시간(초) */
 static volatile bool s_heating_now;           /* 마지막으로 본 '난방 중'(diag 용) */
+static volatile int s_burning_now = -1;       /* 마지막으로 본 연소 표시(비트 1 난방 2 온수, 0 없음, -1 모름) */
+static volatile bool s_gas_hw_seen;           /* 마지막 펄스 뒤로 온수 연소가 있었나 */
+/* 펄스마다 '직전 펄스 뒤 연소한 시간'의 분포 — 한도를 정하려고 센다. [0] 난방만, [1] 온수 연소가 끼었음.
+ * 칸 경계(초) BP_EDGE, 마지막 칸은 그 이상. 경고 중에 온 펄스(고장에서 풀리는 펄스)는 세지 않는다. 플래시에 남는다. */
+#define BP_N 8
+static const uint16_t BP_EDGE[BP_N - 1] = { 30, 60, 90, 120, 180, 300, 600 };
+#define BP_MAGIC 0x42503031u                  /* "BP01" */
+typedef struct {
+    uint32_t magic;
+    uint32_t hist[2][BP_N];
+    uint32_t max_s[2];
+} bp_stat_t;
+static bp_stat_t s_bp = { .magic = BP_MAGIC };
+static uint32_t s_bp_last_s;                  /* 마지막 펄스의 값(이번 부팅) */
+static volatile bool s_bp_dirty;
 
 uint8_t hub_sensors_faults(void)
 {
@@ -117,6 +139,12 @@ static uint32_t gas_fault_limit_s(void)
 {
     uint32_t lim = s_step_l * GAS_FAULT_S_PER_L;
     return lim < GAS_FAULT_MIN_S ? GAS_FAULT_MIN_S : lim;
+}
+
+static uint32_t gas_burn_limit_s(void)
+{
+    uint32_t lim = s_step_l * GAS_BURN_S_PER_L;
+    return lim < GAS_BURN_MIN_S ? GAS_BURN_MIN_S : lim;
 }
 
 static uint32_t now_s(void) { return (uint32_t)(esp_timer_get_time() / 1000000); }
@@ -232,6 +260,11 @@ static void gas_load(void)
         if (nvs_get_blob(h, "bk", &s_carry, &sz) != ESP_OK || sz != sizeof(s_carry) || s_carry.magic != BK_MAGIC) {
             memset(&s_carry, 0, sizeof(s_carry));    /* 없거나 다른 형식 — 이번 부팅부터 센다 */
         }
+        size_t bsz = sizeof(s_bp);
+        if (hs_get_blob(h, NS, "bp", &s_bp, &bsz) != ESP_OK || bsz != sizeof(s_bp) || s_bp.magic != BP_MAGIC) {
+            memset(&s_bp, 0, sizeof(s_bp));
+            s_bp.magic = BP_MAGIC;
+        }
         s_gas_keep = GK_NONE;                        /* 재시작 직전에 넘겨준 스위치 상태: 한 번 읽고 지운다 */
         if (hs_get_u8(h, NS, "keep", &s_gas_keep) == ESP_OK && s_gas_keep != GK_NONE) {
             hs_erase(h, "keep");
@@ -240,6 +273,20 @@ static void gas_load(void)
         if (s_gas_keep != GK_NEXT_NEW && s_gas_keep != GK_COUNTED) {
             s_gas_keep = GK_NONE;
         }
+        nvs_close(h);
+    }
+}
+
+static void bp_save(void)
+{
+    if (!s_bp_dirty) {
+        return;
+    }
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+        s_bp_dirty = false;
+        hs_set_blob(h, "bp", &s_bp, sizeof(s_bp));
+        nvs_commit(h);
         nvs_close(h);
     }
 }
@@ -296,6 +343,8 @@ static gas_view_t gas_view(void)
     v.day_l = day * GAS_STEP_L;
     v.closed_ms = s_gas_closed_ms;
     v.closed_now = s_run_gas_on && s_run_gas_pin >= 0 && gpio_get_level(s_run_gas_pin) == 0;
+    v.no_pulse = s_gas_fault;
+    v.burn_s = s_gas_burn_s;
     return v;
 }
 
@@ -314,10 +363,25 @@ static void gas_pulse(void)
     xSemaphoreGive(s_lock);
     s_count_unsaved++;        /* NVS 저장은 펄스마다 하지 않고 모아서(아래) — Zigbee 자격증명 있는 플래시 마모·간섭 줄임 */
     s_bk_dirty = true;
+    if (s_gas_burn_s && !s_gas_fault) {   /* 한도를 정하려고: 이 펄스까지 연소한 시간을 센다 */
+        int k = s_gas_hw_seen ? 1 : 0, b = 0;
+        while (b < BP_N - 1 && s_gas_burn_s >= BP_EDGE[b]) {
+            b++;
+        }
+        s_bp.hist[k][b]++;
+        if (s_gas_burn_s > s_bp.max_s[k]) {
+            s_bp.max_s[k] = s_gas_burn_s;
+        }
+        s_bp_last_s = s_gas_burn_s;
+        s_bp_dirty = true;
+    }
     s_gas_heat_s = 0;
+    s_gas_burn_s = 0;
+    s_gas_hw_seen = false;
     if (s_gas_fault) {        /* 펄스가 다시 온다: 값 보고보다 먼저 '정상' 을 알린다 */
         s_gas_fault = false;
         ESP_LOGI(TAG, "가스 계량기: 펄스가 다시 들어옴 — 정상");
+        hub_event(EV_GAS_NO_PULSE, NULL, 0, 0);
         send_plugins();
     }
     s_gas_dirty = true;
@@ -337,6 +401,7 @@ static void gas_flush(void)
         s_count_unsaved = 0;
         gas_save(false);
     }
+    bp_save();
     bk_save();
 }
 
@@ -353,18 +418,31 @@ void hub_sensors_flush(void)
     }
 }
 
-/* GAS_WATCH_S 초마다: 난방 중인 시간을 쌓고, 한도를 넘도록 펄스가 없으면 고장으로 본다 */
+/* GAS_WATCH_S 초마다: 보일러가 연소한 시간(보일러 조절기가 없으면 '난방 중' 인 시간)을 쌓고, 한도를 넘도록 펄스가
+ * 없으면 '펄스 없음' 경고를 낸다. 경고 중에도 연소 시간은 계속 센다(관리 화면·API 에 보인다) */
 static void gas_watch(void)
 {
-    s_heating_now = hub_api_heating();
-    if (s_gas_fault || !s_heating_now) {
+    int burn = hub_api_burning();
+    s_burning_now = burn;
+    s_heating_now = burn < 0 && hub_api_heating();
+    if (burn > 0) {
+        s_gas_burn_s += GAS_WATCH_S;
+        if (burn & 2) {
+            s_gas_hw_seen = true;
+        }
+    }
+    if (s_heating_now) {
+        s_gas_heat_s += GAS_WATCH_S;
+    }
+    if (s_gas_fault) {
         return;
     }
-    s_gas_heat_s += GAS_WATCH_S;
-    if (s_gas_heat_s >= gas_fault_limit_s()) {
+    bool by_burn = s_gas_burn_s >= gas_burn_limit_s();
+    if (by_burn || s_gas_heat_s >= gas_fault_limit_s()) {
         s_gas_fault = true;
-        ESP_LOGW(TAG, "가스 계량기: 난방 중 %lu분 동안 펄스 없음 — 오프라인으로 알림(스위치 선·자석 위치 확인)",
-                 (unsigned long)(s_gas_heat_s / 60));
+        ESP_LOGW(TAG, "가스 계량기: 보일러가 %s %lu분 동안 펄스 없음 — 경고(스위치 선·자석 위치 확인)",
+                 by_burn ? "연소한" : "난방한", (unsigned long)((by_burn ? s_gas_burn_s : s_gas_heat_s) / 60));
+        hub_event(EV_GAS_NO_PULSE, NULL, 1, (int32_t)(by_burn ? s_gas_burn_s : s_gas_heat_s));
         send_plugins();
     }
 }
@@ -432,6 +510,7 @@ static void gas_task(void *arg)
             next_save = t + 60LL * 1000000;
             s_count_unsaved = 0;
             gas_save(false);
+            bp_save();
         }
         if (s_bk_dirty && t >= next_bk) {              /* 10분 칸이 넘어갔으면 사용량 칸도 저장 */
             uint32_t now;
@@ -874,8 +953,10 @@ static bool gas_status(char *out, size_t cap)
 {
     uint32_t last = s_last_s, t = now_s();
     if (s_gas_fault) {
-        snprintf(out, cap, "난방 중 %lu분 동안 펄스가 없습니다. 스위치 선과 자석 위치를 확인하세요.",
-                 (unsigned long)(s_gas_heat_s / 60));
+        bool closed = s_run_gas_pin >= 0 && gpio_get_level(s_run_gas_pin) == 0;
+        snprintf(out, cap, "보일러가 %s %lu분 동안 펄스가 없습니다. 스위치 선과 자석 위치를 확인하세요.%s",
+                 s_gas_burn_s ? "연소한" : "난방한", (unsigned long)((s_gas_burn_s ? s_gas_burn_s : s_gas_heat_s) / 60),
+                 closed ? " 지금 스위치가 닫혀 있습니다(자석이 스위치 앞에 머물러 있거나 선이 붙어 있음)." : "");
         return false;
     }
     gas_view_t g = gas_view();
@@ -892,10 +973,10 @@ void hub_sensors_print(void)
 {
     printf("sensor room on=%d fault=%d fails=%d age=%llds\n", s_run_room_on, s_room_fault, s_room_fails,
            s_room_at_us ? (long long)((esp_timer_get_time() - s_room_at_us) / 1000000) : -1LL);
-    printf("sensor gas on=%d fault=%d pin=%d level=%d pulses=%lu last=%lds heating=%d heat_s=%lu limit_s=%lu\n", s_run_gas_on,
-           s_gas_fault, s_run_gas_pin, s_run_gas_on && s_run_gas_pin >= 0 ? gpio_get_level(s_run_gas_pin) : -1,
-           (unsigned long)s_count, s_last_s ? (long)(now_s() - s_last_s) : -1L, s_heating_now,
-           (unsigned long)s_gas_heat_s, (unsigned long)gas_fault_limit_s());
+    printf("sensor gas on=%d fault=%d pin=%d level=%d pulses=%lu last=%lds burning=%d burn_s=%lu/%lu heating=%d heat_s=%lu/%lu\n",
+           s_run_gas_on, s_gas_fault, s_run_gas_pin, s_run_gas_on && s_run_gas_pin >= 0 ? gpio_get_level(s_run_gas_pin) : -1,
+           (unsigned long)s_count, s_last_s ? (long)(now_s() - s_last_s) : -1L, s_burning_now, (unsigned long)s_gas_burn_s,
+           (unsigned long)gas_burn_limit_s(), s_heating_now, (unsigned long)s_gas_heat_s, (unsigned long)gas_fault_limit_s());
 }
 
 void hub_sensors_refresh(void)
@@ -1106,4 +1187,22 @@ void hub_sensors_start(void)
     gas_apply();
     room_apply();
     xTaskCreate(announce_task, "hub_announce", 3072, NULL, 3, NULL);
+}
+
+void hub_sensors_gas_burn_json(char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "{\"edges_s\":[");
+    for (int i = 0; i < BP_N - 1 && n < (int)cap; i++) {
+        n += snprintf(out + n, cap - n, "%s%u", i ? "," : "", BP_EDGE[i]);
+    }
+    for (int k = 0; k < 2 && n < (int)cap; k++) {
+        n += snprintf(out + n, cap - n, "],\"%s\":[", k ? "with_hw" : "heat");
+        for (int i = 0; i < BP_N && n < (int)cap; i++) {
+            n += snprintf(out + n, cap - n, "%s%lu", i ? "," : "", (unsigned long)s_bp.hist[k][i]);
+        }
+    }
+    if (n < (int)cap) {
+        snprintf(out + n, cap - n, "],\"max_heat_s\":%lu,\"max_with_hw_s\":%lu,\"last_s\":%lu}",
+                 (unsigned long)s_bp.max_s[0], (unsigned long)s_bp.max_s[1], (unsigned long)s_bp_last_s);
+    }
 }

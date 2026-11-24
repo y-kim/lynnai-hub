@@ -7,6 +7,7 @@ The hub relays the Rinnai devices' cloud link and forwards what it sees:
                 0x03 room     int16 x2                 temperature, humidity (x100; -32768 = no humidity)
                 0x04 gas      uint32 x5                pulses, meter litres (0xFFFFFFFF = not set), last hour L, last 24 h L, flow L/h
                 0x05 plugins  [enabled][faulty][paused]  bit 1 = room sensor, bit 2 = gas meter
+                                                         (gas "faulty" = boiler burning but no meter pulses: a warning)
                 0x07 pairs    ([f09 mac3][f06 mac3]) * n   which thermostat belongs to which boiler
                 0x08 forget   [kind][mac3]             device deleted on the hub
                 0x0a alive    keep-alive
@@ -146,6 +147,17 @@ class PluginState:
 
     def ok(self, bit: int) -> bool:
         return self.present(bit) and not (self.faulty & bit)
+
+    def usable(self, bit: int) -> bool:
+        """Whether the sensor's values can be shown. The gas meter's fault is only a warning (the boiler burns but no
+        pulses come), so its values stay; a paused sensor or a room sensor that does not answer has none."""
+        if bit == PLUGIN_GAS:
+            return self.present(bit) and not (self.paused & bit)
+        return self.ok(bit)
+
+    def gas_no_pulse(self) -> bool:
+        """The boiler has been burning for a while but the gas meter gave no pulse (the hub's gas fault, not paused)."""
+        return bool(self.faulty & PLUGIN_GAS) and not (self.paused & PLUGIN_GAS)
 
 
 def mac_hex(b: bytes) -> str:
