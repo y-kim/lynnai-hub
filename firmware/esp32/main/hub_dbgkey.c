@@ -167,7 +167,7 @@ void hub_dbgkey_render_body(char *out, size_t cap, const char *new_key, const ch
         snprintf(t, sizeof(t),
                  "<p class=ok>새 디버그 키 — <b>지금만 보입니다</b>, 복사해 두세요.<br>"
                  "<code id=dkval style=\"user-select:all;word-break:break-all\">%s</code> "
-                 "<button type=button class=lnk onclick=\"dkCopy()\">복사</button></p>", new_key);
+                 "<button type=button class=lnk onclick=\"dkCopy(this)\">복사</button></p>", new_key);
         strlcat(out, t, cap);
     } else if (note && note[0]) {
         snprintf(t, sizeof(t), "<p class=%s>%s</p>", ok ? "ok" : "warn", note);
@@ -226,8 +226,10 @@ void hub_dbgkey_render(char *out, size_t cap)
             ".catch(function(){c.insertAdjacentHTML('afterbegin','<p class=warn>허브에 닿지 않습니다</p>')});}"
             "function dkNew(f){dkPost('op=new&alias='+encodeURIComponent(f.alias.value));return false}"
             "function dkDel(i){if(confirm('이 키를 삭제할까요? 그 키로 접속하던 쪽은 바로 끊깁니다.'))dkPost('op=del&idx='+i)}"
-            "function dkCopy(){var e=document.getElementById('dkval');if(!e)return;"
-            "if(navigator.clipboard)navigator.clipboard.writeText(e.textContent).catch(function(){});"
-            "var r=document.createRange();r.selectNodeContents(e);var g=getSelection();g.removeAllRanges();g.addRange(r)}"
+            "function dkCopy(b){var e=document.getElementById('dkval');if(!e)return;"
+            "var r=document.createRange();r.selectNodeContents(e);var g=getSelection();g.removeAllRanges();g.addRange(r);"
+            "var ok=false;try{ok=document.execCommand('copy')}catch(x){}"        /* HTTP(비보안)에선 이게 실제 복사 */
+            "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(e.textContent).then(function(){},function(){});ok=true}"
+            "if(b){b.textContent=ok?'복사됨':'길게 눌러 복사';setTimeout(function(){b.textContent='복사'},1500)}}"
             "</script>", cap);
 }
