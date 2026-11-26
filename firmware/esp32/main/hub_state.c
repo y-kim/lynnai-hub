@@ -141,6 +141,39 @@ esp_err_t hub_state_provision(hub_state_t *st,
     return ESP_OK;
 }
 
+/* 설정 후 Wi-Fi(집 Wi-Fi·허브 AP) 이름·암호 바꾸기. 호출부가 바로 hub_wifi_apply 로 재적용한다. */
+esp_err_t hub_state_set_wifi(hub_state_t *st,
+                             const char *sta_ssid, const char *sta_pass,
+                             const char *ap_ssid, const char *ap_pass,
+                             char *err, int err_len)
+{
+    size_t sl = strlen(sta_ssid), al = strlen(ap_ssid);
+    if (sl < 1 || sl > HUB_SSID_MAX) FAIL("집 Wi-Fi 이름은 1~32자");
+    if (strlen(sta_pass) > 63) FAIL("집 Wi-Fi 암호가 너무 깁니다");
+    if (al < 1 || al > HUB_SSID_MAX) FAIL("허브 네트워크 이름은 1~32자");
+    if (strlen(ap_pass) < 8 || strlen(ap_pass) > 63) FAIL("허브 Wi-Fi 암호는 8~63자");
+    if (has_ctrl(sta_ssid) || has_ctrl(sta_pass) || has_ctrl(ap_ssid) || has_ctrl(ap_pass)) {
+        FAIL("이름·암호에 쓸 수 없는 문자가 있습니다");
+    }
+
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) FAIL("저장소 열기 실패");
+    esp_err_t e = hs_set_str(h, "sta_ssid", sta_ssid);
+    if (e == ESP_OK) e = hs_set_str(h, "sta_pass", sta_pass);
+    if (e == ESP_OK) e = hs_set_str(h, "ap_ssid", ap_ssid);
+    if (e == ESP_OK) e = hs_set_str(h, "ap_pass", ap_pass);
+    if (e == ESP_OK) e = nvs_commit(h);
+    nvs_close(h);
+    if (e != ESP_OK) FAIL("저장 실패");
+
+    strlcpy(st->sta_ssid, sta_ssid, sizeof(st->sta_ssid));
+    strlcpy(st->sta_pass, sta_pass, sizeof(st->sta_pass));
+    strlcpy(st->ap_ssid, ap_ssid, sizeof(st->ap_ssid));
+    strlcpy(st->ap_pass, ap_pass, sizeof(st->ap_pass));
+    ESP_LOGI(TAG, "Wi-Fi 바꿈: 집 Wi-Fi '%s', 허브 AP '%s'", sta_ssid, ap_ssid);
+    return ESP_OK;
+}
+
 esp_err_t hub_state_set_admin(const char *admin_pw, char *err, int err_len)
 {
     size_t n = strlen(admin_pw);

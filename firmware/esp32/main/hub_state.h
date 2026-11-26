@@ -36,3 +36,9 @@ esp_err_t hub_state_provision(hub_state_t *st,
 bool hub_state_verify_admin(const char *pw);
 /* 관리자 암호 바꾸기(8~64자). 현재 암호 확인은 호출부가 한다. 실패 시 err 에 사유 */
 esp_err_t hub_state_set_admin(const char *admin_pw, char *err, int err_len);
+
+/* 설정 후 Wi-Fi(집 Wi-Fi·허브 AP) 이름·암호 바꾸기. 성공 시 st 갱신, 호출부가 hub_wifi_apply 로 재적용. 실패 시 err 에 사유 */
+esp_err_t hub_state_set_wifi(hub_state_t *st,
+                             const char *sta_ssid, const char *sta_pass,
+                             const char *ap_ssid, const char *ap_pass,
+                             char *err, int err_len);
