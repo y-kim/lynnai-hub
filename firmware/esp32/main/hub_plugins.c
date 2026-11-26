@@ -34,7 +34,7 @@ typedef struct {
 
 static const plugin_t PLUGINS[] = {
     {
-        .id = "room", .bit = PLUG_ROOM, .name = "온습도계", .def_on = true,
+        .id = "room", .bit = PLUG_ROOM, .name = "온습도계", .def_on = false,
         .help = "센서를 목록에서 고르면 어느 핀을 어디에 이을지 아래에 나옵니다. 세 센서는 같은 네 선에 나란히 이어도 "
                 "됩니다(읽는 것은 고른 하나). 선을 만질 때는 ⏸ 로 멈추고 하세요.",
         .fields = {
@@ -46,7 +46,7 @@ static const plugin_t PLUGINS[] = {
         .nfields = 4,
     },
     {
-        .id = "gas", .bit = PLUG_GAS, .name = "가스 계량기 (리드 스위치)", .def_on = true,
+        .id = "gas", .bit = PLUG_GAS, .name = "가스 계량기 (리드 스위치)", .def_on = false,
         .help = "스위치 한쪽 → 아래 핀, 다른 쪽 → GND (내부 풀업). 선이 길면 핀–3V3 사이 10k 저항 권장.",
         .fields = {
             { "pin", "스위치 핀", 10, 0, 30, true },
@@ -318,7 +318,7 @@ void hub_plugins_render(char *o, size_t cap)
     if (!any) {
         cat(o, cap, "<p class=muted>없음</p>");
     }
-    cat(o, cap, "<h2>추가할 수 있는 플러그인</h2>");
+    cat(o, cap, "<h2>추가할 수 있는 플러그인</h2><div class=card>");
     any = false;
     for (int i = 0; i < NPLUG; i++) {
         const plugin_t *p = &PLUGINS[i];
@@ -326,13 +326,11 @@ void hub_plugins_render(char *o, size_t cap)
             continue;
         }
         any = true;
-        snprintf(t, sizeof(t), "<div class=card><h3>%s</h3><p class=muted>%s</p>"
-                 "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>", p->name, p->help, p->id);
+        /* 설치 안 된 것은 목록만: 이름 + 추가 버튼(기본값으로 켜진 뒤, 핀·센서는 '설치된 플러그인'에서 설정) */
+        snprintf(t, sizeof(t), "<div class=row><span>%s</span>"
+                 "<form method=post action=/admin/plugin><input type=hidden name=id value=%s>"
+                 "<button name=op value=add class=lnk>추가</button></form></div>", p->name, p->id);
         cat(o, cap, t);
-        for (int f = 0; f < p->nfields; f++) {
-            field_html(o, cap, &p->fields[f], s_val[i][f]);
-        }
-        cat(o, cap, "<button name=op value=add>추가</button></form></div>");
     }
     if (!any) {
         cat(o, cap, "<p class=muted>모두 설치됨</p>");
@@ -343,7 +341,7 @@ void hub_plugins_render(char *o, size_t cap)
         snprintf(t, sizeof(t), " %d", FREE_PINS[k]);
         cat(o, cap, t);
     }
-    cat(o, cap, " (보드에 인쇄된 숫자). 저장하면 센서만 다시 적용됩니다(보일러·각방 연결은 유지).</p><script>");
+    cat(o, cap, " (보드에 인쇄된 숫자). 저장하면 센서만 다시 적용됩니다(보일러·각방 연결은 유지).</p></div><script>");
     cat(o, cap, room_wiring_js);
     cat(o, cap, "</script>");
 }
@@ -418,7 +416,10 @@ bool hub_plugins_apply(const char *form, char *err, size_t errlen)
         for (int f = 0; f < p->nfields; f++) {
             const field_t *fd = &p->fields[f];
             int v;
-            if (!form_int(form, fd->key, &v) || v < fd->min || v > fd->max) {
+            if (!form_int(form, fd->key, &v)) {
+                v = vals[f];                         /* 목록에서 '추가'는 폼에 필드가 없으니 기본값(저장값) 사용 */
+            }
+            if (v < fd->min || v > fd->max) {
                 snprintf(err, errlen, "%s: %d~%d 사이 숫자", fd->label, fd->min, fd->max);
                 return false;
             }
