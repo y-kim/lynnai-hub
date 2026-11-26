@@ -44,6 +44,7 @@
 #include "hub_sensors.h"
 #include "hub_tariff.h"
 #include "hub_uplink.h"
+#include "hub_upstream.h"
 #include "hub_lan.h"
 #include "hub_plugins.h"
 #include "hub_expose.h"
@@ -859,13 +860,19 @@ void app_main(void)
     ESP_ERROR_CHECK(hub_wifi_init());
     ESP_ERROR_CHECK(hub_wifi_start(&s_hub));
     hub_dns_start(hub_wifi_ap_ip(), !s_hub.provisioned);
-    if (s_hub.provisioned) {
+    hub_uplink_load();                      /* Zigbee / LAN (/ Matter) 중 무엇을 쓸지 */
+    hub_label_load();                       /* 이 허브 라벨(층 이름) */
+    hub_upstream_start();                   /* 멀티허브 설정(모드·라벨·토큰) — Zigbee/ hub_lan 결정 전에 읽는다 */
+    /* 위성 허브는 Zigbee 를 안 쓴다(LAN 으로 중심에 붙음). 쓸데없는 Zigbee 가입 시도는 2.4GHz 를 Wi-Fi 와 경합시켜
+     * 집 Wi-Fi 를 끊어 놓으므로, 위성이면 steering 을 아예 열지 않는다. */
+    if (s_hub.provisioned && hub_upstream_mode() != HUB_UP_GUEST) {
         hub_zigbee_allow_steering();
     }
     hub_onboard_init(&s_hub);
     ESP_ERROR_CHECK(hub_portal_start(&s_hub));
-    hub_uplink_load();                      /* Zigbee / LAN (/ Matter) 중 무엇을 쓸지 */
-    if (hub_uplink_mask() & HUB_UPLINK_LAN) {
+    /* hub_lan(= 멀티허브 위성 다이얼러·중심 수신 서버가 사는 곳)은 ST 통로가 LAN 이거나, 멀티허브 모드가 켜져 있으면 띄운다.
+     * (Zigbee 로 ST 에 붙는 중심/위성도 허브끼리는 LAN 으로 통신하므로 반드시 필요) */
+    if ((hub_uplink_mask() & HUB_UPLINK_LAN) || hub_upstream_mode() != HUB_UP_OFF) {
         hub_lan_start(s_hub.device_id);     /* SSDP + TCP 8484 */
     }
     hub_api_start(s_hub.device_id);         /* 서버 API 토큰 + 시간 맞추기 */

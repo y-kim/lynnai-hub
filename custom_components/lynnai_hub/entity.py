@@ -44,10 +44,11 @@ def _names(hass: HomeAssistant) -> dict[str, str]:
     return _NAMES["ko"] if (hass.config.language or "").startswith("ko") else _NAMES["en"]
 
 
-def zone_name(hass: HomeAssistant, zone_id: str) -> str:
+def zone_name(hass: HomeAssistant, zone_id: str, label: str | None = None) -> str:
     number = p.ZONE_SLOTS[zone_id].number
     names = _names(hass)
-    return names["living"] if number == 7 else names["room"].format(number)
+    base = names["living"] if number == 7 else names["room"].format(number)
+    return f"{label} {base}" if label else base   # hub/floor label prefix ("1층 거실")
 
 
 class LynnaiEntity(Entity):
@@ -106,7 +107,7 @@ class ZoneEntity(LynnaiEntity):
         super().__init__(hub, entry_id, f"t{mac}_{zone_id}", key)
         self.mac = mac
         self.zone_id = zone_id
-        self._attr_device_info = self._device(zone_name(hass, zone_id), "Room thermostat")
+        self._attr_device_info = self._device(zone_name(hass, zone_id, hub.labels.get(mac)), "Room thermostat")
 
     @property
     def zone(self) -> p.ZoneState | None:

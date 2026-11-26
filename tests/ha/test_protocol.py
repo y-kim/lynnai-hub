@@ -93,6 +93,18 @@ def test_model_code_picks_the_tables():
     assert p.decode_models(payload) == {(6, "a1b2c3"): "23", (9, "d4e5f6"): "03"}
 
 
+def test_labels_decode():
+    # ([kind][mac3][len][utf8]) * n — thermostats only (f06 ignored), variable length
+    one = bytes([9]) + bytes.fromhex("d4e5f6") + bytes([len("1층".encode())]) + "1층".encode()
+    two = bytes([9]) + bytes.fromhex("a1b2c3") + bytes([len("2층".encode())]) + "2층".encode()
+    boiler = bytes([6]) + bytes.fromhex("010203") + bytes([len("x".encode())]) + b"x"
+    assert p.decode_labels(one + two + boiler) == {"d4e5f6": "1층", "a1b2c3": "2층"}
+    assert p.decode_labels(b"") == {}
+    assert p.decode_labels(bytes([9]) + bytes.fromhex("d4e5f6") + b"\x00") == {}   # empty label skipped
+    # truncated entry (len says more than remains) stops cleanly
+    assert p.decode_labels(bytes([9]) + bytes.fromhex("d4e5f6") + b"\x05ab") == {}
+
+
 def test_half_degree_hot_water():
     raw = list(F06_ON)
     raw[10:13] = "255"                              # 0x25 = 37 and tenths 5

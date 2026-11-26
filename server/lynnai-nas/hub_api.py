@@ -142,11 +142,15 @@ def _boiler_json(b):
             "ondol_set": bo["ondol_set"], "room_set": bo["room_set"], "hw_set": bo["hw_set"], "raw": b.hex()}
 
 
-def _rooms_json(r):
+def _room_name(z, label):
+    return f"{label} {z[1]}" if label else z[1]   # 허브 라벨(층)이 있으면 방 이름 앞에 붙인다
+
+
+def _rooms_json(r, label=""):
     if not r or len(r) < 50:
         return None
-    return {"raw": r.hex(), "zones": [
-        {"id": z[0], "name": z[1], "on": bool(r[z[2]] & 0x02), "heating": bool(r[z[2]] & 0x40),
+    return {"raw": r.hex(), "label": label or None, "zones": [
+        {"id": z[0], "name": _room_name(z, label), "on": bool(r[z[2]] & 0x02), "heating": bool(r[z[2]] & 0x40),
          "outing": bool(r[z[2]] & 0x10), "reserve": bool(r[z[2]] & 0x08), "interval": r[z[2] + 1],
          "current": r[z[3]], "target": r[z[4]]} for z in ZONES if _present(r, z)]}
 
@@ -165,7 +169,7 @@ def build_state(core, hub_id):
                 boilers.append(d)
         elif kind == KIND_F09:
             linked_r = linked_r or linked
-            d = _rooms_json(blob)
+            d = _rooms_json(blob, core.label_of(kind, mac))
             if d:
                 d["mac"], d["linked"], d["model"] = mac, linked, core.model_of(kind, mac)
                 thermostats.append(d)
@@ -214,7 +218,7 @@ def build_metrics(core, hub_id):
                 if not _present(r, z):
                     continue
                 v = (int(bool(r[z[idx]] & mask)) if mask else r[z[idx]])
-                L.append(f'lynnai_zone_{metric}{{mac="{mac}",zone="{z[0]}",name="{z[1]}"}} {v}')
+                L.append(f'lynnai_zone_{metric}{{mac="{mac}",zone="{z[0]}",name="{_room_name(z, core.label)}"}} {v}')
     return "\n".join(L) + "\n"
 
 

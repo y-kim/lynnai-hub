@@ -28,6 +28,8 @@
 
 #include "hub_api.h"
 #include "hub_rinnai.h"
+#include "hub_upstream.h"
+#include "hub_lan.h"
 #include "hub_sensors.h"
 #include "hub_tariff.h"
 #include "hub_proxy.h"
@@ -311,6 +313,29 @@ static void model_json(httpd_req_t *req, const hub_dev_t *d)
     httpd_resp_sendstr_chunk(req, m);
 }
 
+/* 그 서머스탯을 품은 허브 라벨(층) — 없으면 "label":null. "·\\ 은 뺀다(JSON 안전) */
+static void label_json(httpd_req_t *req, uint8_t kind, const uint8_t *mac3)
+{
+    char lbl[32], out[48];
+    int n = hub_upstream_label_of(kind, mac3, lbl, sizeof(lbl));
+    if (n <= 0) {
+        httpd_resp_sendstr_chunk(req, "\"label\":null,");
+        return;
+    }
+    int k = 0;
+    out[k++] = '"';
+    for (int i = 0; lbl[i] && k < (int)sizeof(out) - 4; i++) {
+        if (lbl[i] != '"' && lbl[i] != '\\') {
+            out[k++] = lbl[i];
+        }
+    }
+    out[k++] = '"';
+    out[k++] = ',';
+    out[k] = 0;
+    httpd_resp_sendstr_chunk(req, "\"label\":");
+    httpd_resp_sendstr_chunk(req, out);
+}
+
 #define CHUNK(...) do { snprintf(line, sizeof(line), __VA_ARGS__); httpd_resp_sendstr_chunk(req, line); } while (0)
 
 static esp_err_t state_get(httpd_req_t *req)
@@ -348,6 +373,11 @@ static esp_err_t state_get(httpd_req_t *req)
               run ? run->label : "?", trial, rb ? "true" : "false");
     }
     CHUNK("\"links\":{\"boiler\":%s,\"rooms\":%s},", links & 1 ? "true" : "false", links & 2 ? "true" : "false");
+    {
+        int gon = 0, gtot = hub_upstream_guest_count(&gon);
+        CHUNK("\"upstream\":{\"mode\":%d,\"guest_online\":%s,\"guest_status\":\"%s\",\"guests_total\":%d,\"guests_online\":%d},",
+              hub_upstream_mode(), hub_lan_guest_online() ? "true" : "false", hub_lan_guest_status(), gtot, gon);
+    }
 
     boiler_t bo = decode_boiler(f06, n06);
     if (bo.ok) {
@@ -402,23 +432,31 @@ static esp_err_t state_get(httpd_req_t *req)
     }
     CHUNK("],\"thermostats\":[");
     int nt = 0;
-    for (int i = 0; i < nd; i++) {
-        if (dev[i].kind != HUB_KIND_F09 || dev[i].n < 50) {
-            continue;
-        }
-        hex(raw, dev[i].blob, dev[i].n);
-        CHUNK("%s{\"mac\":\"%02x%02x%02x\",\"linked\":%s,\"raw\":\"%s\",", nt++ ? "," : "",
-              dev[i].mac3[0], dev[i].mac3[1], dev[i].mac3[2], dev[i].linked ? "true" : "false", raw);
-        model_json(req, &dev[i]);
-        CHUNK(",");
-        CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu,\"zones\":[", (unsigned long)dev[i].seq,
-              (unsigned long)dev[i].chg_seq, (unsigned long long)dev[i].chg_ms);
-        for (int z = 0, k = 0; z < NZONES; z++) {
-            if (zone_present(dev[i].blob, dev[i].n, z)) {
-                CHUNK("%s" ZONE_JSON, k++ ? "," : "", ZONE_ARGS(dev[i].blob, z));
+    hub_dev_t rem[4];
+    int nr = hub_upstream_snapshot(rem, 4);        /* 상류 중계 중인 1층 서머스탯 */
+    for (int src = 0; src < 2; src++) {
+        hub_dev_t *arr = src ? rem : dev;
+        int cnt = src ? nr : nd;
+        for (int i = 0; i < cnt; i++) {
+            if (arr[i].kind != HUB_KIND_F09 || arr[i].n < 50) {
+                continue;
             }
+            hex(raw, arr[i].blob, arr[i].n);
+            CHUNK("%s{\"mac\":\"%02x%02x%02x\",\"linked\":%s,\"remote\":%s,\"raw\":\"%s\",", nt++ ? "," : "",
+                  arr[i].mac3[0], arr[i].mac3[1], arr[i].mac3[2], arr[i].linked ? "true" : "false",
+                  src ? "true" : "false", raw);
+            label_json(req, HUB_KIND_F09, arr[i].mac3);
+            model_json(req, &arr[i]);
+            CHUNK(",");
+            CHUNK("\"seq\":%lu,\"chg_seq\":%lu,\"chg_up_ms\":%llu,\"zones\":[", (unsigned long)arr[i].seq,
+                  (unsigned long)arr[i].chg_seq, (unsigned long long)arr[i].chg_ms);
+            for (int z = 0, k = 0; z < NZONES; z++) {
+                if (zone_present(arr[i].blob, arr[i].n, z)) {
+                    CHUNK("%s" ZONE_JSON, k++ ? "," : "", ZONE_ARGS(arr[i].blob, z));
+                }
+            }
+            CHUNK("]}");
         }
-        CHUNK("]}");
     }
     CHUNK("],");
 

@@ -53,6 +53,36 @@ async def entry(hass: HomeAssistant, fake_hub):
         await hass.async_block_till_done()
 
 
+async def test_floor_label_prefixes_room_names(hass: HomeAssistant, fake_hub):
+    """A hub label (CMD_LABELS) is prefixed to the room device names ("1층 거실")."""
+    from homeassistant.helpers import device_registry as dr
+
+    fake_hub.tokens.add(TOKEN)
+    fake_hub.seed()
+    label = "1층"
+    fake_hub.on_hello.insert(
+        0, (0x0E, bytes([9]) + bytes.fromhex(THERMO) + bytes([len(label.encode())]) + label.encode())
+    )
+    e = MockConfigEntry(
+        domain=DOMAIN, unique_id=HUB_ID, title="LYNNAI Hub",
+        data={"host": "127.0.0.1", "port": fake_hub.port, "token": TOKEN, "hub_id": HUB_ID},
+    )
+    e.add_to_hass(hass)
+    with patch("custom_components.lynnai_hub.discover", return_value={}):
+        assert await hass.config_entries.async_setup(e.entry_id)
+        await _settle(hass, lambda: hass.states.get("sensor.gas_meter_meter_reading") is not None)
+        reg = dr.async_get(hass)
+        names = {
+            tuple(sorted(d.identifiers))[0][1]: d.name
+            for d in reg.devices
+            if any(i[0] == DOMAIN for i in d.identifiers)
+        }
+        assert names.get(f"{HUB_ID}_t{THERMO}_z3") == "1층 Living room"
+        assert names.get(f"{HUB_ID}_t{THERMO}_z1") == "1층 Room 1"
+        await hass.config_entries.async_unload(e.entry_id)
+        await hass.async_block_till_done()
+
+
 async def test_entities_show_the_hub_state(hass: HomeAssistant, entry, fake_hub):
     s = hass.states
     assert s.get(f"binary_sensor.lynnai_hub_{HUB_ID.lower()}_connection").state == "on"

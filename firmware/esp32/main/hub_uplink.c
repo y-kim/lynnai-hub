@@ -22,11 +22,18 @@
 #include "hub_rinnai.h"
 #include "hub_sensors.h"
 #include "hub_expose.h"
+#include "hub_upstream.h"
 
 void hub_rinnai_resend(void);   /* 연결·상태 다시 보내도록 깨운다(hub_rinnai.c) */
 
 static const char *TAG = "HUB_UPLINK";
 static uint8_t s_mask = HUB_UPLINK_DEFAULT;
+
+/* 멀티허브(중심/위성)면 허브끼리 LAN 통신은 ST 통로(마스크)와 무관하게 켜져 있어야 한다 */
+static bool lan_active(void)
+{
+    return (s_mask & HUB_UPLINK_LAN) || hub_upstream_mode() != HUB_UP_OFF;
+}
 
 void hub_uplink_load(void)
 {
@@ -202,13 +209,14 @@ bool hub_uplink_apply(const char *form, char *msg, size_t len)
 
 void hub_uplink_send_to(uint8_t uplink, uint8_t cmd, const uint8_t *data, uint16_t n)
 {
-    if (!(s_mask & uplink)) {
-        return;
-    }
     if (uplink == HUB_UPLINK_ZIGBEE) {
-        hub_zigbee_send_raw(cmd, data, n);
+        if (s_mask & HUB_UPLINK_ZIGBEE) {
+            hub_zigbee_send_raw(cmd, data, n);
+        }
     } else if (uplink == HUB_UPLINK_LAN) {
-        hub_lan_send(cmd, data, n);
+        if (lan_active()) {                          /* 멀티허브면 ST 통로와 무관하게 LAN 으로 보낸다 */
+            hub_lan_send(cmd, data, n);
+        }
     }
 }
 
@@ -220,7 +228,8 @@ void hub_uplink_send(uint8_t cmd, const uint8_t *data, uint16_t n)
 
 void hub_uplink_on_request(uint8_t from, const char *text, int len)
 {
-    if (!(s_mask & from)) {                          /* 끈 통로로 들어온 명령은 따르지 않는다 */
+    bool allowed = (s_mask & from) || (from == HUB_UPLINK_LAN && lan_active());  /* 멀티허브: LAN 은 ST 통로와 무관하게 받는다 */
+    if (!allowed) {                                  /* 끈 통로로 들어온 명령은 따르지 않는다 */
         ESP_LOGW(TAG, "꺼진 통로(%u)의 요청 버림", from);
         return;
     }

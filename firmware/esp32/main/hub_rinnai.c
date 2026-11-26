@@ -21,6 +21,7 @@
 #include "hub_wifi.h"
 #include "hub_proxy.h"
 #include "hub_uplink.h"
+#include "hub_upstream.h"
 #include "hub_pairs.h"
 #include "hub_expose.h"
 #include "hub_devs.h"
@@ -1081,6 +1082,7 @@ static void command_one(const char *text, int len)
         s_links_dirty = true;
         s_expose_dirty = true;         /* 노출 마스크도 다시(드라이버 재시작 후 비트 재동기화) */
         unlock();
+        hub_upstream_forward(NULL, "refresh", 7);   /* 위성 허브들도 상태를 다시 올리게 */
         kick();
         return;
     }
@@ -1113,6 +1115,11 @@ static void command_one(const char *text, int len)
     }
     while (*rest == ' ') {
         rest++;
+    }
+
+    if (target && hub_upstream_is_remote(kind, target)) {   /* 대상이 위성 허브 기기면 그 위성으로 포워딩 */
+        hub_upstream_forward(target, text, len);
+        return;
     }
 
     /* 클라우드가 보내는 모양 그대로: "sum" = rpc 항목 수, 값은 소문자 16진(예 "1c") */
@@ -1209,6 +1216,29 @@ static int build_models(uint8_t *out, int cap)
     return n;
 }
 
+/* 로컬 기기 라벨: 이 허브 라벨이 있으면 ([종류][MAC끝3][len][라벨]) * n. 잠금 안에서. */
+static int build_labels(uint8_t *out, int cap)
+{
+    char lbl[32];
+    int ll = hub_label_get(lbl, sizeof(lbl));
+    if (ll <= 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < MAX_TAPS; i++) {
+        if (!s_taps[i].used || !s_taps[i].kind || n + 5 + ll > cap) {
+            continue;
+        }
+        out[n++] = s_taps[i].kind;
+        memcpy(out + n, s_taps[i].mac3, 3);
+        n += 3;
+        out[n++] = (uint8_t)ll;
+        memcpy(out + n, lbl, ll);
+        n += ll;
+    }
+    return n;
+}
+
 static void send_boilcfg(void);
 
 static void zb_task(void *arg)
@@ -1265,18 +1295,25 @@ static void zb_task(void *arg)
         } else {
             poll_status(false);         /* 단독 모드에서 막 구독한 기기 */
         }
-        /* 연결 목록 */
-        uint8_t links[MAX_TAPS * 4], models[MAX_TAPS * 5];
-        int ln, mn;
+        /* 연결 목록 (로컬 + 상류 중계 1층 기기 병합) */
+        uint8_t links[(MAX_TAPS + 4) * 4], models[(MAX_TAPS + 4) * 5], labels[256];
+        int ln, mn, lbn;
         bool send_links;
         lock();
         ln = build_links(links, sizeof(links));
         mn = build_models(models, sizeof(models));
+        lbn = build_labels(labels, sizeof(labels));
         send_links = s_links_dirty || beat;
         s_links_dirty = false;
         unlock();
+        ln += hub_upstream_links(links + ln, sizeof(links) - ln);     /* 잠금 밖: 1층 f09 덧붙임 */
+        mn += hub_upstream_models(models + mn, sizeof(models) - mn);
+        lbn += hub_upstream_labels(labels + lbn, sizeof(labels) - lbn);
         if (send_links) {
             ESP_LOGI(TAG, "→ 연결 %d대", ln / 4);
+            if (lbn) {
+                hub_uplink_send(HUB_RK_CMD_LABELS, labels, lbn);   /* 라벨 먼저: 방 자식기기 생성 때 이름에 붙게 */
+            }
             hub_uplink_send(HUB_RK_CMD_LINKS, links, ln);
             if (mn) {
                 hub_uplink_send(HUB_RK_CMD_MODELS, models, mn);   /* 온도 표 고르기용(옛 드라이버는 무시) */
@@ -1285,6 +1322,7 @@ static void zb_task(void *arg)
             int pn = hub_pairs_blob(pairs, sizeof(pairs));
             hub_uplink_send(HUB_RK_CMD_PAIRS, pairs, pn);   /* 짝(없으면 0바이트 = 전부 단독/암묵) */
             send_boilcfg();                                  /* 보일러 설정(온수 예열 자동 끄기) */
+            hub_upstream_resend();                            /* 1층 방 상태 다시(드라이버 재시작 동기화) */
         }
         /* 기기별 상태 */
         for (int i = 0; i < MAX_DEV; i++) {

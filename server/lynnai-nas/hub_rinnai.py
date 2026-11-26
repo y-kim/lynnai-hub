@@ -26,6 +26,7 @@ import time
 
 CMD_REQUEST, CMD_STATE, CMD_LINKS, CMD_PAIRS = 0x00, 0x01, 0x02, 0x07
 CMD_MODELS = 0x0D               # 모델코드: ([종류][MAC끝3][모델코드 1바이트 = 토픽의 두 자리 16진수]) * n — 드라이버가 온도 표를 고른다
+CMD_LABELS = 0x0E               # 허브 라벨: ([종류][MAC끝3][len][UTF-8 라벨]) * n — 그 기기를 품은 허브 라벨(층). 방 이름 앞에 붙인다
 _MODEL = re.compile(r"/f0[69]/([0-9A-Fa-f]{2})/")
 CMD_BOILCFG = 0x0C              # 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)][보일러 모드 0 정하지 않음/1 난방수/2 온돌·실내]
 BOILER_MODES = {"": 0, "water": 1, "room": 2}   # 환경변수 BOILER_MODE (ESP32 는 초기 설정·관리 화면에서 고름)
@@ -144,6 +145,7 @@ class HubCore:
         self.links = []
         self.state = {}       # (kind, mac3) -> blob(bytes)
         self.models = {}      # (kind, mac3) -> 모델코드(토픽의 두 자리 16진수) — 온수·난방수 온도 표를 가른다
+        self.label = os.environ.get("LYNNAI_LABEL", "").strip()[:24]   # 이 허브 라벨(층) — 방 이름 앞에 붙인다(ESP32 hub v0.9 와 같은 동작)
         self.senders = []     # 내보내기 대상(LAN uplink 등): fn(cmd_id, data_bytes)
         self._last_mask = None
         threading.Thread(target=self._heartbeat, daemon=True).start()
@@ -193,16 +195,33 @@ class HubCore:
                     out += bytes([ln.kind]) + ln.mac3 + bytes([m])
         return out
 
+    def _labels_blob(self):
+        if not self.label:
+            return b""
+        lb = self.label.encode("utf-8")[:24]
+        out = b""
+        for ln in self.links:
+            if ln.kind and len(ln.mac3) == 3:
+                out += bytes([ln.kind]) + ln.mac3 + bytes([len(lb)]) + lb
+        return out
+
     def model_of(self, kind, mac_hex):
         """모델코드 두 자리("23") — 모르면 None. 연결이 끊겨도 기억한다."""
         m = self.models.get((kind, bytes.fromhex(mac_hex)))
         return None if m is None else f"{m:02x}"
+
+    def label_of(self, kind, mac_hex):
+        """그 기기를 품은 허브 라벨(층) — 없으면 ''. NAS 는 단일 버스라 모든 기기가 같은 라벨."""
+        return self.label
 
     def _send_links(self):
         b = self._links_blob()
         if b != self._last_mask:
             self._last_mask = b
             self.log(f"[core] 연결 {len(b)//4}대")
+        lb = self._labels_blob()
+        if lb:
+            self._emit(CMD_LABELS, lb)    # 라벨 먼저: 방 자식기기 생성 때 이름에 붙게(옛 드라이버는 무시)
         self._emit(CMD_LINKS, b)
         m = self._models_blob()
         if m:

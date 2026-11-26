@@ -37,6 +37,7 @@ CMD_ALIVE = 0x0A
 CMD_MODE = 0x0B
 CMD_BOILCFG = 0x0C   # boiler settings: [hot water preheat auto-off, minutes, 0 = never]
 CMD_MODELS = 0x0D    # model codes: ([kind][mac3][code]) * n — picks the temperature tables
+CMD_LABELS = 0x0E    # hub labels: ([kind][mac3][len][utf8 label]) * n — floor label, prefixed to room names (hub v0.9)
 
 KIND_BOILER = 6
 KIND_THERMOSTAT = 9
@@ -114,6 +115,26 @@ def decode_models(payload: bytes) -> dict[tuple[int, str], str]:
         for i in range(0, len(payload) - 4, 5)
         if payload[i] in (KIND_BOILER, KIND_THERMOSTAT)
     }
+
+
+def decode_labels(payload: bytes) -> dict[str, str]:
+    """mac -> hub label (floor name), for thermostats. Variable-length entries:
+    ([kind][mac3][len][utf8 label]) * n."""
+    out: dict[str, str] = {}
+    i = 0
+    while i + 5 <= len(payload):
+        kind = payload[i]
+        mac = payload[i + 1 : i + 4].hex()
+        ln = payload[i + 4]
+        if i + 5 + ln > len(payload):
+            break
+        if kind == KIND_THERMOSTAT and ln > 0:
+            try:
+                out[mac] = payload[i + 5 : i + 5 + ln].decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        i += 5 + ln
+    return out
 
 
 def hot_water_value(value: float) -> str:

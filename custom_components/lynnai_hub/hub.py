@@ -29,6 +29,7 @@ class LynnaiHub:
         self.pairs: dict[str, str] = {}
         self.links: set[tuple[int, str]] | None = None          # None until the hub told us
         self.models: dict[tuple[int, str], str] = {}            # (kind, mac) -> model code ("23"), from hub v0.8
+        self.labels: dict[str, str] = {}                        # thermostat mac -> hub/floor label ("1층"), from hub v0.9
         self.room: p.RoomSensorState | None = None
         self.gas: p.GasState | None = None
         self.plugins = p.PluginState()
@@ -89,6 +90,11 @@ class LynnaiHub:
             if models == self.models:
                 return
             self.models = models
+        elif cmd == p.CMD_LABELS:
+            labels = {**self.labels, **p.decode_labels(payload)}
+            if labels == self.labels:
+                return
+            self.labels = labels
         elif cmd == p.CMD_ROOM:
             room = p.decode_room(payload)
             if room is None:

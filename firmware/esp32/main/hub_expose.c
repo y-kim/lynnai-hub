@@ -12,6 +12,7 @@
 #include "hub_expose.h"
 #include "hub_uplink.h"
 #include "hub_rinnai.h"
+#include "hub_upstream.h"
 #include "hub_plugins.h"
 
 #include "freertos/FreeRTOS.h"
@@ -459,8 +460,9 @@ static bool hub_expose_apply_l(const char *form, char *err, size_t errlen)
 
 static bool hub_expose_apply_devices_l(const char *form)
 {
-    hub_dev_t dev[8];
+    hub_dev_t dev[16];
     int nd = hub_rinnai_snapshot(dev, 8);
+    nd += hub_upstream_snapshot(dev + nd, (int)(sizeof(dev) / sizeof(dev[0])) - nd);  /* 원격(위성) 기기 노출도 중심에서 */
     uint8_t active = hub_uplink_mask();
     for (int i = 0; i < nd; i++) {
         char key[16], v[8], name[24];

@@ -29,6 +29,7 @@
 
 #include "hub_lan.h"
 #include "hub_uplink.h"
+#include "hub_upstream.h"
 
 static const char *TAG = "HUB_LAN";
 
@@ -36,6 +37,7 @@ static const char *TAG = "HUB_LAN";
 #define MAX_CLIENTS  2
 #define MAX_TOKENS   4
 #define TOKEN_LEN    32
+#define LABEL_MAX    24
 #define SSDP_ST      "urn:lynnai-com:device:hub:1"
 
 static char s_id[16];
@@ -115,41 +117,52 @@ static bool token_ok(const char *t)
     return true;
 }
 
-/* 아는 토큰이면 true. 모르는 토큰은 페어링 창(버튼 짧게 → 3분)이 열려 있을 때만 등록 */
-static bool token_accept(const char *t)
+/* 아는 토큰이면 그 칸을 돌려준다. 모르는 토큰은 페어링 창(버튼 짧게 → 3분)이 열려 있을 때만 등록. 거절 = -1 */
+static int token_accept(const char *t)
 {
-    bool ok = false;
+    int slot = -1;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int i = 0; i < MAX_TOKENS; i++) {
         if (s_tokens[i][0] && same_token(s_tokens[i], t)) {
-            ok = true;
+            slot = i;
         }
     }
-    if (!ok && esp_timer_get_time() < s_pair_until_us) {
-        int slot = -1;
+    if (slot < 0 && esp_timer_get_time() < s_pair_until_us) {
+        int sl = -1;
         for (int i = 0; i < MAX_TOKENS; i++) {
             if (!s_tokens[i][0]) {
-                slot = i;
+                sl = i;
                 break;
             }
         }
-        if (slot < 0) {                              /* 꽉 참: 가장 오래된 칸부터 돌아가며 */
-            slot = s_next;
+        if (sl < 0) {                                /* 꽉 참: 가장 오래된 칸부터 돌아가며 */
+            sl = s_next;
             s_next = (s_next + 1) % MAX_TOKENS;
         }
         char old[TOKEN_LEN + 1];
-        strcpy(old, s_tokens[slot]);
-        strcpy(s_tokens[slot], t);
+        strcpy(old, s_tokens[sl]);
+        strcpy(s_tokens[sl], t);
         if (tokens_save() == ESP_OK) {
-            ok = true;
-            ESP_LOGI(TAG, "새 드라이버 등록(칸 %d)", slot);
+            slot = sl;
+            ESP_LOGI(TAG, "새 허브/드라이버 등록(칸 %d)", sl);
         } else {
-            strcpy(s_tokens[slot], old);             /* 저장 못 하면 등록하지 않는다(재부팅 뒤 사라지지 않게) */
-            ESP_LOGE(TAG, "새 드라이버 토큰 저장 실패");
+            strcpy(s_tokens[sl], old);               /* 저장 못 하면 등록하지 않는다(재부팅 뒤 사라지지 않게) */
+            ESP_LOGE(TAG, "새 토큰 저장 실패");
         }
     }
     xSemaphoreGive(s_lock);
-    return ok;
+    return slot;
+}
+
+void hub_lan_token_remove(int slot)
+{
+    if (slot < 0 || slot >= MAX_TOKENS) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_tokens[slot][0] = 0;
+    tokens_save();
+    xSemaphoreGive(s_lock);
 }
 
 void hub_lan_pairing_open(int seconds)
@@ -166,6 +179,31 @@ static void send_line(int fd, const char *line, int n)
     if (send(fd, line, n, MSG_DONTWAIT) != n) {
         shutdown(fd, SHUT_RDWR);                      /* 받는 태스크가 정리한다 */
     }
+}
+
+static int client_add(int fd)                         /* s_clients 빈 칸에 넣는다(= hub_lan_send 가 뿌릴 대상) */
+{
+    int slot = -1;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (s_clients[i] < 0) {
+            s_clients[i] = fd;
+            slot = i;
+            break;
+        }
+    }
+    xSemaphoreGive(s_lock);
+    return slot;
+}
+
+static void client_del(int slot)
+{
+    if (slot < 0) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_clients[slot] = -1;
+    xSemaphoreGive(s_lock);
 }
 
 void hub_lan_send(uint8_t cmd, const uint8_t *data, uint16_t n)
@@ -192,6 +230,26 @@ void hub_lan_send(uint8_t cmd, const uint8_t *data, uint16_t n)
 
 static int hexval(char c) { return isdigit((unsigned char)c) ? c - '0' : (tolower((unsigned char)c) - 'a' + 10); }
 
+typedef struct { int fd; char ip[40]; } conn_arg_t;
+
+/* "<cmd 2hex> <payload hex>" → cmd + 바이트. 성공 시 바이트 수(≥0), 실패 -1 */
+static int lan_parse(const char *line, int *cmd, uint8_t *buf, int cap)
+{
+    if (strlen(line) < 2 || !isxdigit((unsigned char)line[0]) || !isxdigit((unsigned char)line[1])) {
+        return -1;
+    }
+    *cmd = hexval(line[0]) * 16 + hexval(line[1]);
+    const char *hx = line[2] == ' ' ? line + 3 : line + 2;
+    int n = 0;
+    for (; hx[0] && hx[1] && n < cap; hx += 2) {
+        if (!isxdigit((unsigned char)hx[0]) || !isxdigit((unsigned char)hx[1])) {
+            return -1;
+        }
+        buf[n++] = (uint8_t)(hexval(hx[0]) * 16 + hexval(hx[1]));
+    }
+    return n;
+}
+
 static void handle_line(char *line)
 {
     /* "<cmd> <hex>" */
@@ -215,10 +273,15 @@ static void handle_line(char *line)
 
 static void client_task(void *arg)
 {
-    int fd = (int)(intptr_t)arg;
+    conn_arg_t *ca = (conn_arg_t *)arg;
+    int fd = ca->fd;
+    char peer_ip[40];
+    snprintf(peer_ip, sizeof(peer_ip), "%s", ca->ip);
+    free(ca);
+
     char rx[512];
-    int len = 0, slot = -1;
-    bool authed = false, pre = true;                  /* pre = 인증 전 연결 수에 들어가 있음 */
+    int len = 0, slot = -1, gi = -1;
+    bool authed = false, pre = true, consumer = false;   /* consumer = 중심 모드에서 위성이 올려 주는 연결 */
     struct timeval tv = { .tv_sec = 1 };              /* 인증 전엔 1초마다 깨어 5초 기한을 본다 */
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     int64_t t0 = esp_timer_get_time(), last_ping = t0;
@@ -242,39 +305,81 @@ static void client_task(void *arg)
                     nl[-1] = 0;
                 }
                 if (!authed) {
-                    if (!strncmp(rx, "hello ", 6) && token_ok(rx + 6) && token_accept(rx + 6)) {
-                        char ok[32];
-                        int k = snprintf(ok, sizeof(ok), "ok %s\n", s_id);
-                        xSemaphoreTake(s_lock, portMAX_DELAY);
-                        for (int i = 0; i < MAX_CLIENTS; i++) {
-                            if (s_clients[i] < 0) {
-                                slot = i;
-                                break;
+                    /* "hello <토큰> [hub <id> <라벨>]" — 토큰을 첫 공백에서 끊고, 나머지로 위성 여부 판단 */
+                    char gid[16] = "", glabel[LABEL_MAX + 1] = "";
+                    bool is_hub = false, ok_tok = false;
+                    int tokslot = -1;
+                    if (!strncmp(rx, "hello ", 6)) {
+                        char *tp = rx + 6;
+                        char *sp = strchr(tp, ' ');
+                        char *extra = NULL;
+                        if (sp) {
+                            *sp = 0;
+                            extra = sp + 1;
+                        }
+                        if (token_ok(tp)) {
+                            tokslot = token_accept(tp);
+                            ok_tok = tokslot >= 0;
+                        }
+                        if (extra && !strncmp(extra, "hub", 3) && (extra[3] == ' ' || extra[3] == 0)) {
+                            is_hub = true;
+                            char *p = extra + 3;
+                            while (*p == ' ') p++;
+                            char *sp2 = strchr(p, ' ');
+                            if (sp2) {
+                                int idn = (int)(sp2 - p);
+                                if (idn > (int)sizeof(gid) - 1) idn = sizeof(gid) - 1;
+                                memcpy(gid, p, idn);
+                                gid[idn] = 0;
+                                char *lp = sp2 + 1;
+                                while (*lp == ' ') lp++;
+                                snprintf(glabel, sizeof(glabel), "%s", lp);
+                            } else {
+                                snprintf(gid, sizeof(gid), "%s", p);
                             }
                         }
-                        if (slot >= 0) {
-                            send_line(fd, ok, k);                /* 등록 전에 보내 다른 줄과 섞이지 않게 */
-                            s_clients[slot] = fd;
-                        }
-                        xSemaphoreGive(s_lock);
-                        if (slot < 0) {
-                            send_line(fd, "busy\n", 5);
-                            goto out;
-                        }
-                        authed = true;
-                        xSemaphoreTake(s_lock, portMAX_DELAY);
-                        s_preauth--;
-                        pre = false;
-                        xSemaphoreGive(s_lock);
-                        tv.tv_sec = 30;                  /* 이후엔 30초마다 깨어 ping */
-                        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                        ESP_LOGI(TAG, "드라이버 연결됨");
-                        hub_uplink_on_request(HUB_UPLINK_LAN, "refresh", 7);   /* 지금 상태를 곧바로 */
-                    } else {
+                    }
+                    if (!ok_tok) {
                         vTaskDelay(pdMS_TO_TICKS(1000));   /* 토큰 맞히기 늦추기 */
                         send_line(fd, "denied\n", 7);
                         ESP_LOGW(TAG, "토큰 거절(페어링하려면 버튼 짧게)");
                         goto out;
+                    }
+                    consumer = is_hub && hub_upstream_mode() == HUB_UP_HOST;
+                    char ok[32];
+                    int k = snprintf(ok, sizeof(ok), "ok %s\n", s_id);
+                    if (consumer) {
+                        gi = hub_upstream_guest_join(fd, tokslot, gid, glabel, peer_ip);
+                        if (gi < 0) {
+                            send_line(fd, "busy\n", 5);
+                            goto out;
+                        }
+                        send_line(fd, ok, k);
+                    } else {
+                        send_line(fd, ok, k);            /* 등록 전에 보내 다른 줄과 섞이지 않게 */
+                        slot = client_add(fd);
+                        if (slot < 0) {
+                            send_line(fd, "busy\n", 5);
+                            goto out;
+                        }
+                    }
+                    authed = true;
+                    xSemaphoreTake(s_lock, portMAX_DELAY);
+                    s_preauth--;
+                    pre = false;
+                    xSemaphoreGive(s_lock);
+                    tv.tv_sec = 30;                  /* 이후엔 30초마다 깨어 ping */
+                    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                    ESP_LOGI(TAG, "%s", consumer ? "위성 허브 연결됨" : "드라이버 연결됨");
+                    if (!consumer) {
+                        hub_uplink_on_request(HUB_UPLINK_LAN, "refresh", 7);   /* 지금 상태를 곧바로 */
+                    }
+                } else if (consumer) {
+                    int cmd;
+                    uint8_t buf[HUB_BLOB_MAX + 8];
+                    int bn = lan_parse(rx, &cmd, buf, sizeof(buf));
+                    if (bn >= 0) {
+                        hub_upstream_guest_frame(gi, (uint8_t)cmd, buf, bn);
                     }
                 } else {
                     handle_line(rx);
@@ -297,17 +402,20 @@ static void client_task(void *arg)
         }
     }
 out:
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     if (slot >= 0) {
-        s_clients[slot] = -1;
+        client_del(slot);
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     if (pre) {
         s_preauth--;
     }
     xSemaphoreGive(s_lock);
     close(fd);
+    if (gi >= 0) {
+        hub_upstream_guest_leave(gi, fd);
+    }
     if (authed) {
-        ESP_LOGI(TAG, "드라이버 연결 끊김");
+        ESP_LOGI(TAG, "%s", consumer ? "위성 허브 연결 끊김" : "드라이버 연결 끊김");
     }
     vTaskDelete(NULL);
 }
@@ -344,12 +452,147 @@ static void server_task(void *arg)
         }
         int ka = 1;
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
-        if (xTaskCreate(client_task, "hub_lan_c", 4096, (void *)(intptr_t)fd, 4, NULL) != pdPASS) {
+        conn_arg_t *ca = malloc(sizeof(conn_arg_t));
+        if (ca) {
+            ca->fd = fd;
+            snprintf(ca->ip, sizeof(ca->ip), "%s", inet_ntoa(peer.sin_addr));
+        }
+        if (!ca || xTaskCreate(client_task, "hub_lan_c", 4096, ca, 4, NULL) != pdPASS) {
+            free(ca);
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_preauth--;
             xSemaphoreGive(s_lock);
             close(fd);
         }
+    }
+}
+
+/* ---------------------------------------------------------------- 위성 다이얼러(전화 거는 쪽) */
+
+static volatile bool s_guest_kick;
+static volatile bool s_guest_online;
+static char s_guest_status[48] = "꺼짐";
+
+void hub_lan_guest_reconnect(void) { s_guest_kick = true; }
+bool hub_lan_guest_online(void)    { return s_guest_online; }
+const char *hub_lan_guest_status(void) { return s_guest_status; }
+
+static void gstatus(const char *s) { snprintf(s_guest_status, sizeof(s_guest_status), "%s", s); }
+
+static int guest_dial(const char *ip, const char *tok)
+{
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(LAN_PORT) };
+    if (inet_aton(ip, &a.sin_addr) != 1) {
+        gstatus("IP 형식 오류");
+        return -1;
+    }
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        return -1;
+    }
+    struct timeval tv = { .tv_sec = 8 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        gstatus("접속 실패(IP 확인)");
+        close(fd);
+        return -1;
+    }
+    char label[LABEL_MAX + 1];
+    hub_label_get(label, sizeof(label));
+    char hello[160];
+    int k = snprintf(hello, sizeof(hello), "hello %s hub %s %s\n", tok, s_id, label);
+    if (send(fd, hello, k, 0) != k) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void guest_task(void *arg)
+{
+    char rx[512];
+    for (;;) {
+        char ip[40], tok[40];
+        if (!hub_upstream_guest_target(ip, sizeof(ip), tok, sizeof(tok))) {
+            s_guest_online = false;
+            gstatus(hub_upstream_mode() == HUB_UP_GUEST ? "중심 허브 IP 를 넣으세요" : "꺼짐");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        s_guest_kick = false;
+        gstatus("연결 중…");
+        int fd = guest_dial(ip, tok);
+        if (fd < 0) {
+            s_guest_online = false;
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        int len = 0, slot = -1;
+        bool authed = false;
+        int64_t last_rx = esp_timer_get_time();
+        for (;;) {
+            if (s_guest_kick || hub_upstream_mode() != HUB_UP_GUEST) {
+                break;
+            }
+            int r = recv(fd, rx + len, sizeof(rx) - 1 - len, 0);
+            if (r == 0) {
+                break;
+            }
+            if (r < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (esp_timer_get_time() - last_rx > 90LL * 1000000) {   /* 중심 ping 은 30초 — 90초면 끊긴 것 */
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+            last_rx = esp_timer_get_time();
+            len += r;
+            rx[len] = 0;
+            char *nl;
+            while ((nl = strchr(rx, '\n'))) {
+                *nl = 0;
+                if (nl > rx && nl[-1] == '\r') {
+                    nl[-1] = 0;
+                }
+                if (!authed) {
+                    if (!strncmp(rx, "ok ", 3)) {
+                        authed = true;
+                        slot = client_add(fd);               /* 이제 hub_lan_send 가 우리 STATE/LINKS 를 중심으로 보냄 */
+                        s_guest_online = true;
+                        gstatus("연결됨");
+                        ESP_LOGI(TAG, "중심 허브 연결됨 (%s)", ip);
+                        hub_uplink_on_request(HUB_UPLINK_LAN, "refresh", 7);   /* 지금 상태를 바로 올린다 */
+                    } else if (!strncmp(rx, "denied", 6)) {
+                        gstatus("거절됨 — 중심에서 '연결 허용'을 누르세요");
+                        goto gdrop;
+                    } else if (!strncmp(rx, "busy", 4)) {
+                        gstatus("중심 허브 연결 꽉 참");
+                        goto gdrop;
+                    }
+                } else if (strcmp(rx, "ping")) {             /* ping 은 무시, 나머지는 명령 */
+                    handle_line(rx);                         /* 중심이 보낸 REQUEST → 우리 버스에 적용 */
+                }
+                len -= (nl + 1 - rx);
+                memmove(rx, nl + 1, len + 1);
+            }
+            if (len >= (int)sizeof(rx) - 1) {
+                len = 0;
+            }
+        }
+    gdrop:
+        if (slot >= 0) {
+            client_del(slot);
+        }
+        close(fd);
+        s_guest_online = false;
+        if (authed) {
+            gstatus("끊김 — 다시 시도");
+            ESP_LOGW(TAG, "중심 허브 연결 끊김");
+        }
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }
 
@@ -435,5 +678,6 @@ void hub_lan_start(const char *device_id)
     snprintf(s_id, sizeof(s_id), "%s", device_id);
     tokens_load();
     xTaskCreate(server_task, "hub_lan", 3072, NULL, 4, NULL);
+    xTaskCreate(guest_task, "hub_lan_g", 4096, NULL, 4, NULL);  /* 위성 모드일 때 중심 허브로 전화를 건다 */
     xTaskCreate(ssdp_task, "hub_ssdp", 4096, NULL, 3, NULL);   /* 3072 일 때 스택이 444B 밖에 안 남았다(실측) */
 }

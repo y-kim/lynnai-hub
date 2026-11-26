@@ -20,6 +20,7 @@ local CMD_MODE = 0x0b
 local CMD_BOILCFG = 0x0c   -- 보일러 설정: [온수 예열 자동 끄기(분, 0 = 무제한)]. 바꾸기는 "hub preoff=<분>"
 local CMD_ALIVE = 0x0a
 local CMD_MODELS = 0x0d   -- 모델코드: ([종류][MAC끝3][모델코드 1바이트]) * n — 온수·난방수 온도 표를 고른다(허브 v0.8~)
+local CMD_LABELS = 0x0e   -- 허브 라벨: ([종류][MAC끝3][len][UTF-8 라벨]) * n — 그 기기를 품은 허브 라벨("1층"/"2층"). 방 이름 앞에 붙인다(허브 v0.9~)
 local KIND_F06, KIND_F09 = 6, 9
 
 -- 한 f09 안의 방 슬롯(7바이트, 슬롯 s 는 byte[7s]). 상태 0x02=켜짐, 0x40=난방 중. 명령 선택자 a0=슬롯+1.
@@ -697,7 +698,14 @@ local function create_child(parent, key, label, profile, model)
 end
 
 local function create_boiler(parent, mac) create_child(parent, bkey(mac), "보일러", "lynnai-boiler", "boiler") end
-local function create_zone(parent, mac, id) create_child(parent, zkey(mac, id), ZONES[id].label, "lynnai-zone", "zone") end
+-- 방 이름: 그 서머스탯을 품은 허브 라벨(층)이 있으면 앞에 붙인다("1층 거실")
+local function zone_label(parent, mac, id)
+  local s = hub_state(parent)
+  local lbl = s.labels and s.labels[mac]
+  if lbl and lbl ~= "" then return lbl .. " " .. ZONES[id].label end
+  return ZONES[id].label
+end
+local function create_zone(parent, mac, id) create_child(parent, zkey(mac, id), zone_label(parent, mac, id), "lynnai-zone", "zone") end
 function create_vboiler(parent, mac) create_child(parent, vbkey(mac), "보일러", "lynnai-boiler", "vboiler") end
 
 function delete_child(child)
@@ -872,6 +880,27 @@ local function on_models(parent, b)
     end
   end
   if changed then refresh_all(parent) end
+end
+
+-- 허브 라벨: ([종류][MAC끝3][len][UTF-8 라벨]) * n — 그 기기를 품은 허브 라벨(층). 방 이름 앞에 붙인다.
+local function on_labels(parent, b)
+  local s = hub_state(parent)
+  s.labels = s.labels or {}
+  local changed = false
+  local i = 1
+  while i + 4 <= #b do
+    local kind = b:byte(i)
+    local mac = string.format("%02x%02x%02x", b:byte(i + 1), b:byte(i + 2), b:byte(i + 3))
+    local ln = b:byte(i + 4)
+    if i + 5 + ln - 1 > #b then break end
+    local lbl = ln > 0 and b:sub(i + 5, i + 5 + ln - 1) or ""
+    if kind == KIND_F09 and s.labels[mac] ~= lbl then
+      s.labels[mac] = lbl
+      changed = true
+    end
+    i = i + 5 + ln
+  end
+  if changed then refresh_all(parent) end   -- 라벨은 자식기기 생성 때 이름에 쓰인다(생성 뒤 바뀜은 ST 라벨 캐시로 재생성 전엔 안 바뀔 수 있음)
 end
 
 local function on_links(parent, b)
@@ -1618,7 +1647,8 @@ end
 
 local HANDLERS = { [CMD_ALIVE] = on_alive, [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
   [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
-  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode, [CMD_BOILCFG] = on_boilcfg, [CMD_MODELS] = on_models }
+  [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode, [CMD_BOILCFG] = on_boilcfg, [CMD_MODELS] = on_models,
+  [CMD_LABELS] = on_labels }
 
 function M.info_changed(_, device)
   if not is_child(device) then return end

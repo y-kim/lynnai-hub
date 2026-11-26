@@ -13,6 +13,7 @@
 #include "hub_pairs.h"
 #include "hub_rinnai.h"
 #include "hub_expose.h"
+#include "hub_upstream.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -298,27 +299,35 @@ static void boiler_label(const char *mac, char *out, size_t cap)
 static void hub_pairs_render_l(char *o, size_t cap)
 {
     hub_expose_prepare();                            /* 옛 노출 설정이 남아 있으면 먼저 기기별로 옮김 */
-    hub_dev_t dev[8];
-    int nd = hub_rinnai_snapshot(dev, 8);
+    hub_dev_t dev[16];
+    int nd = hub_rinnai_snapshot(dev, 8);                 /* 로컬(이 허브에 직접 붙은) 기기 */
+    int ntot = nd + hub_upstream_snapshot(dev + nd, (int)(sizeof(dev) / sizeof(dev[0])) - nd);  /* + 위성 허브 원격 기기 */
     char f06s[8][7];
     int n6 = 0;
-    for (int i = 0; i < nd; i++) {
+    for (int i = 0; i < nd; i++) {                         /* 보일러 조절기는 로컬만(원격은 방만 올라옴) */
         if (dev[i].kind == HUB_KIND_F06 && n6 < 8) {
             mac_hex(dev[i].mac3, f06s[n6++]);
         }
     }
     cat(o, cap, "<h2>연결된 기기</h2><div class=card><p class=muted>"
-                "허브에 직접 붙어 있는 린나이 기기입니다. 이름(✏️)을 지으면 여기와 연결 선택에 그 이름으로 나오고, "
-                "이름을 비워 저장하면 기기를 삭제합니다(SmartThings 기기 이름은 ST 앱에서 바꿉니다). "
+                "이 허브와 위성 허브에 붙은 린나이 기기입니다. 보일러 연결·노출·이름은 모두 <b>여기(중심 허브)</b>에서 정합니다. "
+                "이름(✏️)을 지으면 여기와 연결 선택에 그 이름으로 나오고(SmartThings 기기 이름은 ST 앱에서 바꿉니다), "
                 "각 기기·방 옆 체크는 그 기기를 어느 플랫폼에 보일지입니다.</p>");
-    if (nd == 0) {
-        cat(o, cap, "<p class=muted>아직 연결된 기기가 없습니다.</p></div>");
-        return;
-    }
-    cat(o, cap, "<form method=post action=/admin/devices>");
     char t[512], ea[ALIAS_LEN * 6];
+    if (ntot == 0) {
+        cat(o, cap, "<p class=muted>아직 연결된 기기가 없습니다.</p>");
+    } else {
+    cat(o, cap, "<form method=post action=/admin/devices>");
     bool mode_shown = false;
-    for (int i = 0; i < nd; i++) {
+    for (int i = 0; i < ntot; i++) {
+        bool is_remote = i >= nd;
+        char lblp[80] = "";                               /* 원격이면 머리말에 층 라벨(" · 1층") */
+        if (is_remote) {
+            char flbl[25], elbl[64];
+            if (hub_upstream_label_of(dev[i].kind, dev[i].mac3, flbl, sizeof(flbl)) > 0) {
+                snprintf(lblp, sizeof(lblp), " · %s", esc(flbl, elbl, sizeof(elbl)));
+            }
+        }
         char mac[7];
         mac_hex(dev[i].mac3, mac);
         const char *al = alias_of(mac);
@@ -334,9 +343,9 @@ static void hub_pairs_render_l(char *o, size_t cap)
             snprintf(meta, sizeof(meta), " · 방 %d개", rooms);
         }
         /* 기기 줄: 종류·MAC·상태 + 이름 칩(팝업, 비우고 저장 = 기기 삭제) */
-        snprintf(t, sizeof(t), "<div class=row><span><b>%s</b> · %s%s · %s</span><span>"
+        snprintf(t, sizeof(t), "<div class=row><span><b>%s</b>%s · %s%s · %s</span><span>"
                  "<button type=button class=ic title=\"이름 바꾸기\" onclick=\"editAlias('%s')\">✏️ <span id=al_%s>",
-                 typ, mac, meta, dev[i].linked ? "연결됨" : "끊김", mac, mac);
+                 typ, lblp, mac, meta, dev[i].linked ? "연결됨" : "끊김", mac, mac);
         cat(o, cap, t);
         cat(o, cap, al ? ea : "이름 없음");
         snprintf(t, sizeof(t), "</span></button><input name=a_%s value=\"", mac);
@@ -407,7 +416,9 @@ static void hub_pairs_render_l(char *o, size_t cap)
         }
         hub_expose_render_dev_marker(o, cap, dev[i].kind, dev[i].mac3, subs);
     }
-    cat(o, cap, "<button class=sv>저장</button></form></div>");
+    cat(o, cap, "<button class=sv>저장</button></form>");
+    }
+    cat(o, cap, "</div>");
 }
 
 /* ---------------------------------------------------------------- 적용 */
@@ -416,8 +427,9 @@ static bool hex6(const char *s) { for (int i = 0; i < 6; i++) if (!isxdigit((uns
 
 static bool hub_pairs_apply_l(const char *form, char *msg, size_t msglen)
 {
-    hub_dev_t dev[8];
+    hub_dev_t dev[16];
     int nd = hub_rinnai_snapshot(dev, 8);
+    nd += hub_upstream_snapshot(dev + nd, (int)(sizeof(dev) / sizeof(dev[0])) - nd);  /* 원격(위성) 기기도 중심에서 이름·보일러연결을 정한다 */
     for (int i = 0; i < nd; i++) {
         char mac[7], key[12], val[ALIAS_LEN * 3 + 1];   /* URL 인코딩(%XX)은 3배 — 작으면 한글 별명이 잘림 오류로 무시됨 */
         mac_hex(dev[i].mac3, mac);
