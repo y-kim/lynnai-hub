@@ -27,6 +27,7 @@
 #include "hub_uplink.h"
 #include "hub_proxy.h"
 #include "hub_sensors.h"
+#include "hub_plugins.h"
 #include "hub_tariff.h"
 
 static const char *TAG = "HUB_TARIFF";
@@ -183,6 +184,9 @@ static uint32_t won_of(double m3)
 
 static void relay_current(void)
 {
+    if (!hub_plugin_enabled("gas")) {                /* 가스 계량이 없으면 요금도 끈다(드라이버에 0x09 안 보냄) */
+        return;
+    }
     uint32_t p[5];                                   /* 다섯째 = 검침일(1~31, 32 = 말일). 옛 드라이버는 앞의 넷만 읽는다 */
     eff_e6(&p[0], &p[1], &p[2], &p[3]);
     p[4] = s_billday;
