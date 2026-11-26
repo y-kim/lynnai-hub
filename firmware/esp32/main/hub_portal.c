@@ -34,6 +34,7 @@
 #include "esp_app_desc.h"
 #include "hub_expose.h"
 #include "hub_uplink.h"
+#include "hub_upstream.h"
 #include "hub_rinnai.h"
 #include "hub_store.h"
 #include "nvs.h"
@@ -512,7 +513,10 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_devs_render(b, cap); FLUSH();      /* 등록 대기 */
     hub_expose_render_types(b, cap); FLUSH();  /* 노출 설정 */
     hub_plugins_render(b, cap); FLUSH();
-    hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(자동/수동 + 월별 그래프) */
+    if (hub_plugin_enabled("gas")) {       /* 가스 계량이 없으면 요금 카드도 숨긴다 */
+        hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(자동/수동 + 월별 그래프) */
+    }
+    hub_upstream_render(b, cap); FLUSH();  /* 멀티 허브(중심/위성) + 이 허브 라벨 — 플러그인 아래로 */
     hub_crypt_render(b, cap); FLUSH();     /* 저장 데이터 암호화 */
     hub_ota_render(b, cap); FLUSH();       /* 시스템: 펌웨어 OTA · 재부팅 · Zigbee 상태 */
     hub_dbgkey_render(b, cap); FLUSH();    /* 원격 디버그 키 */
@@ -523,6 +527,29 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     strlcat(b, "<form method=post action=/admin/api><button name=op value=new>토큰 새로 만들기</button>"
                "<button name=op value=off class=ghost>토큰 끄기</button></form>"
                "<p class=muted>새로 만들면 이전 토큰은 바로 무효. 토큰은 만들 때 한 번만 보여 줍니다.</p></div>", cap);
+    strlcat(b, "<h2>Wi-Fi 설정</h2><div class=card>", cap);
+    strlcat(b, "<p class=warn>집 Wi-Fi 를 잘못 바꾸면 허브가 인터넷·LAN 에서 빠집니다. 그럴 땐 허브 AP(<b>", cap);
+    cat_esc(b, cap, s_st->ap_ssid);
+    strlcat(b, "</b>)에 다시 붙어 이 화면에서 고치세요. 바꾸면 Wi-Fi 가 잠깐 끊겼다 다시 붙습니다.</p>", cap);
+    strlcat(b, "<form method=post action=/admin/wifi autocomplete=off>"
+               "<label>집 Wi-Fi 이름 (SSID)</label><input name=sta_ssid maxlength=32 autocapitalize=off value=\"", cap);
+    cat_esc(b, cap, s_st->sta_ssid);
+    strlcat(b, "\" required>"
+               "<label>집 Wi-Fi 암호</label><input class=wpw type=password name=sta_pass maxlength=63 "
+               "autocomplete=off data-1p-ignore data-lpignore=true data-bwignore data-form-type=other value=\"", cap);
+    cat_esc(b, cap, s_st->sta_pass);
+    strlcat(b, "\">"
+               "<label>허브 네트워크 이름</label><input name=ap_ssid maxlength=32 autocapitalize=off value=\"", cap);
+    cat_esc(b, cap, s_st->ap_ssid);
+    strlcat(b, "\" required>"
+               "<label>허브 Wi-Fi 암호 (8자 이상)</label><input class=wpw type=password name=ap_pass minlength=8 maxlength=63 "
+               "autocomplete=off data-1p-ignore data-lpignore=true data-bwignore data-form-type=other value=\"", cap);
+    cat_esc(b, cap, s_st->ap_pass);
+    strlcat(b, "\" required>"
+               "<label class=chk><input type=checkbox onclick=\"var c=this.checked;document.querySelectorAll('.wpw').forEach(function(e){e.type=c?'text':'password'})\"> 암호 보기</label>"
+               "<button>Wi-Fi 바꾸기</button></form>"
+               "<p class=muted>집 Wi-Fi 이름·암호와 허브 자체 AP 이름·암호입니다. 암호는 '암호 보기'로 확인할 수 있습니다.</p></div>", cap);
+    FLUSH();
     strlcat(b, "<h2>관리자 암호</h2><div class=card><form method=post action=/admin/password autocomplete=off>"
                "<label>현재 암호</label><input type=password name=cur autocomplete=current-password required>"
                "<label>새 암호 (8자 이상)</label><input type=password name=pw minlength=8 maxlength=64 "
@@ -856,8 +883,34 @@ static esp_err_t transport_post(httpd_req_t *req)
     if (!authed(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
-    char body[128], msg[128] = "";
-    bool ok = read_body(req, body, sizeof(body)) >= 0 && hub_uplink_apply(body, msg, sizeof(msg));
+    char body[128] = "", msg[128] = "";
+    /* 둘 다(Zigbee·LAN) 끄면 체크박스가 하나도 안 실려 본문이 빈다 — 그건 '모든 통로 끔'(mask 0)으로 받는다.
+     * (위성 허브는 ST 통로가 필요 없다 — 멀티허브 LAN 은 통로와 무관하게 동작) */
+    bool bad = read_body(req, body, sizeof(body)) < 0 && req->content_len != 0;
+    bool ok = !bad && hub_uplink_apply(body, msg, sizeof(msg));
+    return admin_page(req, ok ? msg : "잘못된 요청", ok);
+}
+
+static esp_err_t upstream_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    char body[256], msg[128] = "";
+    if (read_body(req, body, sizeof(body)) < 0) {
+        return admin_page(req, "잘못된 요청", false);
+    }
+    /* 허용/삭제/연결은 data-toast 폼 → 관리 페이지 통째로가 아니라 짧은 글자만 돌려준다(JS 가 토스트로 띄움) */
+    bool toast = strstr(body, "allowpair=") || strstr(body, "del=") || strstr(body, "conn=");
+    bool ok = hub_upstream_apply(body, msg, sizeof(msg));
+    if (toast) {
+        if (!ok) {
+            httpd_resp_set_status(req, "400 Bad Request");
+        }
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_sendstr(req, msg[0] ? msg : (ok ? "완료" : "실패"));
+    }
     return admin_page(req, ok ? msg : "잘못된 요청", ok);
 }
 
@@ -930,6 +983,52 @@ static esp_err_t password_post(httpd_req_t *req)
         s_sess[0] = 0;
         httpd_resp_set_hdr(req, "Set-Cookie", "lynnai_s=; Path=/; Max-Age=0");
         return login_page(req, "관리자 암호를 바꿨습니다. 새 암호로 로그인하세요.");
+    }
+    return admin_page(req, msg, false);
+}
+
+/* Wi-Fi 바꾸기: 응답을 먼저 보내고, 2초 뒤에 재적용한다(응답이 끊기지 않게). AP 는 유지되니 집 Wi-Fi 가 틀려도 허브 AP 로 복구. */
+static void wifi_apply_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    hub_wifi_apply(s_st);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t wifi_post(httpd_req_t *req)
+{
+    log_req(req);
+    if (!authed(req)) {
+        return login_page(req, "로그인이 필요합니다");
+    }
+    /* 암호 바꾸기와 같은 이유로 버퍼는 힙에(스택 넘침 방지) */
+    enum { SB = HUB_SSID_MAX * 3 + 1, PB = HUB_PASS_MAX * 3 + 1, BODY = 720 };
+    char *m = calloc(1, BODY + 2 * SB + 2 * PB), err[96] = "";
+    if (!m) {
+        return admin_page(req, "메모리가 부족합니다 — 잠시 뒤 다시 하세요", false);
+    }
+    char *body = m, *ss = m + BODY, *sp = ss + SB, *as = sp + PB, *ap = as + SB;
+    const char *msg = NULL;
+    bool ok = false;
+    if (read_body(req, body, BODY) < 0) {
+        msg = "잘못된 요청";
+    } else {
+        form_get(body, "sta_ssid", ss, SB);
+        form_get(body, "sta_pass", sp, PB);
+        form_get(body, "ap_ssid", as, SB);
+        form_get(body, "ap_pass", ap, PB);
+        if (hub_state_set_wifi(s_st, ss, sp, as, ap, err, sizeof(err)) != ESP_OK) {
+            msg = err;
+        } else {
+            ok = true;
+        }
+    }
+    memset(m, 0, BODY + 2 * SB + 2 * PB);
+    free(m);
+    ESP_LOGI(TAG, "Wi-Fi 바꾸기 %s", ok ? "성공" : "거절");
+    if (ok) {
+        xTaskCreate(wifi_apply_task, "apply_wifi2", 3072, NULL, 5, NULL);
+        return admin_page(req, "Wi-Fi 설정을 바꿨습니다 — 몇 초 뒤 새 설정으로 다시 붙습니다. 끊기면 새 네트워크/주소로 접속하세요.", true);
     }
     return admin_page(req, msg, false);
 }
@@ -1136,6 +1235,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     const httpd_uri_t plug = { .uri = "/admin/plugin", .method = HTTP_POST, .handler = plugin_post };
     const httpd_uri_t pwch = { .uri = "/admin/password", .method = HTTP_POST, .handler = password_post };
     httpd_register_uri_handler(srv, &pwch);
+    const httpd_uri_t wfi = { .uri = "/admin/wifi", .method = HTTP_POST, .handler = wifi_post };
+    httpd_register_uri_handler(srv, &wfi);
     const httpd_uri_t gas = { .uri = "/admin/plugin-action", .method = HTTP_POST, .handler = plugin_action_post };
     const httpd_uri_t expo = { .uri = "/admin/expose", .method = HTTP_POST, .handler = expose_post };
     const httpd_uri_t prs = { .uri = "/admin/devices", .method = HTTP_POST, .handler = pairs_post };
@@ -1153,6 +1254,8 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &apit);
     const httpd_uri_t trns = { .uri = "/admin/transport", .method = HTTP_POST, .handler = transport_post };
     httpd_register_uri_handler(srv, &trns);
+    const httpd_uri_t upst = { .uri = "/admin/upstream", .method = HTTP_POST, .handler = upstream_post };
+    httpd_register_uri_handler(srv, &upst);
     const httpd_uri_t mode = { .uri = "/admin/mode", .method = HTTP_POST, .handler = mode_post };
     httpd_register_uri_handler(srv, &mode);
     const httpd_uri_t boil = { .uri = "/admin/boiler", .method = HTTP_POST, .handler = boiler_post };
