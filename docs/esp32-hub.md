@@ -97,7 +97,10 @@ python -m esptool --chip esp32c6 -p COM3 write_flash 0x20000 lynnai-hub-esp32c6-
 파티션 표가 지금과 다른 옛 펌웨어에서 올리는 허브는 파티션 표(`0x8000`, `-partitions.bin`)도 한 번 같이 씁니다
 (설정과 Zigbee 가입 정보는 유지됩니다).
 
-포트(`COM3`)는 2.1 에서 찾은 이름으로 바꿉니다. 쓰기가 끝나면 보드가 저절로 다시 켜집니다.
+포트(`COM3`)는 2.1 에서 찾은 이름으로 바꿉니다. 쓰기가 끝나면 `Hash of data verified.`(검증 통과) 뒤에
+`Leaving... Hard resetting via RTS pin...` 이 나옵니다. **이 `Hard resetting...` 줄이 완료 신호**입니다 —
+esptool 은 여기서 할 일을 마치고 빠져나오며 **부팅 로그는 보여주지 않으니**, 그 뒤로 화면이 조용해도 정상입니다.
+보드는 저절로 다시 켜집니다.
 
 ### 2.3 브라우저로 쓰기 (설치 없이)
 
@@ -105,7 +108,11 @@ python -m esptool --chip esp32c6 -p COM3 write_flash 0x20000 lynnai-hub-esp32c6-
 2. **Connect** → 보드 포트를 고릅니다.
 3. Flash Address 에 `0x0`(처음 설치) 또는 `0x20000`(업데이트)을 넣고 해당 파일을 고른 뒤 **Program**.
    OTA 를 한 적이 있는 허브의 업데이트는 관리 화면이나 2.2 의 방법으로 합니다(부팅 칸 때문).
-4. 끝나면 보드의 RESET 버튼을 누르거나 USB 를 뺐다 꽂습니다.
+4. 로그에 `Wrote … bytes` → `Hash of data verified.`(또는 `Hard resetting...`)가 나오면 **완료**입니다.
+   그 뒤 보드의 RESET 버튼을 누르거나 USB 를 뺐다 꽂습니다.
+   (쓰다가 `Serial data stream stopped: Possible serial noise or corruption` 로 끊기면 이미지 문제가 아니라
+   링크 끊김입니다 — **페이지 새로고침**으로 포트를 놓아준 뒤 Connect 부터 다시 하거나, Baudrate 를 `115200` 으로
+   낮춰 재시도합니다. 포트는 한 번에 한 곳만 열 수 있으니 다른 탭·시리얼 모니터·CLI 는 닫습니다.)
 
 처음 설치한 허브는 첫 부팅 때 기기 접속용 인증서를 만듭니다(몇 초). 그 뒤 [3장](#3-첫-설정)으로 갑니다.
 
