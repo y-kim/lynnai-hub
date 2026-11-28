@@ -39,20 +39,9 @@ components:
     categories:
       - name: GasMeter
 preferences:
-      default: ""
-  - name: gasRegion
-    title: 구역 코드
-    description: 자동 조회용 구역(예 SD07=경기 중부1 코원). 목록 /api/regions
-    required: false
-    preferenceType: string
-    definition:
-      stringType: text
-      minLength: 0
-      maxLength: 8
-      default: SD07
   - name: gasVcf
     title: 온압보정계수 (수동)
-    description: 자동 조회 꺼짐·실패 시 사용. 청구서 '보정계수'
+    description: 허브가 요금 값을 알려 주지 않을 때(가스 요금 기능이 꺼진 허브) 사용. 청구서 '보정계수'
     required: false
     preferenceType: number
     definition:
@@ -61,7 +50,7 @@ preferences:
       default: 0.9939
   - name: gasHeat
     title: 열량계수 (수동, MJ/N㎥)
-    description: 자동 조회 꺼짐·실패 시 사용. 청구서 '열량계수'
+    description: 허브가 요금 값을 알려 주지 않을 때(가스 요금 기능이 꺼진 허브) 사용. 청구서 '열량계수'
     required: false
     preferenceType: number
     definition:
@@ -70,7 +59,7 @@ preferences:
       default: 42.576
   - name: gasRate
     title: 단가 (수동, 원/MJ)
-    description: 자동 조회 꺼짐·실패 시 사용. 주택난방 단가(부가세 별도)
+    description: 허브가 요금 값을 알려 주지 않을 때(가스 요금 기능이 꺼진 허브) 사용. 주택난방 단가(부가세 별도)
     required: false
     preferenceType: number
     definition:
