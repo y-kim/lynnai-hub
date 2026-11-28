@@ -539,6 +539,11 @@ static bool src_total(int src, const uint8_t *want, uint32_t *l, uint8_t mac3[3]
     return false;
 }
 
+/* 직전에 본 누계(기준·보일러 MAC 과 함께) — 누계 감소 판정용, s_lock 아래에서만 */
+static bool s_last_ok;
+static uint8_t s_last_src, s_last_mac[3];
+static uint32_t s_last_l;
+
 static void months_update(void)
 {
     long now = time(NULL);
@@ -561,7 +566,14 @@ static void months_update(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool dirty = false;
     tmon_t *cur = s_mon_n ? &s_mon[s_mon_n - 1] : NULL;
-    bool same = cur && cur->src == src && !memcmp(cur->mac3, mac3, 3) && cur_l >= cur->start_l;
+    /* 누계가 줄었나는 기간 시작값이 아니라 '직전에 본 값'과 비교한다: 100→106→103 이면 이미 센 6 ㎥ 를 두고
+     * 103 부터 다시 센다(시작값과만 비교하면 103-100=3 으로 줄어든다). 직전 값은 RAM 에만 — 재부팅 직후는 시작값으로 */
+    bool dropped = s_last_ok && s_last_src == src && !memcmp(s_last_mac, mac3, 3) && cur_l < s_last_l;
+    s_last_ok = true;
+    s_last_src = (uint8_t)src;
+    memcpy(s_last_mac, mac3, 3);
+    s_last_l = cur_l;
+    bool same = cur && cur->src == src && !memcmp(cur->mac3, mac3, 3) && cur_l >= cur->start_l && !dropped;
     if (!cur || cur->ym != key) {
         if (cur) {                        /* 이전 기간 끝 → 마감 대기(final=0). 기준이 바뀌었으면 마지막으로 센 값 그대로 */
             if (same) cur->use_l = cur->carry_l + (cur_l - cur->start_l);
@@ -779,9 +791,14 @@ bool hub_tariff_period(uint32_t *use_l, uint32_t *won, int *src)
 {
     if (!s_lock) return false;
     months_update();
+    long now = time(NULL);
+    if (!CLOCK_OK(now)) return false;               /* 시계 전엔 '이번 기간'이 언제인지 모른다 */
+    uint16_t key = period_key(now);
     bool ok = false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (s_mon_n && !s_mon[s_mon_n - 1].closed) {
+    /* 마지막 기록이 지금 기간 것일 때만. 기간이 바뀌었는데 셀 기준이 없어(보일러·계량기 모두 없음) 새 줄이 안 생겼으면
+     * 마지막 줄은 지난 기간 값이다 — 그걸 '이번달'로 보내지 않고 모름으로 */
+    if (s_mon_n && !s_mon[s_mon_n - 1].closed && s_mon[s_mon_n - 1].ym == key) {
         *use_l = s_mon[s_mon_n - 1].use_l;
         *won = s_mon[s_mon_n - 1].won;
         if (src) *src = s_mon[s_mon_n - 1].src;
