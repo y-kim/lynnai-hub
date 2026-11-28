@@ -42,8 +42,31 @@ import urllib.request
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DB = os.environ.get("HUB_DB", os.path.join(HERE, "data", "hub.db"))
+# 웹 로그인·설정 파일은 DB 파일과 같은 폴더에 둔다 — Docker 에선 그 폴더(/data)가 볼륨이라 컨테이너를 바꿔도 남는다
+DATA_DIR = os.path.dirname(os.path.abspath(DB))
+LEGACY_DIR = os.path.join(HERE, "data")          # 예전 기본 자리(/app/data) — 있으면 한 번 옮겨 온다
+
+
+def _data_file(env, name):
+    path = os.environ.get(env) or os.path.join(DATA_DIR, name)
+    old = os.path.join(LEGACY_DIR, name)
+    if not os.environ.get(env) and old != path and os.path.exists(old) and not os.path.exists(path):
+        try:
+            import shutil
+            os.makedirs(DATA_DIR, exist_ok=True)
+            shutil.copy2(old, path)
+            os.chmod(path, 0o600)
+            os.remove(old)
+            print(f"{name}: {LEGACY_DIR} → {DATA_DIR} 로 옮김", flush=True)
+        except OSError as e:
+            print(f"{name} 옮기기 실패({e}) — 예전 자리 것을 씁니다", flush=True)
+            return old
+    return path
+
+
 # 웹 화면(설정 탭)에서 바꾼 값. 있으면 환경변수보다 먼저 쓴다. DB 주소·토큰이 들어 있어 0600
-SETTINGS_FILE = os.environ.get("HUB_WEB_SETTINGS", os.path.join(HERE, "data", "hubweb-settings.json"))
+SETTINGS_FILE = _data_file("HUB_WEB_SETTINGS", "hubweb-settings.json")
 
 
 def settings_load():
@@ -74,13 +97,12 @@ HUB_URL = str(_pick("hub_url", "HUB_URL", "")).strip().rstrip("/")
 HUB_TOKEN = str(_pick("hub_token", "HUB_TOKEN", "")).strip()
 POLL_SEC = int(_pick("poll_sec", "POLL_SEC", 60))
 EVENT_SEC = int(_pick("event_sec", "EVENT_SEC", 30))
-DB = os.environ.get("HUB_DB", os.path.join(HERE, "data", "hub.db"))
 DB_URL = str(_pick("db_url", "HUB_DB_URL", "")).strip()     # 웹 설정의 "" 는 일부러 SQLite 를 고른 것
 WEB_PORT = int(os.environ.get("WEB_PORT", "0") or 0)   # 로그 브라우저(읽기 전용). 0 이면 안 띄움
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lynnai_hub_web.html")
 # 로그 브라우저 로그인 정보(아이디·암호 해시·세션 서명 키). 없으면 처음 들어온 사람이 만든다.
 # 잊으면 이 파일을 지우면 된다 → 다음 접속에서 다시 만들기 화면
-WEB_AUTH = os.environ.get("HUB_WEB_AUTH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "hubweb-auth.json"))
+WEB_AUTH = _data_file("HUB_WEB_AUTH", "hubweb-auth.json")
 
 # 와이파이 해제 사유(IEEE 802.11 reason) 중 자주 보는 것
 REASON = {1: "unspecified", 2: "auth_expire", 3: "기기가 떠남", 4: "무활동", 8: "기기가 떠남(assoc)",

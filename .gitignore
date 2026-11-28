@@ -14,6 +14,8 @@ venv/
 mqtt.json
 # NAS 허브 운영 데이터(개인키·LAN 토큰·기기 MAC/IP·부트스트랩 캐시)
 server/lynnai-nas/data/
+# 허브 기록기를 저장소 안에서 돌릴 때의 기록·로그인 정보·웹 설정(토큰·DB 암호·세션 서명 키)
+server/lynnai-hub-watch/data/
 secrets.*
 
 # OS / editor

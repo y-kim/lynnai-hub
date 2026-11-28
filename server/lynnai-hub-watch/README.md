@@ -21,16 +21,17 @@ SQLite 로 쓰면 표준 라이브러리만 쓰므로 파이썬 3.8+ 어디서�
 데이터는 `GET /api/log/{meta,rooms,boiler,events,hub}?from=&to=`(밀리초).
 
 **로그인:** 처음 들어오면 아이디·암호(8자 이상)를 만드는 화면이 나오고, 그 뒤로는 그 아이디로 로그인해야 화면·API 가 열린다
-(로그인 안 한 API 요청은 401). 정보는 `data/hubweb-auth.json`(0600, 환경변수 `HUB_WEB_AUTH` 로 바꿀 수 있음)에
+(로그인 안 한 API 요청은 401). 정보는 DB 파일과 같은 폴더의 `hubweb-auth.json`(기본 `data/`, Docker 예제는 볼륨 `/data` — 0600, 환경변수 `HUB_WEB_AUTH` 로 바꿀 수 있음)에
 암호 해시(PBKDF2-SHA256 30만 번)와 세션 서명 키만 둔다. 세션은 30일짜리 서명 쿠키(HttpOnly·SameSite=Strict),
 한 주소에서 15분에 5번 틀리면 15분 막는다. **아이디·암호를 잊으면 그 파일을 지운다** → 다음 접속에서 다시 만들기(모든 세션도 끝남).
 평문 HTTP 라 암호가 그대로 오가니 여전히 **LAN 안에서만** 연다.
 
 **설정 탭:** 로그인한 뒤 '설정' 탭에서 읽을 허브 주소·API 토큰·읽기 주기와 기록 DB(SQLite 파일 / PostgreSQL 호스트·포트·DB·사용자·암호·추가 옵션)를
 바꿀 수 있다. '연결 시험'은 허브 `/api/v1/state` 와 DB 연결(있으면 기록 건수·마지막 시각)을 확인하고, '저장하고 다시 시작'은
-DB 연결이 되는 경우에만 `data/hubweb-settings.json`(0600, `HUB_WEB_SETTINGS`)에 저장한 뒤 기록기를 새 값으로 다시 띄운다.
+DB 연결이 되는 경우에만 같은 폴더의 `hubweb-settings.json`(0600, `HUB_WEB_SETTINGS`)에 저장한 뒤 기록기를 새 값으로 다시 띄운다.
 이 파일의 값이 환경변수(`HUB_URL`·`HUB_TOKEN`·`POLL_SEC`·`EVENT_SEC`·`HUB_DB_URL`)보다 먼저다. '웹 설정 지우기'로 파일을 지우면 환경변수로 돌아간다.
 DB 암호와 토큰은 화면에 내보내지 않는다(빈 칸으로 저장하면 그대로 둠). DB 를 바꿔도 이전 기록은 옮기지 않는다.
+예전 판이 `/app/data`(프로그램 옆 `data/`)에 둔 두 파일은 처음 뜰 때 DB 폴더로 옮긴다.
 허브 주소가 아무 데도 없으면 기록은 쉬고 로그 브라우저만 떠서 설정 탭에서 정하기를 기다린다.
 기록 없이 화면만 띄우려면 `python lynnai_hub_watch.py web [포트]`.
 
