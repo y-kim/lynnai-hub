@@ -536,19 +536,27 @@ sent_cmds = {}
 state(9, "eeff00", f09_rooms(false, false, false))
 check(last_cmd_has("f06@a1b2c3") == false, "보일러 난방이 이미 꺼짐 → 명령 없음")
 
-print("[17] 방이 한 번 안 보여도 기기 유지, 3번 연속이면 정리")
+print("[17] 방이 안 보여도 바로 지우지 않고, 10분 넘게 계속 안 보이면 정리(다시 보이면 처음부터)")
 reset()
 links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
 state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, false))
 check(driver._children["td4e5f6_z2"] ~= nil, "방2 있음")
 local gone = f09_rooms(true, false, false):sub(1, 14) .. "00000000" .. f09_rooms(true, false, false):sub(23)   -- 방2 슬롯 비움
-state(9, "d4e5f6", gone)
-check(driver._children["td4e5f6_z2"] ~= nil, "한 번 안 보임 → 그대로(기기 ID 유지)")
+local t17, real17 = os.time(), os.time
+os.time = function() return t17 end
+state(9, "d4e5f6", gone); state(9, "d4e5f6", gone); state(9, "d4e5f6", gone)
+check(driver._children["td4e5f6_z2"] ~= nil, "여러 번 안 보여도 10분 전 → 그대로(기기 ID 유지)")
+os.time = function() return t17 + 5 * 60 end
 state(9, "d4e5f6", f09_rooms(true, true, false))
-state(9, "d4e5f6", gone); state(9, "d4e5f6", gone)
-check(driver._children["td4e5f6_z2"] ~= nil, "다시 보였다 사라지면 횟수 처음부터")
+os.time = function() return t17 + 9 * 60 end
 state(9, "d4e5f6", gone)
-check(driver._children["td4e5f6_z2"] == nil, "3번 연속 안 보임 → 정리")
+os.time = function() return t17 + 16 * 60 end
+state(9, "d4e5f6", gone)
+check(driver._children["td4e5f6_z2"] ~= nil, "다시 보였다 사라지면 시간 처음부터(7분째)")
+os.time = function() return t17 + 20 * 60 end
+state(9, "d4e5f6", gone)
+check(driver._children["td4e5f6_z2"] == nil, "10분 넘게 계속 안 보임 → 정리")
+os.time = real17
 
 print("[18] 보일러 '외출' = 붙은 방마다 f09 a0,b3 (f06 b3 는 안 먹힘)")
 reset()

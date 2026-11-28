@@ -72,10 +72,10 @@ async def test_floor_label_prefixes_room_names(hass: HomeAssistant, fake_hub):
         assert await hass.config_entries.async_setup(e.entry_id)
         await _settle(hass, lambda: hass.states.get("sensor.gas_meter_meter_reading") is not None)
         reg = dr.async_get(hass)
-        names = {
-            tuple(sorted(d.identifiers))[0][1]: d.name
-            for d in reg.devices
-            if any(i[0] == DOMAIN for i in d.identifiers)
+        names = {                                       # async_entries_for_config_entry: same on old and new HA
+            i[1]: d.name
+            for d in dr.async_entries_for_config_entry(reg, e.entry_id)
+            for i in d.identifiers if i[0] == DOMAIN
         }
         assert names.get(f"{HUB_ID}_t{THERMO}_z3") == "1층 Living room"
         assert names.get(f"{HUB_ID}_t{THERMO}_z1") == "1층 Room 1"
