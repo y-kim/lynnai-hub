@@ -803,6 +803,17 @@ async function waitBack(lines) {        // 기록기가 다시 뜰 때까지 기
   setShow([...lines, [false, "40초가 지나도 응답이 없습니다. 기록기 로그를 확인하세요."]]);
 }
 for (const r of document.querySelectorAll("input[name=sKind]")) r.onchange = () => setKind(r.value);
+// 저장된 토큰·암호는 원래 대상에만 쓴다(서버도 같은 규칙) — 대상을 바꾸면 칸 안내를 바꿔 새로 적게 한다
+function origin(u) { try { const x = new URL(u); return `${x.protocol}//${x.hostname}:${x.port || (x.protocol === "https:" ? 443 : 80)}`; } catch (e) { return ""; } }
+function secretHints() {
+  if (!setCur) return;
+  if (setCur.hub_token_set && !tokClear)
+    $("#sTok").placeholder = origin($("#sHub").value.trim()) === origin(setCur.hub_url) ? "저장된 값 있음 — 비우면 그대로" : "주소가 바뀜 — 토큰이 필요하면 새로 적으세요";
+  const d = setCur.db, same = d.kind === "pg" && $("#pHost").value.trim().toLowerCase() === d.host.toLowerCase()
+    && (+$("#pPort").value || 5432) === +d.port && $("#pUser").value.trim() === d.user;
+  if (d.password_set) $("#pPass").placeholder = same ? "저장된 값 있음 — 비우면 그대로" : "서버·사용자가 바뀜 — 암호를 새로 적으세요";
+}
+for (const id of ["#sHub", "#pHost", "#pPort", "#pUser"]) $(id).addEventListener("input", secretHints);
 $("#sTest").onclick = () => setRun("api/settings/test", setBody());
 $("#setForm").onsubmit = e => { e.preventDefault(); setRun("api/settings", setBody(), waitBack); };
 $("#sReset").onclick = () => {

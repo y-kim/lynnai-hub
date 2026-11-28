@@ -986,6 +986,22 @@ def _pg_url(d):
     return f'postgresql://{auth}@{host}:{int(d["port"])}/{quote(d["name"], safe="")}' + (f'?{d["params"]}' if d.get("params") else "")
 
 
+def _origin(url):
+    u = urlsplit(url or "")
+    try:
+        port = u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        port = None
+    return (u.scheme.lower(), (u.hostname or "").lower(), port)
+
+
+def _same_pg(a, b):
+    try:
+        return (a["host"].lower(), int(a["port"]), a["user"]) == (b["host"].lower(), int(b["port"]), b["user"])
+    except (TypeError, ValueError):
+        return False
+
+
 def settings_view():
     pg = _pg_parts(DB_URL) or {}
     return {
@@ -1010,16 +1026,27 @@ def _clean(body):
     if not (10 <= poll <= 3600 and 5 <= ev <= 600):
         return None, "상태 주기는 10~3600초, 이벤트 주기는 5~600초입니다."
     tok = body.get("hub_token")
-    tok = HUB_TOKEN if tok is None else str(tok).strip()        # None = 그대로, "" = 지우기(화면의 '토큰 지우기')
+    # None = 그대로, "" = 지우기(화면의 '토큰 지우기'). 저장된 토큰은 그 허브 주소에만 묶는다 —
+    # 주소(스킴·호스트·포트)가 바뀌었는데 새 토큰을 안 적었으면 토큰 없이(예전 토큰을 엉뚱한 곳에 보내지 않게)
+    if tok is None:
+        tok = HUB_TOKEN if _origin(hub) == _origin(HUB_URL) else ""
+    else:
+        tok = str(tok).strip()
     out = {"hub_url": hub, "hub_token": tok, "poll_sec": poll, "event_sec": ev}
     d = body.get("db") or {}
     if d.get("kind") == "sqlite":
         out["db_url"] = ""
     else:
-        cur = _pg_parts(DB_URL) or _pg_parts(os.environ.get("HUB_DB_URL", "").strip()) or {}   # SQLite 에서 돌아올 때는 환경변수 암호
         pg = {"host": str(d.get("host", "")).strip(), "port": d.get("port") or 5432, "name": str(d.get("name", "")).strip(),
               "user": str(d.get("user", "")).strip(), "params": str(d.get("params", "")).strip().lstrip("?"),
-              "password": d.get("password") or cur.get("password", "")}
+              "password": d.get("password") or ""}
+        if not pg["password"]:
+            # 비운 암호 = 저장된 암호. 단 같은 서버·포트·사용자일 때만(지금 값, 없으면 환경변수 값) — 대상이 바뀌면 새로 적어야
+            for url in (DB_URL, os.environ.get("HUB_DB_URL", "").strip()):
+                cur = _pg_parts(url)
+                if cur and _same_pg(cur, pg):
+                    pg["password"] = cur["password"]
+                    break
         if not pg["host"] or not pg["name"] or not pg["user"]:
             return None, "PostgreSQL 은 호스트·DB 이름·사용자를 모두 적어 주세요."
         try:
