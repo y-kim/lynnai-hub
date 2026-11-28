@@ -91,6 +91,7 @@ static char     s_fet_heatbasis[72];             /* "열량기준" (측정 기�
 
 static char     s_reg_opts[REG_OPTS];            /* 구역 datalist <option>… (한 번 받아 둠) */
 static bool     s_regs_got;
+static int64_t  s_regs_next_us;      /* 구역 목록 다음 시도(실패 뒤 대기) */
 
 static TaskHandle_t s_task;
 static char s_buf[BUF_MAX];
@@ -384,7 +385,7 @@ static bool num_after(const char *body, const char *key, double *out)
     while (*p == ' ') p++;
     char *end;
     double v = strtod(p, &end);
-    if (end == p) return false;
+    if (end == p || !isfinite(v)) return false;
     *out = v;
     return true;
 }
@@ -591,6 +592,11 @@ static void months_update(void)
     uint16_t key = period_key(now);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_mon_n && key < s_mon[s_mon_n - 1].ym) {     /* 시계가 한 번 크게 뒤로 감: 진행 중인 달을 닫거나 밀어내지 않는다 */
+        xSemaphoreGive(s_lock);
+        ESP_LOGW(TAG, "시계가 지난 기간으로 돌아감 — 월별 집계를 건드리지 않음");
+        return;
+    }
     bool dirty = false;
     tmon_t *cur = s_mon_n ? &s_mon[s_mon_n - 1] : NULL;
     /* 누계가 줄었나는 기간 시작값이 아니라 '직전에 본 값'과 비교한다: 100→106→103 이면 이미 센 6 ㎥ 를 두고
@@ -674,6 +680,11 @@ static void finalize_pending(void)
     if (http_get(url, s_buf, BUF_MAX) < 0) return;
     double bill = 0;
     if (!num_after(s_buf, "\"청구액\"", &bill)) return;
+    /* 서버 값을 그대로 확정하지 않는다: 음수·터무니없는 값, 허브가 계산한 예상과 세 배 넘게 다른 값은 버린다 */
+    if (bill < 0 || bill > 50000000.0 || (m.won > 0 && (bill > m.won * 3.0 + 10000 || bill < m.won / 3.0 - 10000))) {
+        ESP_LOGW(TAG, "청구액 %.0f 원이 예상(%u 원)과 너무 달라 쓰지 않음", bill, (unsigned)m.won);
+        return;
+    }
     char basis[72] = "";
     str_after(s_buf, "\"열량기준\"", basis, sizeof(basis));
     bool accurate = strstr(basis, "사용기간") != NULL;     /* 사용기간 가중평균 = 정확 열량 확정 */
@@ -703,7 +714,10 @@ static void tariff_task(void *arg)
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(60 * 1000));
             continue;
         }
-        if (!s_regs_got) fetch_regions();
+        if (!s_regs_got && esp_timer_get_time() >= s_regs_next_us) {
+            fetch_regions();
+            if (!s_regs_got) s_regs_next_us = esp_timer_get_time() + 10LL * 60 * 1000000;   /* 실패: 10분 뒤(30초마다 TLS 를 열지 않게) */
+        }
         months_update();
         bool need_retry = false;
         if (s_mode == MODE_AUTO) {
@@ -781,12 +795,13 @@ int hub_tariff_apply(int mode, int src, const char *region, int billday,
         }
     }
     if (!rg[0]) FAIL("구역 코드를 넣어 주세요 (예: SD07)");
-    if (base < 0 || base > 100000) FAIL("기본료 범위 벗어남");
+    if (!isfinite(base) || base < 0 || base > 100000) FAIL("기본료 범위 벗어남");
     if (src < SRC_AUTO || src > SRC_BOILER) FAIL("사용량 기준이 잘못됨");
     if (mode == MODE_MANUAL) {
-        if (vcf < 0.9 || vcf > 1.1) FAIL("보정계수는 0.9~1.1");
-        if (heat < 20 || heat > 60) FAIL("열량은 20~60 MJ/N㎥");
-        if (rate <= 0 || rate > 100) FAIL("단가는 0~100 원/MJ");
+        /* NaN 은 비교가 모두 거짓이라 범위 검사를 통과한다 — 먼저 거른다 */
+        if (!isfinite(vcf) || vcf < 0.9 || vcf > 1.1) FAIL("보정계수는 0.9~1.1");
+        if (!isfinite(heat) || heat < 20 || heat > 60) FAIL("열량은 20~60 MJ/N㎥");
+        if (!isfinite(rate) || rate <= 0 || rate > 100) FAIL("단가는 0~100 원/MJ");
     }
     s_mode    = mode == MODE_MANUAL ? MODE_MANUAL : MODE_AUTO;
     s_src_cfg = (uint8_t)src;
