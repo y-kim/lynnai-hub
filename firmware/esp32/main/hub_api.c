@@ -274,7 +274,7 @@ static int rssi(void)
 
 /* 1단계 과도기: 기기 목록에서 '첫 보일러·첫 써머스탯'만 뽑아 기존 단일 형식으로 준다(기록기 호환).
  * 여러 대 전체를 JSON 배열로 내는 건 다음 단계. */
-static void legacy_snapshot(uint8_t *f06, int *n06, uint8_t *f09, int *n09, uint8_t *links)
+static void legacy_snapshot(uint8_t *f06, int *n06, uint8_t f06mac[3], uint8_t *f09, int *n09, uint8_t *links)
 {
     hub_dev_t dev[6];
     int nd = hub_rinnai_snapshot(dev, 6);
@@ -288,6 +288,7 @@ static void legacy_snapshot(uint8_t *f06, int *n06, uint8_t *f09, int *n09, uint
             if (!*n06) {
                 *n06 = dev[i].n;
                 memcpy(f06, dev[i].blob, dev[i].n);
+                memcpy(f06mac, dev[i].mac3, 3);      /* usage(stg)를 이 보일러 것으로 고르려고 */
             }
         } else if (dev[i].kind == HUB_KIND_F09) {
             if (dev[i].linked) {
@@ -345,7 +346,8 @@ static esp_err_t state_get(httpd_req_t *req)
     }
     uint8_t f06[64], f09[64], links;
     int n06, n09;
-    legacy_snapshot(f06, &n06, f09, &n09, &links);
+    uint8_t f06mac[3] = { 0 };
+    legacy_snapshot(f06, &n06, f06mac, f09, &n09, &links);
     char line[256], raw[132];
     long t = now_epoch();
     httpd_resp_set_type(req, "application/json");
@@ -388,8 +390,8 @@ static esp_err_t state_get(httpd_req_t *req)
         CHUNK("\"heat_burn\":%s,\"hw_burn\":%s,", bo.heat_burn ? "true" : "false", bo.hw_burn ? "true" : "false");
         CHUNK("\"heat_set\":%d,\"ondol_set\":%d,\"room_set\":%d,\"hw_set\":%d,\"raw\":\"%s\",",
               bo.indoor ? bo.room_set : bo.ondol_set, bo.ondol_set, bo.room_set, bo.hw_set, raw);
-        hub_stg_t sg;                 /* 보일러가 1시간마다 올리는 사용량 누계(정수) — 받기 전이면 null */
-        if (hub_rinnai_stg(&sg)) {
+        hub_stg_t sg;                 /* 이 보일러가 1시간마다 올리는 사용량 누계(정수) — 이 보일러 것을 받기 전이면 null */
+        if (hub_rinnai_stg_of(f06mac, &sg)) {
             CHUNK("\"usage\":{\"age_s\":%lld,\"heat_gas_m3\":%u,\"hw_gas_m3\":%u,\"heat_burn_h\":%u,\"hw_burn_h\":%u}},",
                   (long long)((esp_timer_get_time() / 1000 - sg.up_ms) / 1000), sg.heat_gas_m3, sg.hw_gas_m3,
                   sg.heat_burn_h, sg.hw_burn_h);
@@ -608,18 +610,22 @@ static esp_err_t metrics_get(httpd_req_t *req)
               m, bo.outing, m, bo.hotwater, m, bo.preheat);
     }
     {
-        hub_stg_t sg;                 /* 보일러 자체 누계(stg, 1시간마다·정수). 전원이 끊겨도 보일러 쪽 값은 유지된다 */
-        if (hub_rinnai_stg(&sg)) {
-            char m[7];
-            snprintf(m, sizeof(m), "%02x%02x%02x", sg.mac3[0], sg.mac3[1], sg.mac3[2]);
-            CHUNK("# TYPE lynnai_boiler_gas_cubic_meters counter\n"
-                  "lynnai_boiler_gas_cubic_meters{mac=\"%s\",what=\"heat\"} %u\nlynnai_boiler_gas_cubic_meters{mac=\"%s\",what=\"hotwater\"} %u\n",
+        /* 보일러 자체 누계(stg, 1시간마다·정수) — 보일러마다(mac 라벨). 전원이 끊겨도 보일러 쪽 값은 유지된다 */
+        bool head = false;
+        for (int i = 0; i < nd; i++) {
+            hub_stg_t sg;
+            if (dev[i].kind != HUB_KIND_F06 || !hub_rinnai_stg_of(dev[i].mac3, &sg)) continue;
+            const char *m = MACSTR3(dev[i]);
+            if (!head) {
+                CHUNK("# TYPE lynnai_boiler_gas_cubic_meters counter\n# TYPE lynnai_boiler_burn_hours counter\n"
+                      "# TYPE lynnai_boiler_usage_age_seconds gauge\n");
+                head = true;
+            }
+            CHUNK("lynnai_boiler_gas_cubic_meters{mac=\"%s\",what=\"heat\"} %u\nlynnai_boiler_gas_cubic_meters{mac=\"%s\",what=\"hotwater\"} %u\n",
                   m, sg.heat_gas_m3, m, sg.hw_gas_m3);
-            CHUNK("# TYPE lynnai_boiler_burn_hours counter\n"
-                  "lynnai_boiler_burn_hours{mac=\"%s\",what=\"heat\"} %u\nlynnai_boiler_burn_hours{mac=\"%s\",what=\"hotwater\"} %u\n",
+            CHUNK("lynnai_boiler_burn_hours{mac=\"%s\",what=\"heat\"} %u\nlynnai_boiler_burn_hours{mac=\"%s\",what=\"hotwater\"} %u\n",
                   m, sg.heat_burn_h, m, sg.hw_burn_h);
-            CHUNK("# TYPE lynnai_boiler_usage_age_seconds gauge\nlynnai_boiler_usage_age_seconds %lld\n",
-                  (long long)((esp_timer_get_time() / 1000 - sg.up_ms) / 1000));
+            CHUNK("lynnai_boiler_usage_age_seconds{mac=\"%s\"} %lld\n", m, (long long)((esp_timer_get_time() / 1000 - sg.up_ms) / 1000));
         }
     }
     CHUNK("# TYPE lynnai_boiler_setpoint_celsius gauge\n");
