@@ -21,3 +21,8 @@ secrets.*
 # OS / editor
 .DS_Store
 *.swp
+
+# 감사 문서(취약점 내용 — 공개 저장소에 올리지 않는다)
+review*-no-commit.md
+# tools/hub_doctor.py 가 현재 폴더에 쓰는 진단 결과(SSID·BSSID·단말 MAC 이 들어 있음)
+hub_diag_*.txt
