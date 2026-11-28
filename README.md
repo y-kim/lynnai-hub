@@ -55,6 +55,9 @@ SmartThings 와는 Zigbee(또는 LAN)로 붙는다.
   계량기가 없어도 보일러만 있으면 이번달 예상 요금을 계산).
 - **서버 연동**: `/api/v1/state`(JSON)·`/metrics`(Prometheus)·`/api/events`·`/api/stats`, NAS 기록기 `server/lynnai-hub-watch`.
 - **고장 진단**: LED 오류 코드(빨강 N번 깜빡), USB 시리얼 `diag`, PC 진단 스크립트 `tools/hub_doctor.py`.
+- **밖으로 나가는 통신**: 린나이 클라우드(프록시 모드일 때), 가스 요금 서버 `gas.yangsu.kim`(가스 계량기나 보일러가 있을 때 —
+  단가 받기, 청구 기간이 끝나면 그 기간 사용량·구역을 보내 청구액 확인), NTP. 자세한 것은
+  [docs/esp32-hub.md 7장](docs/esp32-hub.md#7-보안-메모).
 
 ## 스크린샷
 
