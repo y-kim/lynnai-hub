@@ -39,15 +39,6 @@ components:
     categories:
       - name: GasMeter
 preferences:
-  - name: gasApiBase
-    title: 요금 자동 조회 주소 (LAN)
-    description: 비우면 아래 수동값 사용. 예 http://192.168.0.10:8496 (gas-heat-logger LAN). Edge 는 공개 인터넷 불가 — LAN 주소만
-    required: false
-    preferenceType: string
-    definition:
-      stringType: text
-      minLength: 0
-      maxLength: 64
       default: ""
   - name: gasRegion
     title: 구역 코드

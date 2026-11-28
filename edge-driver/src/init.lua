@@ -48,7 +48,10 @@ local function from_hub(cmd)
   return function(_, parent, zb_rx)
     last_rx[parent.id] = os.time()
     if cmd == 0x0A then has_alive[parent.id] = true end
-    lost[parent.id] = nil
+    if lost[parent.id] then                        -- 끊겼던 허브가 돌아옴: 다음 연결 목록(최대 5분)을 기다리지 않고 바로 새로
+      lost[parent.id] = nil
+      pcall(core.request_refresh, parent)
+    end
     local ok, err = pcall(core.on_message, parent, cmd, zb_rx.body.zcl_body.body_bytes)
     if not ok then require("log").error("허브 메시지 처리 실패: " .. tostring(err)) end
   end

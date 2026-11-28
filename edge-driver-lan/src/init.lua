@@ -123,6 +123,7 @@ end
 local function run(device)
   local id = device.device_network_id:sub(#DNI_PREFIX + 1)
   local backoff = 5
+  local fails = 0                                   -- 연달아 접속 못 한 횟수(주소를 버리기 전)
   -- 허브와 끊겼으면(처음부터 못 붙은 경우 포함) 허브 기기와 자식 기기를 한 번 오프라인으로. 다시 붙으면 online()
   local is_lost = false
   local function mark_lost()
@@ -194,6 +195,7 @@ local function run(device)
         return
       elseif got then
         log.info(string.format("허브 연결됨 %s:%d", ip, port))
+        fails = 0
         conns[device.id].sock = c
         backoff = 5
         is_lost = false
@@ -238,9 +240,14 @@ local function run(device)
       c:close()
     else
       if c then c:close() end
-      -- IP 가 바뀌었을 수 있다: 다음엔 다시 찾는다
-      device:set_field("ip", nil, { persist = true })
-      seen[id] = nil
+      -- IP 가 바뀌었을 수 있다: 세 번 연달아 못 붙으면 다시 찾는다(재부팅 한 번에 주소를 버리고 다음 SSDP 응답자를
+      -- 믿지 않게 — 그 사이 허브인 척 답하는 기기가 있어도 v2 증명을 못 해 붙지는 않지만 쓸데없이 옮겨 다니지 않게)
+      fails = fails + 1
+      if fails >= 3 then
+        fails = 0
+        device:set_field("ip", nil, { persist = true })
+        seen[id] = nil
+      end
       show(device, "허브 못 찾음")
       mark_lost()
     end
@@ -255,13 +262,26 @@ local function send(parent, text)
     log.warn("허브와 연결 안 됨 — 명령 버림: " .. text)
     return
   end
-  c:send("00 " .. hex(text) .. "\n")
+  local ok, err = c:send("00 " .. hex(text) .. "\n")
+  if not ok then                                     -- 보내기 실패: 연결이 죽었다 — 닫아서 연결 루프가 다시 붙게
+    log.warn("허브로 명령을 못 보냄(" .. tostring(err) .. ") — 다시 연결: " .. text)
+    conns[parent.id].sock = nil
+    pcall(function() c:close() end)
+  end
 end
 
 local function start(device)
   if conns[device.id] then return end
   conns[device.id] = { alive = true }
-  cosock.spawn(function() run(device) end, "lynnai-lan-" .. device.id)
+  -- 연결 루프 안의 오류 하나로 이 허브의 연결이 영영 멈추지 않게: 죽으면 기록하고 잠시 뒤 다시 돈다
+  cosock.spawn(function()
+    while conns[device.id] and conns[device.id].alive do
+      local ok, err = pcall(run, device)
+      if ok then break end                          -- run 이 스스로 끝남(기기 지워짐 등)
+      log.error("허브 연결 루프 오류 — 10초 뒤 다시: " .. tostring(err))
+      socket.sleep(10)
+    end
+  end, "lynnai-lan-" .. device.id)
 end
 
 local function removed(_, device)

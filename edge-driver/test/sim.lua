@@ -1188,5 +1188,30 @@ msg(0x0f, string.char(2) .. string.pack("<I4I4", 1000, 2000))
 bcaps = driver._children["ba1b2c3"]._caps or {}
 check(not bcaps.gas, "노출 설정에서 '가스 요금'(비트 13)을 끄면 안 보임")
 
+print("[재시작] 드라이버가 다시 떠 상태를 모를 때, 연결 목록에 없는 조절기의 방은 오프라인")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06); state(9, "d4e5f6", f09_rooms(true, true, false))
+check(driver._children["td4e5f6_z1"] ~= nil and driver._children["td4e5f6_z1"]._online == true, "방1 있음·온라인")
+core = dofile(HERE .. "../src/core.lua")                   -- 드라이버 재시작: 메모리 상태가 비었다(기기는 남음)
+core.setup(driver, { send = function(_, text) sent_cmds[#sent_cmds + 1] = text end, on_hub_init = function() end })
+links({ { 6, "a1b2c3" } })                                 -- 조절기는 끊김(목록에 없음), 펌웨어는 끊긴 기기 상태를 안 보낸다
+check(driver._children["td4e5f6_z1"]._online == false and driver._children["td4e5f6_z2"]._online == false,
+  "목록에 없는 조절기의 방 → 오프라인(옛 값으로 온라인이던 것)")
+
+print("[낮음] 요금 메시지가 가스 기기보다 먼저 와도 기억했다가 쓴다 · 빈 플러그인 알림 무시 · 짧은 보일러 상태 무시")
+reset()
+links({ { 6, "a1b2c3" } })
+state(6, "a1b2c3", F06)
+msg(CMD.PLUGINS, string.char(2))                                         -- 가스 계량기만 켜짐
+core.on_message(hub, CMD.TARIFF, string.pack("<I4I4I4I4I4", 990000, 42000000, 22000000, 1300, 8))   -- 가스 기기 전
+msg(CMD.GAS, string.pack("<I4I4I4I4I4", 10, 0xFFFFFFFF, 0, 0, 0))
+local g = driver._children["gas"] or hub:get_child_by_parent_assigned_key("gas")
+check(g ~= nil and g:get_field("api_vcf") == 0.99 and g:get_field("api_base") == 1300, "먼저 온 요금 값을 가스 기기에 씀")
+msg(CMD.PLUGINS, "")
+check((driver._children["gas"] or hub:get_child_by_parent_assigned_key("gas")) ~= nil, "빈 플러그인 알림 → 가스 기기 그대로")
+state(6, "a1b2c3", "1011")                                                -- 깨진(짧은) 보일러 상태
+check(driver._children["ba1b2c3"] ~= nil and lastv("ba1b2c3", "main", "switch") == "on", "짧은 상태 하나로 보일러가 빠지지 않음")
+
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

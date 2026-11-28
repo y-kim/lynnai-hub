@@ -825,10 +825,22 @@ local function on_state(parent, b)
   s.seen = s.seen or {}
   s.seen[kind .. ":" .. mac] = true
   if kind == KIND_F06 then
-    s.boilers[mac] = decode_boiler(blob)
+    local m = decode_boiler(blob)
+    if not m then return end                                          -- 짧은(깨진) 상태 하나로 보일러를 표에서 빼지 않는다
+    local was = s.boilers[mac]
+    s.boilers[mac] = m
     update_outing(parent)                                             -- 새로 만든 상태에 외출 집계를 먼저(화면 갱신 전에)
     if shown(parent, KIND_F06, mac, 0) then create_boiler(parent, mac) end
     refresh_boiler(parent, mac)
+    if was and (was.power ~= m.power or was.heat ~= m.heat) then      -- 보일러 전원·난방이 바뀌면 붙은 방 카드도(다음 방 보고까지 '난방'으로 남지 않게)
+      for tmac, zones in pairs(s.thermos) do
+        if the_boiler(parent, tmac) == mac then
+          for _, id in ipairs(ZONE_ORDER) do
+            if zones[id] then refresh_zone(parent, tmac, id) end
+          end
+        end
+      end
+    end
   elseif kind == KIND_F09 then
     s.thermos[mac] = decode_rooms(blob)
     s.vboilers = s.vboilers or {}
@@ -1007,12 +1019,7 @@ local GAS_PREF = {
   billday = { key = "gasBillDay", def = 8, api = "api_billday" },   -- 검침일(1~31 — 그 날이 없는 달은 마지막 날, 허브는 말일을 32 로 보냄). 허브가 알려 주면 그 값
   vat     = { key = "gasVat",     def = true },      -- 부가세 10% 포함
 }
--- 자동 조회 주소(LAN). 비었으면 nil → 수동값만.
-local function api_base(dev)
-  local b = dev and dev.preferences and dev.preferences.gasApiBase
-  if b and b ~= "" then return (b:gsub("/+$", "")) end
-end
--- 요금 요소: 받아온 캐시(펌웨어 중계 CMD 0x09 또는 LAN 직접 조회)가 있으면 그 값, 아니면 수동 설정값.
+-- 요금 요소: 허브가 중계한 값(CMD 0x09)이 있으면 그 값, 아니면 수동 설정값.
 local function pref(dev, p)
   if p.api then
     local a = dev and dev:get_field(p.api)
@@ -1054,47 +1061,7 @@ local function gas_won(dev, m3, with_base)
   return math.floor(won + 0.5)
 end
 
--- gas-heat-logger(/api/bill)에서 요금 요소(보정계수·열량·단가·기본료)를 받아 기기에 캐시한다.
--- Edge 샌드박스는 공개 인터넷을 막으므로 gasApiBase 는 LAN 주소여야 한다(예 NAS http://192.168.0.10:8496).
-local show_gas                          -- 전방 선언(fetch_tariff 가 먼저 쓴다)
-local GAS_API_TTL = 6 * 3600           -- 성공·실패와 무관하게 조회 간격(폭주 방지)
-local gas_fetching = {}                 -- child.id -> true (동시 조회 방지)
-local function num_after(body, key)     -- 평탄한 JSON 에서 "<key>": <숫자> 뽑기
-  local s = body:match('"' .. key .. '"%s*:%s*(%-?%d[%d%.]*)')
-  return s and tonumber(s)
-end
-local function fetch_tariff(child)
-  local base = api_base(child)
-  if not base or gas_fetching[child.id] then return end
-  local region = child.preferences and child.preferences.gasRegion
-  if not region or region == "" then region = "SD07" end
-  local ok_c, cosock = pcall(require, "cosock")   -- 시뮬 등 네트워크 없는 환경에선 건너뜀
-  if not ok_c then return end
-  gas_fetching[child.id] = true
-  local url = base .. "/api/bill?m3=0&region=" .. region
-  cosock.spawn(function()
-    local ok, body = pcall(function()
-      local req = url:match("^https") and cosock.asyncify "ssl.https" or cosock.asyncify "socket.http"
-      req.TIMEOUT = 10
-      local b, code = req.request(url)
-      if code ~= 200 or not b then error("http " .. tostring(code)) end
-      return b
-    end)
-    gas_fetching[child.id] = nil
-    if not ok then require("log").warn("가스 요금 조회 실패: " .. tostring(body)); return end
-    local vcf, heat = num_after(body, "보정계수"), num_after(body, "열량")
-    local rate, base2 = num_after(body, "단가"), num_after(body, "기본요금")
-    if not (vcf and heat and rate) then require("log").warn("가스 요금 응답 파싱 실패"); return end
-    child:set_field("api_vcf", vcf, { persist = true })
-    child:set_field("api_heat", heat, { persist = true })
-    child:set_field("api_rate", rate, { persist = true })
-    if base2 then child:set_field("api_base", base2, { persist = true }) end
-    require("log").info(string.format("가스 요금 자동: 보정 %.4f 열량 %.3f 단가 %.4f", vcf, heat, rate))
-    local p = child:get_parent_device()
-    if p then show_gas(p) end                   -- 받은 값으로 다시 그림
-  end, "gas-tariff")
-end
-
+local show_gas                          -- 전방 선언(위에서 먼저 쓴다)
 function show_gas(parent)
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
   if not child then return end
@@ -1198,17 +1165,9 @@ function show_gas(parent)
   emit(child, "main", usage_cap.period({ value = month_m3, unit = "m^3" }))     -- 이번달 사용량은 사용량 카드에
   emit(child, "main", usage_cap.periodText(t2(month_m3)))
 
-  -- 요금 요소 자동 갱신(6시간마다, 비동기). 받으면 새 값으로 다시 그린다.
-  -- 시도 시각으로 게이트 → 주소가 안 닿아도 매 업링크마다 재시도하지 않는다.
-  if api_base(child) then
-    local last = child:get_field("api_try")
-    if not last or os.time() - last > GAS_API_TTL then
-      child:set_field("api_try", os.time(), { persist = true })
-      fetch_tariff(child)
-    end
-  end
 end
 
+local apply_tariff                     -- 아래(요금 중계)에서 정의 — 가스 기기를 만들 때 두었던 요금 메시지를 쓰려고
 local function on_gas(parent, b)
   hub_state(parent).gas = { string.unpack("<I4I4I4I4I4", b) }
   -- 여섯째(있으면) = 1펄스 양(L). 옛 펌웨어는 다섯만 보낸다 → 10 L 로 본다
@@ -1218,11 +1177,14 @@ local function on_gas(parent, b)
   hub_state(parent).gas_period = (#b >= 32) and { string.unpack("<I4I4", b, 25) } or nil
   if not visible(parent, BIT.gas) then return end
   create_child(parent, GAS_KEY, "가스 계량기", "lynnai-gas", "gasmeter")
+  local stash = hub_state(parent).tariff_msg
+  if stash and parent:get_child_by_parent_assigned_key(GAS_KEY) then apply_tariff(parent, stash) end
   show_gas(parent)
 end
 
 local PLUGIN_CHILD = { [1] = { key = ROOM_KEY, field = "room" }, [2] = { key = GAS_KEY, field = "gas" } }
 local function on_plugins(parent, b)
+  if #b == 0 then return end                         -- 빈 알림 하나로 온습도·가스 기기를 지우지 않는다
   local m = b:byte(1) or 0
   local s = hub_state(parent)
   local was = s.plug_fault or 0
@@ -1560,11 +1522,18 @@ end
 
 -- 허브가 중계한 가스 요금 요소(CMD 0x09): u32 x4 (보정계수·열량·단가 ×1e6, 기본료 원). 가스 기기에 캐시.
 local function on_tariff(parent, b)
+  return apply_tariff(parent, b)
+end
+apply_tariff = function(parent, b)
   if #b < 16 then return end
   local vcf_e6, heat_e6, rate_e6, base = string.unpack("<I4I4I4I4", b)
   local billday = (#b >= 20) and string.unpack("<I4", b, 17) or nil      -- 다섯째(있으면) = 허브에 설정한 검침일
   local child = parent:get_child_by_parent_assigned_key(GAS_KEY)
-  if not child then return end          -- 가스 기기 아직 없으면 버림(다음 주기에 다시 온다)
+  if not child then                     -- 가스 기기가 아직 없으면 두었다가 만들 때 쓴다(값이 바뀔 때만 오므로 버리면 기본 요금으로 셈)
+    hub_state(parent).tariff_msg = b
+    return
+  end
+  hub_state(parent).tariff_msg = nil
   child:set_field("api_vcf", vcf_e6 / 1e6, { persist = true })
   child:set_field("api_heat", heat_e6 / 1e6, { persist = true })
   child:set_field("api_rate", rate_e6 / 1e6, { persist = true })
