@@ -194,7 +194,7 @@ def _gear(cx, cy, s=1.0, teeth=8, R=9.500, r=7.200, hole=3.300, w_root=14, w_tip
 
 
 def _value(x, y, val, unit):
-    w = sum(12.500 if c.isdigit() else 6 for c in val)        # 숫자 폭 어림
+    w = sum(14.800 if c.isdigit() else 7 for c in val)    # 숫자 폭 어림(굵은 22px — 좁게 잡으면 단위가 숫자에 겹친다)
     return (f'<text class="t-val" x="{x}" y="{y}">{val}</text>'
             f'<text class="t-unit" x="{x + w + 6:.0f}" y="{y}">{unit}</text>')
 
@@ -210,8 +210,13 @@ def boiler():
     s.section("온수"); s.pill(True)
     s.tile([("heat", "온수 온도 설정", "60.0", "°C", 1.0)])
     s.section("온수 예열"); s.pill(False)
+    # 가스 요금: 허브가 센 이번 청구 기간 값(허브의 사용량 기준 — 계량기 또는 보일러 누계). 셀 기준이 없으면 이 구역이 없다
+    s.section("가스 요금")
+    s.tile([("plain", "이번달 가스 사용량", "37 ㎥ · 보일러 누계", "", 0),
+            ("gauge2", "이번달 예상 요금", "48,720", ("원", "50,000"), 0.97)])
     return s.svg("보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. "
-                 "외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐")
+                 "외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐. "
+                 "가스 요금: 이번달 가스 사용량 37 ㎥(보일러 누계), 이번달 예상 요금 48,720원")
 
 
 def thermostat():

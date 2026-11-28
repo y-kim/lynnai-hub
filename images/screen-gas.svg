@@ -77,22 +77,22 @@
   <text class="t-cval t-on" x="277" y="158">9.97<tspan class="t-cunit" dx="3"></tspan></text>
   <rect class="card" x="14" y="188" width="332" height="312" rx="22"/>
   <text class="t-name" x="34" y="215">계량기 지침</text>
-  <text class="t-val" x="34" y="245">1523.4</text><text class="t-unit" x="108" y="245">m³</text>
+  <text class="t-val" x="34" y="245">1523.4</text><text class="t-unit" x="121" y="245">m³</text>
   <g class="icon-m" transform="translate(308 202)"><rect x="0" y="6" width="3" height="9" rx="1"/><rect x="5" y="0" width="3" height="15" rx="1"/><rect x="10" y="4" width="3" height="11" rx="1"/><rect x="15" y="7" width="3" height="8" rx="1"/></g>
   <path class="icon-m" fill-rule="evenodd" d="M280.61 203.41 L280.88 201.48 L283.12 201.48 L283.39 203.41 L284.97 204.06 L286.52 202.89 L288.11 204.48 L286.94 206.03 L287.59 207.61 L289.52 207.88 L289.52 210.12 L287.59 210.39 L286.94 211.97 L288.11 213.52 L286.52 215.11 L284.97 213.94 L283.39 214.59 L283.12 216.52 L280.88 216.52 L280.61 214.59 L279.03 213.94 L277.48 215.11 L275.89 213.52 L277.06 211.97 L276.41 210.39 L274.48 210.12 L274.48 207.88 L276.41 207.61 L277.06 206.03 L275.89 204.48 L277.48 202.89 L279.03 204.06Z M284.64 209.00 a2.64 2.64 0 1 0 -5.28 0 a2.64 2.64 0 1 0 5.28 0Z"/>
   <path class="rule" d="M34 262H326"/>
   <text class="t-name" x="34" y="289">유량</text>
-  <text class="t-val" x="34" y="319">0.30</text><text class="t-unit" x="84" y="319"></text>
+  <text class="t-val" x="34" y="319">0.30</text><text class="t-unit" x="91" y="319"></text>
   <path class="rule" d="M34 336H326"/>
   <text class="t-name" x="34" y="363">요금</text>
   <text class="t-col" x="36" y="392" style="text-anchor:start">이번달 예상 금액</text>
-  <text class="t-val" x="36" y="420">11,878</text><text class="t-unit" x="110" y="420">원</text>
+  <text class="t-val" x="36" y="420">11,878</text><text class="t-unit" x="123" y="420">원</text>
   <text class="t-col" x="184" y="398" style="text-anchor:start">0</text><text class="t-col" x="326" y="398" style="text-anchor:end">100,000</text>
   <rect class="knob-c" x="184" y="406" width="142" height="14" rx="7"/>
   <rect class="card" x="198.5" y="413" width="5" height="7" rx="2" style="stroke:none"/>
   <path class="rule" d="M34 438H326"/>
   <text class="t-col" x="36" y="454" style="text-anchor:start">지난 24시간 요금</text>
-  <text class="t-val" x="36" y="482">5,036</text><text class="t-unit" x="98" y="482">원</text>
+  <text class="t-val" x="36" y="482">5,036</text><text class="t-unit" x="108" y="482">원</text>
   <text class="t-col" x="184" y="460" style="text-anchor:start">0</text><text class="t-col" x="326" y="460" style="text-anchor:end">10,000</text>
   <rect class="knob-c" x="184" y="468" width="142" height="14" rx="7"/>
   <rect class="card" x="252.5" y="475" width="5" height="7" rx="2" style="stroke:none"/>

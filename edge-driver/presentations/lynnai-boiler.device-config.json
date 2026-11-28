@@ -96,6 +96,13 @@
           "value": "자동 끄기"
         }
       ]
+    },
+    {
+      "component": "gas",
+      "capability": "connectbook02461.boilerGasBill",
+      "version": 1,
+      "values": [],
+      "patch": []
     }
   ],
   "automation": {
@@ -190,6 +197,14 @@
             "value": "자동 끄기"
           }
         ],
+        "exclusion": []
+      },
+      {
+        "component": "gas",
+        "capability": "connectbook02461.boilerGasBill",
+        "version": 1,
+        "values": [],
+        "patch": [],
         "exclusion": []
       }
     ],

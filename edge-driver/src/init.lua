@@ -93,6 +93,7 @@ local driver_template = {
         [0x0C] = from_hub(0x0C),   -- 보일러 설정(온수 예열 자동 끄기)
         [0x0D] = from_hub(0x0D),   -- 모델코드(온수·난방수 온도 표)
         [0x0E] = from_hub(0x0E),   -- 허브 라벨(층 — 방 이름 앞에 붙임)
+        [0x0F] = from_hub(0x0F),   -- 이번 청구 기간 가스(보일러 카드의 가스 요금)
       },
     },
   },

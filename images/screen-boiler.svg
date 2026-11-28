@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 798" width="360" role="img" aria-label="보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐">
-  <title>보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 974" width="360" role="img" aria-label="보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐. 가스 요금: 이번달 가스 사용량 37 ㎥(보일러 누계), 이번달 예상 요금 48,720원">
+  <title>보일러 컨트롤러의 SmartThings 화면 그림: 전원 켜짐. 난방 켜짐, 난방수 온도 설정 70도. 외출 꺼짐. 온수 켜짐, 온수 온도 설정 60도. 온수 예열 꺼짐. 가스 요금: 이번달 가스 사용량 37 ㎥(보일러 누계), 이번달 예상 요금 48,720원</title>
   <style>
     .screen { fill: #f1f1f4; stroke: #d5d8de; }
     .card   { fill: #fcfcfd; }
@@ -63,7 +63,7 @@
       .ic-box { fill: #4a4d55; }
     }
   </style>
-  <rect class="screen" x="0.5" y="0.5" width="359" height="797" rx="26"/>
+  <rect class="screen" x="0.5" y="0.5" width="359" height="973" rx="26"/>
   <text class="t-title" x="48" y="34">보일러 컨트롤러</text>
   <text class="t-sub" x="48" y="52">집</text>
   <path class="icon" d="M28 30 l-7 8 l7 8"/>
@@ -81,7 +81,7 @@
   <path class="icon" style="stroke:#14161a" d="M316 216v8M311.2 218.8a7 7 0 1 0 9.600 0"/>
   <rect class="card" x="14" y="262" width="332" height="108" rx="22"/>
   <text class="t-name" x="34" y="289">난방수 온도 설정</text>
-  <text class="t-val" x="34" y="319">70.0</text><text class="t-unit" x="84" y="319">°C</text>
+  <text class="t-val" x="34" y="319">70.0</text><text class="t-unit" x="91" y="319">°C</text>
   <circle class="knob-h" cx="44" cy="346" r="10"/><text class="t-pm" x="44" y="351">−</text>
   <path class="track" d="M64 346H296"/><path class="heat" d="M64 346H219"/><circle class="knob-h" cx="219" cy="346" r="12"/>
   <g class=""><circle class="knob-h" cx="316" cy="346" r="10"/><text class="t-pm" x="316" y="351">+</text></g>
@@ -99,7 +99,7 @@
   <path class="icon" style="stroke:#14161a" d="M316 526v8M311.2 528.8a7 7 0 1 0 9.600 0"/>
   <rect class="card" x="14" y="572" width="332" height="108" rx="22"/>
   <text class="t-name" x="34" y="599">온수 온도 설정</text>
-  <text class="t-val" x="34" y="629">60.0</text><text class="t-unit" x="84" y="629">°C</text>
+  <text class="t-val" x="34" y="629">60.0</text><text class="t-unit" x="91" y="629">°C</text>
   <circle class="knob-h" cx="44" cy="656" r="10"/><text class="t-pm" x="44" y="661">−</text>
   <path class="track" d="M64 656H296"/><path class="heat" d="M64 656H296"/><circle class="knob-h" cx="296" cy="656" r="12"/>
   <g class="dim"><circle class="knob-h" cx="316" cy="656" r="10"/><text class="t-pm" x="316" y="661">+</text></g>
@@ -109,4 +109,14 @@
   <text class="t-pill" x="36" y="755">꺼짐</text>
   <circle class="btn" cx="316" cy="748" r="19"/>
   <path class="icon" d="M316 740v8M311.2 742.8a7 7 0 1 0 9.600 0"/>
+  <text class="t-sec" x="22" y="804">가스 요금</text>
+  <path class="icon-m" transform="translate(326 792)" d="M0 11.500V14h2.500l7.400-7.400-2.500-2.500L0 11.500Zm11.800-6.800a.660.660 0 0 0 0-.900L10.200 2.200a.660.660 0 0 0-.900 0L8.100 3.400l2.500 2.500 1.200-1.200Z"/>
+  <rect class="card" x="14" y="816" width="332" height="136" rx="22"/>
+  <text class="t-name" x="34" y="843">이번달 가스 사용량</text>
+  <text class="t-val" x="34" y="873">37 ㎥ · 보일러 누계</text><text class="t-unit" x="147" y="873"></text>
+  <text class="t-col" x="36" y="906" style="text-anchor:start">이번달 예상 요금</text>
+  <text class="t-val" x="36" y="934">48,720</text><text class="t-unit" x="123" y="934">원</text>
+  <text class="t-col" x="184" y="912" style="text-anchor:start">0</text><text class="t-col" x="326" y="912" style="text-anchor:end">50,000</text>
+  <rect class="knob-c" x="184" y="920" width="142" height="14" rx="7"/>
+  <rect class="card" x="319.2" y="927" width="5" height="7" rx="2" style="stroke:none"/>
 </svg>

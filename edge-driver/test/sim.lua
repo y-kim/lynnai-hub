@@ -64,6 +64,7 @@ cap("connectbook02461.gasUsed", { "day", "hour", "period", "dayText", "hourText"
 cap("connectbook02461.gasFlowRate", { "flow", "flowText" }, {})
 cap("connectbook02461.gasAlert", { "alert" }, {})
 cap("connectbook02461.gasMeterSignal", { "signal" }, {})
+cap("connectbook02461.boilerGasBill", { "usage", "usageText", "cost", "costRange" }, {})
 
 package.loaded["st.capabilities"] = capabilities
 package.loaded["log"] = { info = function() end, warn = function() end, error = function() end }
@@ -90,7 +91,7 @@ local function mk_device(key, label, profile, parent)
   function d:supports_capability_by_id(id, comp)
     -- 프로필에서 optional 이 아닌 것(상태 글자·상태 카드·온도·새로고침 등)은 늘 지원 — 실제 라이브러리와 같게
     local OPTIONAL = { switch = true, mode = true, thermostatHeatingSetpoint = true, ["connectbook02461.reserveHours"] = true,
-      thermostatMode = true, thermostatWaterHeatingSetpoint = true }
+      thermostatMode = true, thermostatWaterHeatingSetpoint = true, ["connectbook02461.boilerGasBill"] = true }
     if not OPTIONAL[id] then return true end
     local cc = self._caps[comp]
     if cc == nil then return true end     -- 메타데이터 적용 전엔 전부 지원
@@ -1150,6 +1151,34 @@ heat_set("vbeef01", 60)
 check(#sent_cmds == 0, "ff 에 난방수 명령은 보내지 않음")
 msg(CMD.MODELS, string.char(9) .. mac3("beef01"))
 check(true, "짧은 메시지는 무시(오류 없음)")
+
+print("[가스 요금] 보일러 카드: 허브의 이번 기간 값(0x0f)")
+reset()
+links({ { 6, "a1b2c3" }, { 9, "d4e5f6" } })
+state(6, "a1b2c3", F06)
+state(9, "d4e5f6", F09)
+local bcaps = driver._children["ba1b2c3"]._caps or {}
+check(not bcaps.gas, "값이 오기 전엔 '가스 요금' 구역 없음")
+msg(0x0f, string.char(2) .. string.pack("<I4I4", 37000, 48720))
+bcaps = driver._children["ba1b2c3"]._caps or {}
+check(bcaps.gas and bcaps.gas["connectbook02461.boilerGasBill"], "0x0f 받음 → '가스 요금' 구역을 내놓음")
+check(lastv("ba1b2c3", "gas", "usageText") == "37 ㎥ · 보일러 누계", "보일러 기준: 정수 ㎥ + 기준 글자")
+check(lastv("ba1b2c3", "gas", "usage").value == 37, "사용량 숫자(루틴 조건용) 37 ㎥")
+check(lastv("ba1b2c3", "gas", "cost").value == 48720, "예상 요금 48720 원")
+check(lastv("ba1b2c3", "gas", "costRange").value.maximum == 50000, "막대 끝값 5만(값이 들어가는 둥근 수)")
+msg(0x0f, string.char(1) .. string.pack("<I4I4", 123456, 160300))
+check(lastv("ba1b2c3", "gas", "usageText") == "123.46 ㎥ · 계량기", "계량기 기준: 소수 둘째 자리")
+check(lastv("ba1b2c3", "gas", "costRange").value.maximum == 200000, "16만 원 → 막대 끝값 20만")
+msg(0x0f, string.char(1) .. string.pack("<I4I4", 123456, 260300))
+check(lastv("ba1b2c3", "gas", "costRange").value.maximum == 500000, "26만 원 → 막대 끝값 50만")
+check(not (driver._children["vd4e5f6"] and (driver._children["vd4e5f6"]._caps or {}).gas), "가상 보일러에는 안 붙음")
+msg(0x0f, string.char(0))
+bcaps = driver._children["ba1b2c3"]._caps or {}
+check(not bcaps.gas, "[0] → 구역을 거둠")
+msg(0x06, string.pack("<I4", 0x7FFFFFFF & ~(1 << 13)))
+msg(0x0f, string.char(2) .. string.pack("<I4I4", 1000, 2000))
+bcaps = driver._children["ba1b2c3"]._caps or {}
+check(not bcaps.gas, "노출 설정에서 '가스 요금'(비트 13)을 끄면 안 보임")
 
 print(string.format("\n== %d통과 / %d실패 ==", pass, fail))
 os.exit(fail == 0 and 0 or 1)

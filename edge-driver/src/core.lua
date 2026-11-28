@@ -5,6 +5,7 @@
 --   허브 → ST  0x01 상태 [종류 6|9][MAC끝3(3B)][EPC70 블롭]
 --              0x02 연결 ([종류][MAC끝3]) * n  (목록에 없으면 오프라인)
 --              0x03 온습도 int16 x2   0x04 가스 u32 x5   0x05 플러그인 비트(+고장 비트)   0x06 노출 u32
+--              0x0f 이번 청구 기간 가스 [기준][L u32][원 u32] → 보일러 카드 '가스 요금'
 --   ST → 허브  0x00 명령 "f06@<mac> b1=1" / "f09@<mac> a0=7,d4=10" / "refresh" (여러 개는 ";")
 --               "hub mode=proxy" / "hub mode=standalone" (허브의 동작 모드 — 이것만 단독으로 보낸다)
 --
@@ -21,6 +22,7 @@ local CMD_BOILCFG = 0x0c   -- 보일러 설정: [온수 예열 자동 끄기(분
 local CMD_ALIVE = 0x0a
 local CMD_MODELS = 0x0d   -- 모델코드: ([종류][MAC끝3][모델코드 1바이트]) * n — 온수·난방수 온도 표를 고른다(허브 v0.8~)
 local CMD_LABELS = 0x0e   -- 허브 라벨: ([종류][MAC끝3][len][UTF-8 라벨]) * n — 그 기기를 품은 허브 라벨("1층"/"2층"). 방 이름 앞에 붙인다(허브 v0.9~)
+local CMD_BILL = 0x0f     -- 이번 청구 기간 가스: [기준 1 계량기|2 보일러][사용량 L u32][예상 청구액 원 u32], 모르면 [0] — 보일러 카드의 '가스 요금'(허브 v0.10~)
 local KIND_F06, KIND_F09 = 6, 9
 
 -- 한 f09 안의 방 슬롯(7바이트, 슬롯 s 는 byte[7s]). 상태 0x02=켜짐, 0x40=난방 중. 명령 선택자 a0=슬롯+1.
@@ -141,6 +143,7 @@ local cost_cap = capabilities["connectbook02461.gasBill"]
 local usage_cap = capabilities["connectbook02461.gasUsed"]     -- 사용량 카드: 24시간 · 1시간 · 이번달
 local flow_cap = capabilities["connectbook02461.gasFlowRate"]     -- 지금 유량
 local alert_cap = capabilities["connectbook02461.gasAlert"]   -- 사용량 경고(normal/warning) — 루틴 조건용
+local bill_cap = capabilities["connectbook02461.boilerGasBill"]   -- 보일러 카드 '가스 요금': 이번달 사용량(글자)·예상 요금(막대)
 local signal_cap = capabilities["connectbook02461.gasMeterSignal"]   -- 계량기 신호(normal/noPulse) — 보일러를 쓰는데 펄스 없음
 
 local driver
@@ -164,7 +167,7 @@ end
 --   숨김 비트(기기별): bit0 = 기기 자신(보일러 조절기), bit1~7 = 온도 조절기의 방 z1~z7(ZONES[id].n)
 local ALL_VISIBLE = 0x7FFFFFFF   -- 펌웨어 ALL_BITS 와 같게
 local BIT = { power = 1, heat_mode = 2, heat_type = 3, heat_temp = 4, hw = 5, hw_temp = 6, preheat = 7,
-  room_on = 8, room_set = 9, room_out = 10, hub_temp = 11, room_resv = 12, room = 29, gas = 30 }
+  room_on = 8, room_set = 9, room_out = 10, hub_temp = 11, room_resv = 12, boil_bill = 13, room = 29, gas = 30 }
 local function parse_expose(s, raw)
   s.vis = string.unpack("<I4", raw)
   s.hidden = {}
@@ -625,6 +628,19 @@ local function refresh_boiler(parent, mac)
     local left = hub_state(parent).preleft                          -- 예열이 켜져 있으면 남은 분(255 = 무제한)
     emit(child, "preheat", capabilities.mode.mode(preoff_label((left and left > 0) and left or preoff)))
   end
+  local bill = s.bill
+  if bill and child:supports_capability_by_id("connectbook02461.boilerGasBill", "gas") then
+    -- 허브가 센 이번 청구 기간 값(관리 화면 그래프의 마지막 달과 같은 숫자). 보일러 누계는 정수 ㎥ 라 소수점 없이
+    local m3 = bill.use_l / 1000
+    emit(child, "gas", bill_cap.usage({ value = math.floor(m3 * 100 + 0.5) / 100, unit = "m^3" }))
+    emit(child, "gas", bill_cap.usageText(bill.src == 2 and string.format("%d ㎥ · 보일러 누계", math.floor(m3 + 0.5))
+      or string.format("%.2f ㎥ · 계량기", m3)))
+    -- 막대 끝값 = 값이 들어가는 둥근 수(1·2·5×10ⁿ, 최소 5만 원) — 앱이 숫자를 끝값으로 잘라 보여 주지 않게
+    local top = 50000
+    while top < bill.won do top = top * ((tostring(top):sub(1, 1) == "2") and 2.5 or 2) end
+    emit(child, "gas", bill_cap.costRange({ value = { minimum = 0, maximum = math.floor(top + 0.5) }, unit = "원" }))
+    emit(child, "gas", bill_cap.cost({ value = bill.won, unit = "원" }))
+  end
   emit_text(child, main_text(m))
 end
 
@@ -755,6 +771,8 @@ local function wanted_caps(parent, key)
       { "hotwater", { { BIT.hw, "switch" }, { BIT.hw_temp, "thermostatWaterHeatingSetpoint" } } },
       { "preheat", (kind == "boiler" and preoff_of(parent) ~= nil)
         and { { BIT.preheat, "switch" }, { BIT.preheat, "mode" } } or { { BIT.preheat, "switch" } } },
+      -- 가스 요금: 허브가 이번 기간 값을 보내올 때만(계량기도 보일러 누계도 없거나 아직 모르면 숨김). 실보일러만
+      { "gas", (kind == "boiler" and hub_state(parent).bill) and { { BIT.boil_bill, "connectbook02461.boilerGasBill" } } or {} },
     }
     local out = {}
     for _, c in ipairs(comps) do
@@ -901,6 +919,20 @@ local function on_labels(parent, b)
     i = i + 5 + ln
   end
   if changed then refresh_all(parent) end   -- 라벨은 자식기기 생성 때 이름에 쓰인다(생성 뒤 바뀜은 ST 라벨 캐시로 재생성 전엔 안 바뀔 수 있음)
+end
+
+-- 이번 청구 기간 가스(CMD 0x0f): 보일러 카드의 '가스 요금' 구역. 허브가 연결 목록과 같이 5분마다·refresh 때 보낸다.
+-- [0] 이면(허브가 셀 기준이 없거나 아직 모름) 구역을 거둔다.
+local function on_bill(parent, b)
+  local s = hub_state(parent)
+  local src = b:byte(1) or 0
+  if (src == 1 or src == 2) and #b >= 9 then
+    local use_l, won = string.unpack("<I4I4", b, 2)
+    s.bill = { src = src, use_l = use_l, won = won }
+  else
+    s.bill = nil
+  end
+  for bmac in pairs(s.boilers) do refresh_boiler(parent, bmac) end   -- 구역을 내놓거나 거두고(apply_caps) 값을 채운다
 end
 
 local function on_links(parent, b)
@@ -1648,7 +1680,7 @@ end
 local HANDLERS = { [CMD_ALIVE] = on_alive, [CMD_STATE] = on_state, [CMD_LINKS] = on_links, [CMD_ROOM] = on_room, [CMD_GAS] = on_gas,
   [CMD_PLUGINS] = on_plugins, [CMD_EXPOSE] = on_expose, [CMD_PAIRS] = on_pairs, [CMD_FORGET] = on_forget,
   [CMD_TARIFF] = on_tariff, [CMD_MODE] = on_mode, [CMD_BOILCFG] = on_boilcfg, [CMD_MODELS] = on_models,
-  [CMD_LABELS] = on_labels }
+  [CMD_LABELS] = on_labels, [CMD_BILL] = on_bill }
 
 function M.info_changed(_, device)
   if not is_child(device) then return end
