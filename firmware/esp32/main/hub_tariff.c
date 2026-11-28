@@ -5,6 +5,9 @@
  *   요금(보정·열량·단가): 자동=gas.yangsu.kim/api/bill(구역별), 수동=직접 입력.
  *   기본료·검침일: 내 정보(항상 사용자 값).
  *   구역 목록: /api/regions 를 받아 관리 화면 datalist(검색 선택)로.
+ *   사용량 기준: 가스 계량기(플러그인 펄스) 또는 보일러 자체 누계(stg — 약 1시간마다, 정수 ㎥, 난방+온수).
+ *            설정 = 자동(계량기가 있으면 계량기, 없으면 보일러) / 계량기 / 보일러. 기간 중에 기준이 바뀌면 그때까지
+ *            센 양은 두고 새 기준에서 이어 센다. 보일러 카드(드라이버·HA)에는 CMD 0x0f 로 이번 기간 값을 보낸다.
  *   월 마감: 청구월 N = (N-1)월 검침일 다음 날 ~ N월 검침일(검침일 당일까지가 그 달 몫). 검침일을 "말일"(31)로 두면
  *            N월 1일 ~ N월 말일. 정확 열량(사용기간 가중평균)이 확정되면 그 청구액으로,
  *            아니면 검침일+3일 뒤 최신 월 열량 청구액으로 등록(/api/bill 의 청구액 = 청구서 재현).
@@ -28,6 +31,7 @@
 #include "hub_proxy.h"
 #include "hub_sensors.h"
 #include "hub_plugins.h"
+#include "hub_rinnai.h"
 #include "hub_tariff.h"
 
 static const char *TAG = "HUB_TARIFF";
@@ -51,6 +55,12 @@ extern const char gas_ca_pem_end[]   asm("_binary_gas_ca_pem_end");
 
 #define MODE_AUTO 0
 #define MODE_MANUAL 1
+
+/* 사용량 기준(설정 tsrc). 월 기록의 src 에는 실제로 센 기준(1·2)이 들어간다 */
+#define SRC_AUTO   0
+#define SRC_METER  1
+#define SRC_BOILER 2
+static uint8_t s_src_cfg = SRC_AUTO;
 
 #define DEF_VCF_E6  993900u
 #define DEF_HEAT_E6 42576000u
@@ -84,19 +94,30 @@ static bool     s_regs_got;
 static TaskHandle_t s_task;
 static char s_buf[BUF_MAX];
 static uint32_t s_relay_sig = 0xFFFFFFFFu;
+static volatile bool s_bill_want;            /* 설정을 바꿨다: 태스크가 보일러 카드용 0x0f 를 곧 다시 보낸다 */
 static int64_t  s_fin_last_us;
 
 /* ---- 월별 기록 ---- */
 #define MON_MAX 13
 typedef struct {
     uint16_t ym;        /* 청구월(연*12 + 월-1). 기간 = (월-1) 검침일 다음 날 ~ 월 검침일 */
-    uint32_t start_l;   /* 기간 시작 때 누적 리터(count*step) */
-    uint32_t use_l;     /* 사용 리터 */
-    uint32_t won;       /* 청구액 원 */
     uint8_t  closed;    /* 1 = 기간 끝남(마감 대기/완료) */
     uint8_t  final;     /* 1 = 정확 열량으로 확정 등록됨 */
+    uint8_t  src;       /* 지금(마지막으로) 세는 기준 SRC_METER / SRC_BOILER */
+    uint8_t  mac3[3];   /* 보일러 기준이면 그 보일러 MAC끝3 */
+    uint32_t start_l;   /* 기간 시작(또는 기준이 바뀐 때) 그 기준의 누적 리터 */
+    uint32_t carry_l;   /* 기준이 바뀌기 전까지 센 리터 */
+    uint32_t use_l;     /* 사용 리터 = carry_l + (지금 누적 - start_l) */
+    uint32_t won;       /* 청구액 원 */
 } tmon_t;
 typedef struct { uint8_t n; tmon_t m[MON_MAX]; } mon_blob_t;
+/* v0.9 까지의 기록(tmon2) — 계량기로만 셌다. 처음 읽을 때 옮긴다 */
+typedef struct {
+    uint16_t ym;
+    uint32_t start_l, use_l, won;
+    uint8_t  closed, final;
+} tmon2_t;
+typedef struct { uint8_t n; tmon2_t m[MON_MAX]; } mon2_blob_t;
 static tmon_t s_mon[MON_MAX];
 static int    s_mon_n;
 static SemaphoreHandle_t s_lock;
@@ -113,6 +134,7 @@ static void save_cfg(void)
     nvs_set_u32(h, "theat", s_man_heat_e6);
     nvs_set_u32(h, "trate", s_man_rate_e6);
     nvs_set_u32(h, "tbase", s_man_base);
+    nvs_set_u8(h, "tsrc", s_src_cfg);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -129,35 +151,61 @@ static void load_cfg(void)
     nvs_get_u32(h, "theat", &s_man_heat_e6);
     nvs_get_u32(h, "trate", &s_man_rate_e6);
     nvs_get_u32(h, "tbase", &s_man_base);
+    nvs_get_u8(h, "tsrc", &s_src_cfg);
     nvs_close(h);
     if (s_billday < 1 || s_billday > BILLDAY_LAST) s_billday = 8;
+    if (s_src_cfg > SRC_BOILER) s_src_cfg = SRC_AUTO;
 }
 
 static void mon_save(void)
 {
-    mon_blob_t bl = { 0 };
+    mon_blob_t *bl = calloc(1, sizeof(mon_blob_t));      /* httpd 핸들러에서도 불린다 — 힙에 */
+    if (!bl) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    bl.n = (uint8_t)s_mon_n;
-    memcpy(bl.m, s_mon, sizeof(s_mon));
+    bl->n = (uint8_t)s_mon_n;
+    memcpy(bl->m, s_mon, sizeof(s_mon));
     xSemaphoreGive(s_lock);
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
-    nvs_set_blob(h, "tmon2", &bl, sizeof(bl));
-    nvs_commit(h);
-    nvs_close(h);
+    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "tmon3", bl, sizeof(*bl));
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    free(bl);
 }
 
 static void mon_load(void)
 {
-    mon_blob_t bl;
-    size_t n = sizeof(bl);
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return;
-    if (nvs_get_blob(h, "tmon2", &bl, &n) == ESP_OK && n == sizeof(bl) && bl.n <= MON_MAX) {
-        s_mon_n = bl.n;
-        memcpy(s_mon, bl.m, sizeof(s_mon));
+    mon_blob_t *bl = calloc(1, sizeof(mon_blob_t));      /* 둘 다 300바이트 남짓 — 스택 대신 힙 */
+    mon2_blob_t *old = calloc(1, sizeof(mon2_blob_t));
+    size_t n = sizeof(*bl), n2 = sizeof(*old);
+    bool moved = false;
+    if (bl && nvs_get_blob(h, "tmon3", bl, &n) == ESP_OK && n == sizeof(*bl) && bl->n <= MON_MAX) {
+        s_mon_n = bl->n;
+        memcpy(s_mon, bl->m, sizeof(s_mon));
+    } else if (old && nvs_get_blob(h, "tmon2", old, &n2) == ESP_OK && n2 == sizeof(*old) && old->n <= MON_MAX) {
+        s_mon_n = old->n;                                 /* 옛 기록: 계량기 기준으로 옮긴다 */
+        memset(s_mon, 0, sizeof(s_mon));
+        for (int i = 0; i < s_mon_n; i++) {
+            s_mon[i].ym = old->m[i].ym;
+            s_mon[i].closed = old->m[i].closed;
+            s_mon[i].final = old->m[i].final;
+            s_mon[i].src = SRC_METER;
+            s_mon[i].start_l = old->m[i].start_l;
+            s_mon[i].use_l = old->m[i].use_l;
+            s_mon[i].won = old->m[i].won;
+        }
+        moved = true;
     }
     nvs_close(h);
+    free(bl);
+    free(old);
+    if (moved) {
+        ESP_LOGI(TAG, "월별 기록 %d개를 새 형식(tmon3)으로 옮김", s_mon_n);
+        mon_save();
+    }
 }
 
 /* ---------------------------------------------------------------- 요금 */
@@ -458,21 +506,65 @@ static time_t billday_epoch(uint16_t ym)
     return mktime(&b);
 }
 
+/* 지금 쓸 기준(설정 + 무엇이 있나). 없으면 0 */
+static int src_pick(void)
+{
+    bool meter = hub_plugin_enabled("gas");
+    bool boiler = hub_rinnai_has_boiler(NULL);
+    switch (s_src_cfg) {
+    case SRC_METER:  return meter ? SRC_METER : 0;
+    case SRC_BOILER: return boiler ? SRC_BOILER : 0;
+    default:         return meter ? SRC_METER : (boiler ? SRC_BOILER : 0);
+    }
+}
+
+/* 기준의 지금 누적(L). 보일러는 want(이 기간에 세던 보일러)를 먼저, 없으면 가장 최근에 누계를 올린 보일러.
+ * 값을 아직 모르면(계량기 멈춤·부팅 뒤 보일러 누계가 아직 안 옴 — 약 1시간마다 온다) false */
+static bool src_total(int src, const uint8_t *want, uint32_t *l, uint8_t mac3[3])
+{
+    memset(mac3, 0, 3);
+    if (src == SRC_METER) {
+        gas_view_t g; uint32_t step;
+        if (!hub_sensors_gas(&g, &step)) return false;
+        *l = g.count * step;
+        return true;
+    }
+    if (src == SRC_BOILER) {
+        hub_stg_t st;
+        if (!(want && hub_rinnai_stg_of(want, &st)) && !hub_rinnai_stg(&st)) return false;
+        *l = ((uint32_t)st.heat_gas_m3 + st.hw_gas_m3) * 1000u;     /* 난방 + 온수(정수 ㎥) */
+        memcpy(mac3, st.mac3, 3);
+        return true;
+    }
+    return false;
+}
+
 static void months_update(void)
 {
     long now = time(NULL);
     if (!CLOCK_OK(now)) return;
-    gas_view_t g; uint32_t step;
-    if (!hub_sensors_gas(&g, &step)) return;
-    uint32_t cur_l = g.count * step;
+    int src = src_pick();
+    if (!src) return;
+    uint8_t want[3] = { 0 };
+    bool has_want = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_mon_n && s_mon[s_mon_n - 1].src == SRC_BOILER) {
+        memcpy(want, s_mon[s_mon_n - 1].mac3, 3);
+        has_want = true;
+    }
+    xSemaphoreGive(s_lock);
+    uint32_t cur_l;
+    uint8_t mac3[3];
+    if (!src_total(src, has_want ? want : NULL, &cur_l, mac3)) return;   /* 다른 잠금(센서·보일러)은 이 잠금 밖에서 */
     uint16_t key = period_key(now);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     bool dirty = false;
     tmon_t *cur = s_mon_n ? &s_mon[s_mon_n - 1] : NULL;
+    bool same = cur && cur->src == src && !memcmp(cur->mac3, mac3, 3) && cur_l >= cur->start_l;
     if (!cur || cur->ym != key) {
-        if (cur) {                        /* 이전 기간 끝 → 마감 대기(final=0) */
-            cur->use_l  = (cur_l >= cur->start_l) ? cur_l - cur->start_l : 0;
+        if (cur) {                        /* 이전 기간 끝 → 마감 대기(final=0). 기준이 바뀌었으면 마지막으로 센 값 그대로 */
+            if (same) cur->use_l = cur->carry_l + (cur_l - cur->start_l);
             cur->won    = won_of(cur->use_l / 1000.0);
             cur->closed = 1;
             cur->final  = 0;
@@ -482,10 +574,25 @@ static void months_update(void)
             s_mon_n--;
         }
         cur = &s_mon[s_mon_n++];
-        cur->ym = key; cur->start_l = cur_l; cur->closed = 0; cur->final = 0;
+        memset(cur, 0, sizeof(*cur));
+        cur->ym = key; cur->src = (uint8_t)src; memcpy(cur->mac3, mac3, 3); cur->start_l = cur_l;
+        dirty = true;
+    } else if (!same) {
+        /* 기준이 바뀜(설정·계량기 켜고 끔·다른 보일러) 또는 누계가 줄어듦(교체·초기화):
+         * 그때까지 센 양은 두고 새 기준의 지금 값부터 이어 센다 */
+        ESP_LOGI(TAG, "사용량 기준 %s → %s (이번 기간 %.1f ㎥ 이어서)", cur->src == SRC_BOILER ? "보일러" : "계량기",
+                 src == SRC_BOILER ? "보일러" : "계량기", cur->use_l / 1000.0);
+        cur->carry_l = cur->use_l;
+        cur->src = (uint8_t)src;
+        memcpy(cur->mac3, mac3, 3);
+        cur->start_l = cur_l;
         dirty = true;
     }
-    cur->use_l = (cur_l >= cur->start_l) ? cur_l - cur->start_l : 0;   /* 진행 중 라이브 */
+    uint32_t use = cur->carry_l + (cur_l - cur->start_l);   /* 진행 중 라이브 */
+    /* 보일러 누계는 허브가 다시 켜진 뒤 한 시간쯤 지나야 오므로 그동안 보여 줄 값을 저장해 둔다(바뀔 때만 — 1시간에 한 번꼴).
+     * 계량기는 펄스 수가 허브 NVS 에 남아 켜자마자 다시 셀 수 있어 저장하지 않는다(펄스마다 쓰면 플래시가 닳는다) */
+    if (src == SRC_BOILER && use != cur->use_l) dirty = true;
+    cur->use_l = use;
     cur->won   = won_of(cur->use_l / 1000.0);
     xSemaphoreGive(s_lock);
     if (dirty) mon_save();
@@ -568,6 +675,10 @@ static void tariff_task(void *arg)
             s_fet_busy = false;
         }
         relay_current();
+        if (s_bill_want) {
+            s_bill_want = false;
+            hub_tariff_send_bill();
+        }
         finalize_pending();
         uint32_t wait = s_mon_n == 0 ? 30 : WAKE_S;
         if (need_retry) {              /* 15초, 30초, 1분 … 최대 10분 */
@@ -599,7 +710,7 @@ void hub_tariff_refresh(void)
     if (s_task) xTaskNotifyGive(s_task);
 }
 
-int hub_tariff_apply(int mode, const char *region, int billday,
+int hub_tariff_apply(int mode, int src, const char *region, int billday,
                      double vcf, double heat, double rate, double base,
                      char *err, int errlen)
 {
@@ -616,12 +727,14 @@ int hub_tariff_apply(int mode, const char *region, int billday,
     }
     if (!rg[0]) FAIL("구역 코드를 넣어 주세요 (예: SD07)");
     if (base < 0 || base > 100000) FAIL("기본료 범위 벗어남");
+    if (src < SRC_AUTO || src > SRC_BOILER) FAIL("사용량 기준이 잘못됨");
     if (mode == MODE_MANUAL) {
         if (vcf < 0.9 || vcf > 1.1) FAIL("보정계수는 0.9~1.1");
         if (heat < 20 || heat > 60) FAIL("열량은 20~60 MJ/N㎥");
         if (rate <= 0 || rate > 100) FAIL("단가는 0~100 원/MJ");
     }
     s_mode    = mode == MODE_MANUAL ? MODE_MANUAL : MODE_AUTO;
+    s_src_cfg = (uint8_t)src;
     s_billday = (uint8_t)billday;
     strlcpy(s_region, rg, sizeof(s_region));
     s_man_base = (uint32_t)lround(base);         /* 기본료 = 내 정보(항상 저장) */
@@ -637,6 +750,7 @@ int hub_tariff_apply(int mode, const char *region, int billday,
     s_fet_busy  = (s_mode == MODE_AUTO);
     s_relay_sig = 0xFFFFFFFFu;
     if (s_task) xTaskNotifyGive(s_task);
+    s_bill_want = true;                          /* 기준을 바꿨으면 보일러 카드도 바로(보내기는 태스크가) */
     return 1;
 #undef FAIL
 }
@@ -661,7 +775,7 @@ void hub_tariff_tick(void) { months_update(); }
 
 /* 이번 청구 기간의 사용량(L)과 예상 청구액(원) — 관리 화면 그래프의 마지막 달과 같은 값. 스마트홈에도 이 값을 보낸다
  * (드라이버가 따로 세면 시작점이 달라 웹과 앱의 숫자가 어긋난다). 아직 모르면(시계 전·가스 꺼짐) false. */
-bool hub_tariff_period(uint32_t *use_l, uint32_t *won)
+bool hub_tariff_period(uint32_t *use_l, uint32_t *won, int *src)
 {
     if (!s_lock) return false;
     months_update();
@@ -670,15 +784,41 @@ bool hub_tariff_period(uint32_t *use_l, uint32_t *won)
     if (s_mon_n && !s_mon[s_mon_n - 1].closed) {
         *use_l = s_mon[s_mon_n - 1].use_l;
         *won = s_mon[s_mon_n - 1].won;
+        if (src) *src = s_mon[s_mon_n - 1].src;
         ok = true;
     }
     xSemaphoreGive(s_lock);
     return ok;
 }
 
+int hub_tariff_source(int *cfg)
+{
+    if (cfg) *cfg = s_src_cfg;
+    return src_pick();
+}
+
+/* 보일러 카드용(CMD 0x0f): [기준][이번 기간 L][예상 청구액 원], 모르면 [0]. 같은 값이어도 보낸다(연결 목록과 같이 5분마다·
+ * refresh — 드라이버가 다시 켜져도 곧 채워지게). 위성 허브(보일러 없음)는 기준이 없어 [0] 만 — 중심 허브는 위성의 0x0f 를 버린다.
+ * '지금 셀 수 있나'(src_pick)로 거르지 않는다: 부팅 직후엔 보일러가 아직 안 붙어 있어 구역이 잠깐 사라졌다 돌아온다.
+ * 진행 중인 기간 기록이 있으면 그 값(마지막으로 센 값)을 보낸다 */
+void hub_tariff_send_bill(void)
+{
+    if (!s_lock) return;                                /* 시작 전 — 다음 바퀴(5분)에 */
+    uint8_t b[9] = { 0 };
+    uint32_t use_l = 0, won = 0;
+    int src = 0;
+    if (!hub_tariff_period(&use_l, &won, &src)) src = 0;
+    if (src == SRC_METER || src == SRC_BOILER) {
+        b[0] = (uint8_t)src;
+        memcpy(b + 1, &use_l, 4);                       /* 리틀엔디언 */
+        memcpy(b + 5, &won, 4);
+    }
+    hub_uplink_send(HUB_RK_CMD_BILL, b, b[0] ? sizeof(b) : 1);
+}
+
 int hub_tariff_months(void) { return s_mon_n; }
 
-int hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won, int *closed)
+int hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won, int *closed, int *src)
 {
     if (i < 0 || i >= s_mon_n) return 0;
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -689,6 +829,7 @@ int hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won,
     if (m3) *m3 = m.use_l / 1000.0;
     if (won) *won = m.won;
     if (closed) *closed = m.final ? 2 : (m.closed ? 1 : 0);    /* 0 진행 1 잠정 2 확정 */
+    if (src) *src = m.src;
     return 1;
 }
 
@@ -829,6 +970,33 @@ void hub_tariff_render(char *out, size_t cap)
 
     /* ---- 설정 폼 ---- */
     catf(out, cap, "<form method=post action=/admin/gas>");
+    /* 사용량 기준: 한 줄(라벨 + 자동/계량기/보일러) + 지금 무엇으로 세나 */
+    {
+        bool meter = hub_plugin_enabled("gas");
+        bool boiler = hub_rinnai_has_boiler(NULL);
+        int used = src_pick();
+        catf(out, cap, "<div class=gline><b>사용량 기준</b>"
+                       "<label class=gopt><input type=radio name=src value=auto %s> 자동</label>"
+                       "<label class=gopt><input type=radio name=src value=meter %s> 가스 계량기%s</label>"
+                       "<label class=gopt><input type=radio name=src value=boiler %s> 보일러 누계%s</label></div>",
+             s_src_cfg == SRC_AUTO ? "checked" : "", s_src_cfg == SRC_METER ? "checked" : "", meter ? "" : " (없음)",
+             s_src_cfg == SRC_BOILER ? "checked" : "", boiler ? "" : " (없음)");
+        catf(out, cap, "<p class='muted sub'>");
+        if (s_src_cfg == SRC_AUTO) catf(out, cap, "자동 = 계량기가 있으면 계량기, 없으면 보일러. ");
+        if (used == SRC_METER) {
+            catf(out, cap, "지금: <b>가스 계량기</b> 펄스로 셉니다.");
+        } else if (used == SRC_BOILER) {
+            hub_stg_t st;
+            catf(out, cap, "지금: <b>보일러 누계</b>(보일러가 스스로 센 난방+온수 가스, 약 1시간마다 1 ㎥ 단위)로 셉니다. "
+                           "실제 계량기와 다를 수 있는 예상값입니다.");
+            if (!hub_rinnai_stg(&st)) catf(out, cap, " <b>아직 누계를 받지 못했습니다</b>(허브가 켜진 뒤 1시간 안에 옵니다).");
+        } else {
+            catf(out, cap, "⚠ 지금은 셀 수 없습니다: %s",
+                 s_src_cfg == SRC_METER ? "가스 계량기 플러그인이 꺼져 있습니다." :
+                 s_src_cfg == SRC_BOILER ? "연결된 보일러가 없습니다." : "가스 계량기도 보일러도 없습니다.");
+        }
+        catf(out, cap, "</p>");
+    }
     /* 조회 방식: 한 줄(라벨 + 자동/수동) */
     catf(out, cap, "<div class=gline><b>가스 요금 조회</b>"
                    "<label class=gopt><input type=radio name=mode value=auto %s onchange=_gm()> 자동 (gas.yangsu.kim)</label>"

@@ -528,7 +528,8 @@ static void send_gas(void)
     /* 여섯째 = 1펄스 양(L). 옛 드라이버는 앞의 다섯만 읽는다. 일곱째·여덟째 = 이번 청구 기간의 사용량(L)과 예상
      * 청구액(원) — 허브가 아직 모르면(시계 전) 붙이지 않는다 */
     uint32_t p[8] = { v.count, v.reading_l, v.hour_l, v.day_l, v.flow_lph, GAS_STEP_L };
-    bool period = hub_tariff_period(&p[6], &p[7]);
+    int src = 0;          /* 계량기로 센 기간만 — 보일러 누계로 세고 있으면 계량기 카드의 '이번달'은 드라이버가 스스로 센다 */
+    bool period = hub_tariff_period(&p[6], &p[7], &src) && src == 1;
     if (s_gas_fault) {
         send_plugins();       /* 고장 중엔 값보다 먼저 다시 알린다(드라이버가 재시작해 잊었어도 온라인으로 되돌리지 않게) */
     }

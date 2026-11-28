@@ -17,6 +17,7 @@
 #include "freertos/queue.h"
 
 #include "hub_rinnai.h"
+#include "hub_tariff.h"
 #include "hub_events.h"
 #include "hub_sensors.h"
 #include "hub_wifi.h"
@@ -1402,6 +1403,7 @@ static void zb_task(void *arg)
             int pn = hub_pairs_blob(pairs, sizeof(pairs));
             hub_uplink_send(HUB_RK_CMD_PAIRS, pairs, pn);   /* 짝(없으면 0바이트 = 전부 단독/암묵) */
             send_boilcfg();                                  /* 보일러 설정(온수 예열 자동 끄기) */
+            hub_tariff_send_bill();                          /* 보일러 카드: 이번 기간 가스 사용량·예상 요금(0x0f) */
             hub_upstream_resend();                            /* 1층 방 상태 다시(드라이버 재시작 동기화) */
         }
         /* 기기별 상태 */
@@ -1430,6 +1432,25 @@ static void zb_task(void *arg)
             }
         }
     }
+}
+
+bool hub_rinnai_has_boiler(uint8_t mac3[3])
+{
+    bool found = false;
+    if (!s_lock) {
+        return false;
+    }
+    lock();
+    for (int i = 0; i < MAX_DEV && !found; i++) {
+        if (s_dev[i].used && s_dev[i].kind == HUB_KIND_F06) {
+            found = true;
+            if (mac3) {
+                memcpy(mac3, s_dev[i].mac3, 3);
+            }
+        }
+    }
+    unlock();
+    return found;
 }
 
 int hub_rinnai_snapshot(hub_dev_t *out, int max)

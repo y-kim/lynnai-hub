@@ -513,8 +513,8 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     hub_devs_render(b, cap); FLUSH();      /* 등록 대기 */
     hub_expose_render_types(b, cap); FLUSH();  /* 노출 설정 */
     hub_plugins_render(b, cap); FLUSH();
-    if (hub_plugin_enabled("gas")) {       /* 가스 계량이 없으면 요금 카드도 숨긴다 */
-        hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(자동/수동 + 월별 그래프) */
+    if (hub_plugin_enabled("gas") || hub_rinnai_has_boiler(NULL)) {   /* 셀 것(계량기·보일러 누계)이 없으면 요금 카드도 숨긴다 */
+        hub_tariff_render(b, cap); FLUSH();    /* 가스 요금(사용량 기준·자동/수동 + 월별 그래프) */
     }
     hub_upstream_render(b, cap); FLUSH();  /* 멀티 허브(중심/위성) + 이 허브 라벨 — 플러그인 아래로 */
     hub_crypt_render(b, cap); FLUSH();     /* 저장 데이터 암호화 */
@@ -864,15 +864,17 @@ static esp_err_t gas_post(httpd_req_t *req)
         hub_tariff_refresh();
         return admin_page(req, "지금 다시 받는 중입니다", true);
     }
-    char mode[12], region[16], billday[8], vcf[16], heat[16], rate[16], base[16];
+    char mode[12], src[12], region[16], billday[8], vcf[16], heat[16], rate[16], base[16];
     form_get(body, "mode", mode, sizeof(mode));
+    form_get(body, "src", src, sizeof(src));
     form_get(body, "region", region, sizeof(region));
     form_get(body, "billday", billday, sizeof(billday));
     form_get(body, "vcf", vcf, sizeof(vcf));
     form_get(body, "heat", heat, sizeof(heat));
     form_get(body, "rate", rate, sizeof(rate));
     form_get(body, "base", base, sizeof(base));
-    bool ok = hub_tariff_apply(strcmp(mode, "manual") == 0 ? 1 : 0, region, atoi(billday),
+    int srcv = !strcmp(src, "meter") ? 1 : !strcmp(src, "boiler") ? 2 : 0;   /* 없으면(옛 화면) 자동 */
+    bool ok = hub_tariff_apply(strcmp(mode, "manual") == 0 ? 1 : 0, srcv, region, atoi(billday),
                                atof(vcf), atof(heat), atof(rate), atof(base), err, sizeof(err));
     return admin_page(req, ok ? "가스 요금 설정을 저장했습니다" : (err[0] ? err : "잘못된 요청"), ok);
 }

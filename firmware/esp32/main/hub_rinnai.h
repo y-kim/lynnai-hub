@@ -47,6 +47,8 @@ void hub_rinnai_start(void);
 
 /* 서버 API 용: 지금 아는 기기들을 out 에 채우고 개수를 돌려준다(최대 max) */
 int hub_rinnai_snapshot(hub_dev_t *out, int max);
+/* 보일러(f06)를 아나(끊겨 있어도 기억하는 기기면 true). mac3 가 있으면 첫 보일러의 MAC끝3 */
+bool hub_rinnai_has_boiler(uint8_t mac3[3]);
 
 /* 관리 화면: 기기 삭제(MAC끝3 6hex). 찾아 지웠으면 true. */
 bool hub_rinnai_forget(const char *mac6);

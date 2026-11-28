@@ -537,15 +537,20 @@ static esp_err_t state_get(httpd_req_t *req)
         hub_tariff_tick();
         hub_tariff_cur(&mode, &region, &billday, &vcf, &heat, &rate, &base, &lf);
         CHUNK(",\"tariff\":{\"mode\":\"%s\",\"region\":\"%s\",\"billday\":%d,", mode ? "manual" : "auto", region, billday);
+        static const char *const SRCN[] = { "null", "\"meter\"", "\"boiler\"" };
+        int scfg = 0, sused = hub_tariff_source(&scfg);
+        /* source = 설정(auto/meter/boiler), basis = 지금 실제로 세는 기준(없으면 null), months[].source = 그 달을 센 기준 */
+        CHUNK("\"source\":\"%s\",\"basis\":%s,", scfg == 1 ? "meter" : scfg == 2 ? "boiler" : "auto", SRCN[sused >= 1 && sused <= 2 ? sused : 0]);
         CHUNK("\"vcf\":%.6f,\"heat\":%.4f,\"rate\":%.6f,\"base\":%.0f,\"fetched\":%ld,\"months\":[", vcf, heat, rate, base, lf);
         int mn = hub_tariff_months();
         for (int i = 0; i < mn; i++) {
-            int y, mo, st;
+            int y, mo, st, ms = 0;
             double m3;
             uint32_t won;
-            hub_tariff_month_at(i, &y, &mo, &m3, &won, &st);
-            CHUNK("%s{\"year\":%d,\"month\":%d,\"m3\":%.2f,\"won\":%u,\"closed\":%s,\"final\":%s}",
-                  i ? "," : "", y, mo, m3, (unsigned)won, st >= 1 ? "true" : "false", st == 2 ? "true" : "false");
+            hub_tariff_month_at(i, &y, &mo, &m3, &won, &st, &ms);
+            CHUNK("%s{\"year\":%d,\"month\":%d,\"m3\":%.2f,\"won\":%u,\"closed\":%s,\"final\":%s,\"source\":%s}",
+                  i ? "," : "", y, mo, m3, (unsigned)won, st >= 1 ? "true" : "false", st == 2 ? "true" : "false",
+                  SRCN[ms == 1 || ms == 2 ? ms : 0]);
         }
         CHUNK("]}");
     }
@@ -689,7 +694,7 @@ static esp_err_t metrics_get(httpd_req_t *req)
                 int y, mo, cl;
                 double m3;
                 uint32_t won;
-                hub_tariff_month_at(i, &y, &mo, &m3, &won, &cl);
+                hub_tariff_month_at(i, &y, &mo, &m3, &won, &cl, NULL);
                 CHUNK("lynnai_gas_month_cost_won{month=\"%04d-%02d\"} %u\n", y, mo, (unsigned)won);
             }
             CHUNK("# TYPE lynnai_gas_month_cubic_meters gauge\n");
@@ -697,7 +702,7 @@ static esp_err_t metrics_get(httpd_req_t *req)
                 int y, mo, cl;
                 double m3;
                 uint32_t won;
-                hub_tariff_month_at(i, &y, &mo, &m3, &won, &cl);
+                hub_tariff_month_at(i, &y, &mo, &m3, &won, &cl, NULL);
                 CHUNK("lynnai_gas_month_cubic_meters{month=\"%04d-%02d\"} %.2f\n", y, mo, m3);
             }
         }
