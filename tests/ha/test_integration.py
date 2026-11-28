@@ -110,7 +110,7 @@ async def test_entities_show_the_hub_state(hass: HomeAssistant, entry, fake_hub)
     assert s.get("sensor.room_sensor_temperature").state == "25.3"
     assert s.get("sensor.room_sensor_humidity").state == "34"
     total = s.get("sensor.gas_meter_meter_reading")
-    assert total.state == "15.04" and total.attributes["state_class"] == "total_increasing"
+    assert total.state == "15.04" and total.attributes["state_class"] == "total"     # total + last_reset (meter set ≠ use)
     assert total.attributes["device_class"] == "gas"
     assert s.get("sensor.gas_meter_flow").state == "0.86"
     assert s.get("sensor.gas_meter_last_24_hours").state == "5.19"

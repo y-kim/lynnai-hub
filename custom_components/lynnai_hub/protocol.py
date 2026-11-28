@@ -213,11 +213,12 @@ class GasState:
     hour_m3: float
     day_m3: float
     flow_m3h: float
+    step_l: int = 10            # litres per pulse as set on the hub (1-1000; older firmware does not send it: 10 L)
 
     @property
     def total_m3(self) -> float:
-        """Meter reading if calibrated, else pulses x 0.01 m3 (the usual pulse size)."""
-        return self.meter_m3 if self.meter_m3 is not None else round(self.pulses * 0.01, 2)
+        """Meter reading if calibrated, else pulses x the pulse size."""
+        return self.meter_m3 if self.meter_m3 is not None else round(self.pulses * self.step_l / 1000, 3)
 
 
 @dataclass(frozen=True)
@@ -340,12 +341,14 @@ def decode_gas(payload: bytes) -> GasState | None:
     if len(payload) < 20:
         return None
     pulses, reading_l, hour_l, day_l, flow_lph = struct.unpack_from("<5I", payload)
+    step = struct.unpack_from("<I", payload, 20)[0] if len(payload) >= 24 else 10
     return GasState(
         pulses=pulses,
         meter_m3=None if reading_l == GAS_UNSET else round(reading_l / 1000, 2),
         hour_m3=round(hour_l / 1000, 2),
         day_m3=round(day_l / 1000, 2),
         flow_m3h=round(flow_lph / 1000, 2),
+        step_l=step if 1 <= step <= 1000 else 10,
     )
 
 

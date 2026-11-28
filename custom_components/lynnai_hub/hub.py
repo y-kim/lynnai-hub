@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 import logging
 import time
 
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
+
 from . import protocol as p
-from .client import HubClient
+from .client import HubClient, HubError
+
+# Most boilers/thermostats one hub can report (the firmware's tables are smaller). Anything beyond is ignored, so a
+# misbehaving peer cannot make thousands of devices and entities.
+MAX_DEVICES = 16
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +33,7 @@ class LynnaiHub:
         self.problem: str | None = None
         self.boilers: dict[str, p.BoilerState] = {}
         self.zones: dict[str, dict[str, p.ZoneState]] = {}      # thermostat mac -> zone id -> state
-        self.zone_gone: dict[tuple[str, str], float] = {}       # (mac, zone) -> when it went uninstalled (monotonic); entity removed after 10 min
+        self.zone_gone: dict[tuple[str, str], float] = {}       # (mac, zone) -> when it went uninstalled (monotonic); entity removed after entity.ZONE_GONE_S
         self.pairs: dict[str, str] = {}
         self.links: set[tuple[int, str]] | None = None          # None until the hub told us
         self.models: dict[tuple[int, str], str] = {}            # (kind, mac) -> model code ("23"), from hub v0.8
@@ -34,6 +42,9 @@ class LynnaiHub:
         self.gas: p.GasState | None = None
         self.bill: p.BillState | None = None                    # this billing period's gas and estimated bill (hub v0.10)
         self.plugins = p.PluginState()
+        self.plugins_seen = False                               # a plugin notice arrived (older firmware never sends one)
+        self.gas_reset: datetime | None = None                  # the meter reading was set (jump that is not gas use)
+        self.bill_reset: datetime | None = None                 # a new billing period (or basis) started
         self.chip_temp: float | None = None                     # the hub's own temperature, when it sends one
         self.mode: p.HubMode | None = None                      # None until the hub told us (older firmware never does)
         self.preheat_off: int | None = None                     # preheat auto-off minutes (0 = never), one for the hub
@@ -61,6 +72,9 @@ class LynnaiHub:
         new = False
         if cmd == p.CMD_STATE and len(payload) >= 4:
             kind, mac, blob = payload[0], payload[1:4].hex(), payload[4:]
+            if mac not in self.boilers and mac not in self.zones and len(self.boilers) + len(self.zones) >= MAX_DEVICES:
+                _LOGGER.warning("Hub %s reports more than %d devices; ignoring %s", self.hub_id, MAX_DEVICES, mac)
+                return
             if kind == p.KIND_BOILER:
                 state = p.decode_boiler(blob)
                 if state is None:
@@ -76,7 +90,7 @@ class LynnaiHub:
                 # removed, not a missed report: drop it at once (its entity goes unavailable) and note the time so the
                 # entity is removed after 10 minutes. A room that comes back clears the note.
                 now = time.monotonic()
-                for z in known:
+                for z in p.ZONE_SLOTS:      # all slots: a room removed while Home Assistant was off is noted too
                     if z not in zones:
                         self.zone_gone.setdefault((mac, z), now)
                 for z in zones:
@@ -105,15 +119,25 @@ class LynnaiHub:
             self.room = room
         elif cmd == p.CMD_GAS:
             new = self.gas is None
-            self.gas = p.decode_gas(payload) or self.gas
+            gas = p.decode_gas(payload)
+            if gas and self.gas and gas.meter_m3 is not None:
+                # Setting the meter reading on the hub jumps the total without gas flowing: start a new cycle so the
+                # energy dashboard does not count the jump (more than one pulse off from what the pulses explain).
+                used = (gas.pulses - self.gas.pulses) * gas.step_l / 1000
+                if abs((gas.total_m3 - self.gas.total_m3) - used) > gas.step_l / 1000 + 0.005:
+                    self.gas_reset = dt_util.utcnow()
+            self.gas = gas or self.gas
         elif cmd == p.CMD_BILL:
             bill = p.decode_bill(payload)
             if bill == self.bill:
                 return
             new = self.bill is None
+            if bill and self.bill and (bill.basis != self.bill.basis or (bill.m3 or 0) < (self.bill.m3 or 0)):
+                self.bill_reset = dt_util.utcnow()      # new billing period (or counted differently): a new total
             self.bill = bill
         elif cmd == p.CMD_PLUGINS:
             self.plugins = p.decode_plugins(payload)
+            self.plugins_seen = True
         elif cmd == p.CMD_PAIRS:
             self.pairs = p.decode_pairs(payload)
         elif cmd == p.CMD_MODE:
@@ -192,8 +216,11 @@ class LynnaiHub:
     async def _send(self, requests: list[str]) -> None:
         if not self.client:
             raise RuntimeError("hub client not started")
-        for text in requests:
-            await self.client.send_text(text)
+        try:
+            for text in requests:
+                await self.client.send_text(text)
+        except HubError as err:              # shown to the user as a plain message, not "unknown error"
+            raise HomeAssistantError(f"LYNNAI hub: {err}") from err
 
     async def refresh(self) -> None:
         await self._send(["refresh"])

@@ -27,7 +27,8 @@
     },
     "abort": {
       "already_configured": "This hub is already set up.",
-      "not_lynnai_hub": "The device that answered is not a LYNNAI hub."
+      "not_lynnai_hub": "The device that answered is not a LYNNAI hub.",
+      "already_in_progress": "A setup for this hub is already in progress."
     }
   },
   "entity": {

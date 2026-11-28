@@ -307,7 +307,11 @@ class HubClient:
             self.host, self.port = found
 
     async def _read(self, reader: asyncio.StreamReader) -> None:
+        lines = 0
         while True:
+            lines += 1
+            if lines % 200 == 0:
+                await asyncio.sleep(0)      # a flood of short lines must not hold the event loop
             try:
                 raw = await asyncio.wait_for(reader.readline(), READ_TIMEOUT)
             except (OSError, asyncio.TimeoutError, ValueError):

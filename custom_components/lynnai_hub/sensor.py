@@ -36,11 +36,13 @@ SENSORS = (
         state_class=SensorStateClass.MEASUREMENT,
         value=lambda hub: hub.room.humidity if hub.room else None,
     ),
-    # The meter total feeds Home Assistant's energy dashboard (gas consumption).
+    # The meter total feeds Home Assistant's energy dashboard (gas consumption). 'total' with last_reset (not
+    # total_increasing): setting the meter reading on the hub jumps the number without gas flowing, and that jump must
+    # not be counted as use — the hub object notes the moment (gas_reset) and the sensor reports it as last_reset.
     LynnaiSensorDescription(
         key="gas_total", plugin="gas", bit=p.PLUGIN_GAS,
         device_class=SensorDeviceClass.GAS, native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
-        state_class=SensorStateClass.TOTAL_INCREASING, suggested_display_precision=2,
+        state_class=SensorStateClass.TOTAL, suggested_display_precision=2,
         value=lambda hub: hub.gas.total_m3 if hub.gas else None,
     ),
     LynnaiSensorDescription(
@@ -100,6 +102,10 @@ class HubSensor(PluginEntity, SensorEntity):
     def native_value(self) -> float | None:
         return self.entity_description.value(self.hub)
 
+    @property
+    def last_reset(self):
+        return self.hub.gas_reset if self.entity_description.key == "gas_total" else None
+
 
 class _Bill(BoilerEntity, SensorEntity):
     """This billing period's gas and its estimated bill, on the boiler device (SmartThings shows them on the boiler card).
@@ -114,6 +120,10 @@ class _Bill(BoilerEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, str] | None:
         return {"basis": self.hub.bill.basis} if self.hub.bill else None
+
+    @property
+    def last_reset(self):
+        return self.hub.bill_reset          # a new billing period started (the values went back down)
 
 
 class BillUsage(_Bill):
@@ -214,6 +224,10 @@ class HubTemperature(HubEntity, SensorEntity):
 
     def __init__(self, hub: LynnaiHub, entry_id: str) -> None:
         super().__init__(hub, entry_id, "hub_temperature")
+
+    @property
+    def available(self) -> bool:
+        return self.hub.connected            # not the last value from before a disconnect
 
     @property
     def native_value(self) -> float | None:

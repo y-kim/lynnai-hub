@@ -38,7 +38,8 @@ class LynnaiHubConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
-                {vol.Required(CONF_HOST, default=host): str, vol.Required(CONF_PORT, default=port): int}
+                {vol.Required(CONF_HOST, default=host): str,
+                 vol.Required(CONF_PORT, default=port): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))}
             ),
             description_placeholders={"found": ", ".join(f"{i} ({a[0]})" for i, a in fresh.items()) or "-"},
         )

@@ -9,6 +9,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
@@ -119,14 +120,17 @@ class ZoneEntity(LynnaiEntity):
 
     @callback
     def _on_hub_update(self) -> None:
-        # The room reported uninstalled: it goes unavailable at once (zone is None above), and after 10 minutes the
-        # entity is removed. If it comes back the hub clears the note and this is a normal update again.
+        # The room reported uninstalled: it goes unavailable at once (zone is None above), and after ZONE_GONE_S the
+        # entity (and then the room's device) is removed. If it comes back the hub clears the note and this is a normal update again.
         gone = self.hub.zone_gone.get((self.mac, self.zone_id))
-        if gone is not None and time.monotonic() - gone >= 600:
+        if gone is not None and time.monotonic() - gone >= ZONE_GONE_S:
             forget_entity(self.unique_id)              # ...and let setup_dynamic add it again if the room returns
             registry = er.async_get(self.hass)
             if self.registry_entry and registry.async_get(self.entity_id):
+                device_id = self.registry_entry.device_id
                 registry.async_remove(self.entity_id)
+                if device_id and not er.async_entries_for_device(registry, device_id, include_disabled_entities=True):
+                    dr.async_get(self.hass).async_remove_device(device_id)    # the room's last entity: drop the device too
             else:
                 self.hass.async_create_task(self.async_remove(force_remove=True))
             return
@@ -161,9 +165,14 @@ class PluginEntity(LynnaiEntity):
     @property
     def available(self) -> bool:
         # Older firmware never sends the plugin notice; then being connected is all we know.
-        known = self.hub.plugins.enabled != 0
+        known = self.hub.plugins_seen
         return self.hub.connected and (not known or self.hub.plugins.usable(self._bit))
 
+
+# A room reported uninstalled is removed after this long (unavailable until then). A removed room and a room unit
+# without power or with a broken wire look the same in the state, and removing breaks automations (new ids if it
+# comes back) — so be generous. Same as the SmartThings driver (core.lua ZONE_GONE_S).
+ZONE_GONE_S = 24 * 3600
 
 _GONE: set[str] = set()     # unique ids of entities that removed themselves (see forget_entity)
 
