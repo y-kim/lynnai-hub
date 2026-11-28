@@ -49,3 +49,52 @@ async def test_impostor_gets_nothing_after_v2(fake_hub):
     fake_hub.impostor = False                           # now it just says "denied" (does not know the token)
     _client, events, _ = await _run_client(fake_hub, token, v2_seen=True, seconds=0.6)
     assert not any(up for up, _ in events) and fake_hub.plain_tokens == []
+
+
+@pytest.fixture
+def _fast_retry(monkeypatch):
+    from custom_components.lynnai_hub import client as mod
+
+    monkeypatch.setattr(mod, "BACKOFF_FIRST", 0.05)
+    monkeypatch.setattr(mod, "BACKOFF_MAX", 0.1)
+    monkeypatch.setattr(mod, "BACKOFF_REJECTED", 0.05)
+
+
+async def _closed_port() -> int:
+    server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    server.close()
+    await server.wait_closed()
+    return port
+
+
+async def test_no_plain_token_to_an_address_found_by_ssdp(fake_hub, _fast_retry):
+    """The saved address stops answering and SSDP points elsewhere: something there acting like old firmware
+    (or saying 'denied') must not get the token, even though this install never saw v2."""
+    token = "00112233445566778899aabbccddeeff"
+    home = await _closed_port()
+    found: list[int] = []
+
+    async def find_host():
+        found.append(1)
+        return ("127.0.0.1", fake_hub.port)
+
+    for legacy in (True, False):                        # old firmware imitation, then plain 'denied'
+        fake_hub.legacy = legacy
+        found.clear()
+        client = HubClient("127.0.0.1", home, token, HUB_ID, lambda c, p: None, lambda up, why: None,
+                           find_host, v2_seen=False)
+        client.start()
+        await asyncio.sleep(0.8)
+        await client.stop()
+        assert found and fake_hub.plain_tokens == []
+
+
+async def test_old_firmware_at_the_saved_address_still_gets_v1(fake_hub, _fast_retry):
+    """Hub firmware before v2 at the address saved in the entry: v1 keeps working there."""
+    token = "ffeeddccbbaa99887766554433221100"
+    fake_hub.legacy = True
+    fake_hub.tokens.add(token)
+    _client, events, _ = await _run_client(fake_hub, token, v2_seen=False, seconds=0.8)
+    assert token in fake_hub.plain_tokens
+    assert any(up for up, _ in events)

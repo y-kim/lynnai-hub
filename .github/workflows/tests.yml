@@ -1,4 +1,4 @@
-# 시험: Home Assistant 통합(pytest, 가짜 허브), SmartThings 드라이버 시뮬레이터(lupa), NAS 허브 명령·폴백
+# 시험: Home Assistant 통합(pytest, 가짜 허브), SmartThings 드라이버 시뮬레이터·LAN 인증 경로(lupa), NAS 허브 명령·폴백
 name: Tests
 
 on:
@@ -29,5 +29,6 @@ jobs:
           python-version: "3.12"
       - run: pip install lupa
       - run: python edge-driver/test/run_sim.py
+      - run: python edge-driver-lan/test/run_lan_auth.py
       - run: python server/lynnai-nas/test_commands.py
       - run: python server/lynnai-nas/test_fallback.py

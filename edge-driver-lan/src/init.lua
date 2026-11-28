@@ -7,6 +7,8 @@
 --   v1(페어링·옛 펌웨어):       → "hello <토큰>"   ← "ok <id>" | "denied"(허브 버튼 짧게 누른 뒤 3분 안에 다시)
 --   한 번 v2 가 통한 허브에는 다시 v1(평문 토큰)을 보내지 않는다 — 허브인 척하는 기기가 'denied' 나 옛 판 흉내로
 --   토큰을 받아 가지 못하게(필드 "v2", 저장).
+--   v1 은 "집 주소"(필드 "home" = 처음 페어링하거나 붙었던 ip:port)로만 보낸다. SSDP 답은 인증되지 않아서, 주소를
+--   버리고 다시 찾은 곳에 v1 을 보내면 찾기에 답한 아무 기기나 토큰을 받아 갈 수 있다(옛 펌웨어 허브용 구멍).
 --   ← "<명령 16진 2자리> <내용 16진>"   → "00 <명령 텍스트 16진>"   ← "ping"(30초마다)
 -- 토큰은 기기마다 한 번 만들어 저장한다. 허브는 버튼을 짧게 누른 뒤 3분(페어링 창) 안에 온 새 토큰만 기억한다.
 -- 허브가 "ok <id>" 로 답한 id 가 찾은 허브의 id 와 같아야 붙는다(다른 기기가 허브인 척 답해도 명령을 보내지 않게).
@@ -152,8 +154,22 @@ local function run(device)
       c:settimeout(10)
       local first, got
       local v2_seen = device:get_field("v2") == true
-      if device:get_field("try_v1") and not v2_seen then
+      local here, home = ip .. ":" .. tostring(port), device:get_field("home")
+      local want_v1 = device:get_field("try_v1") and not v2_seen
+      if want_v1 and home and home ~= here then
+        -- 집 주소가 아닌 곳(SSDP 로 다시 찾은 곳)에는 평문 토큰을 보내지 않는다. 이번 연결은 v2 로만 해 보고
+        -- 다음부터 집 주소로 돌아간다. 옛 펌웨어 허브가 정말 옮겨 갔으면 펌웨어를 올리거나 허브 기기를 다시 추가
+        log.warn(string.format("%s 는 집 주소(%s)가 아님 — 평문 토큰(v1) 안 보냄", here, home))
+        show(device, "허브 주소 바뀜: 펌웨어 업데이트 또는 다시 추가")
         device:set_field("try_v1", nil)
+        local hip, hport = home:match("^(.+):(%d+)$")
+        device:set_field("ip", hip, { persist = true })
+        device:set_field("port", tonumber(hport), { persist = true })
+        want_v1 = false
+      end
+      if want_v1 then
+        device:set_field("try_v1", nil)
+        if not home then device:set_field("home", here, { persist = true }) end   -- 처음 페어링하는 주소
         c:send("hello " .. token_of(device) .. "\n")            -- v1: 페어링(새 토큰 등록) 또는 v2 를 모르는 옛 펌웨어
         first = c:receive("*l")
         got = first and first:match("^ok (%w+)$")
@@ -196,6 +212,7 @@ local function run(device)
       elseif got then
         log.info(string.format("허브 연결됨 %s:%d", ip, port))
         fails = 0
+        if device:get_field("home") ~= here then device:set_field("home", here, { persist = true }) end
         conns[device.id].sock = c
         backoff = 5
         is_lost = false

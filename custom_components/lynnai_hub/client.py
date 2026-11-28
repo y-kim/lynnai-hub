@@ -1,6 +1,6 @@
 """TCP client for the hub's LAN channel (no Home Assistant imports here).
 
-    v2 (the token never goes over the wire, firmware v0.10+):
+    v2 (the token never goes over the wire, firmware v1.0+):
       -> "hello2 <cn>"          cn = 32 hex random
       <- "chal <sn>"            sn = the hub's random
       -> "auth <HMAC-SHA256(token, 'c|cn|sn')>"
@@ -207,6 +207,9 @@ class HubClient:
         self.v2_seen = v2_seen              # the hub has proved itself once: never send the token in plain text
         self._on_verified = on_verified     # called after a v2 connection to a new address (persist it)
         self._try_v1 = False
+        # The address saved in the config entry. The plain text token (v1) only ever goes there: an address found by
+        # SSDP is unauthenticated, so anything that answers the search could otherwise collect the token.
+        self._home = (host, port)
         self._verified_at: tuple[str, int] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._task: asyncio.Task | None = None
@@ -249,6 +252,16 @@ class HubClient:
             reason: str | None = None
             try:
                 use_v1, self._try_v1 = self._try_v1 and not self.v2_seen, False
+                if use_v1 and (self.host, self.port) != self._home:
+                    # Only the saved address may get the token. An older hub that really moved needs the
+                    # integration set up again; go back to the saved address meanwhile.
+                    _LOGGER.warning(
+                        "Hub %s at %s:%s does not support secure login; the token is only sent to the saved "
+                        "address %s:%s. If the hub moved, update its firmware or add the integration again",
+                        self._hub_id, self.host, self.port, *self._home,
+                    )
+                    self.host, self.port = self._home
+                    use_v1 = False
                 reader, writer, hub_id, v2 = await _open(self.host, self.port, self._token, v1=use_v1)
                 if hub_id != self._hub_id:
                     writer.close()
@@ -256,6 +269,7 @@ class HubClient:
                 if v2 and (not self.v2_seen or self._verified_at != (self.host, self.port)):
                     self.v2_seen = True
                     self._verified_at = (self.host, self.port)
+                    self._home = (self.host, self.port)     # proved itself here: this is the saved address now
                     if self._on_verified:
                         self._on_verified(self.host, self.port)
                 self._writer = writer
