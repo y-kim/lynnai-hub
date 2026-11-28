@@ -23,8 +23,11 @@ int  hub_ota_write_req(httpd_req_t *req, char *msg, size_t msglen, bool *do_rebo
  *   - 새 펌웨어가 부팅 45초 뒤 집 Wi-Fi 에 붙어 있으면 확정(표시 지움).
  *   - 5분 안에 확정하지 못하면 재시작. 확정 못 한 부팅이 3번이면 4번째 부팅에서 이전 칸으로 되돌린다
  *     (계속 죽어 재부팅하는 경우도 같은 셈법에 걸린다).
- * 이 검사는 새 펌웨어 자신이 app_main 초반에 한다 — 그 전에 죽는 펌웨어는 막지 못한다. */
-void hub_ota_boot_guard(void);        /* app_main: 저장소를 연 직후 */
+ * 이 검사는 새 펌웨어 자신이 app_main 초반에 한다. 그 전에 죽는 펌웨어는 hub_ota_early_guard(app_main 첫 줄,
+ * RTC 메모리)가 센다. 확정 조건: 45초 + 집 Wi-Fi + 자기 웹 서버 응답 + (Zigbee 를 쓰면) Zigbee 스택 준비. */
+void hub_ota_boot_guard(void);           /* app_main: 저장소를 연 직후 */
+void hub_ota_early_guard(void);          /* app_main 첫 줄: NVS 없이 재시작 횟수를 세어 확정 전 반복 재시작이면 이전 칸으로 */
+void hub_ota_web_watch_start(void);     /* 웹 서버가 5분 답이 없으면 계획된 재시작 */
 void hub_ota_planned_reboot(void);    /* 일부러 하는 재시작 직전에: 이번 부팅을 실패로 세지 않게 */
 void hub_ota_state(int *trial, bool *rolled_back);   /* trial: 0 = 시험 아님, n = n번째 시험 부팅 */
 

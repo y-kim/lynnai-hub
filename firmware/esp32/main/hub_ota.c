@@ -18,7 +18,12 @@
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_image_format.h"
+#include "esp_attr.h"
+#include "esp_rom_sys.h"
+#include "lwip/sockets.h"
 #include "hub_ota.h"
+#include "hub_uplink.h"
+#include "hub_zb_rinnai.h"
 #include "hub_bbox.h"
 #include "hub_sensors.h"
 #include "hub_diag.h"
@@ -69,14 +74,94 @@ static uint8_t ota_get(const char *key)
     return v;
 }
 
-static void ota_set(const char *key, uint8_t v)
+static bool ota_set(const char *key, uint8_t v)
 {
     nvs_handle_t h;
-    if (nvs_open("ota", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, key, v);
-        nvs_commit(h);
+    esp_err_t e = nvs_open("ota", NVS_READWRITE, &h);
+    if (e == ESP_OK) {
+        e = nvs_set_u8(h, key, v);
+        if (e == ESP_OK) e = nvs_commit(h);
         nvs_close(h);
     }
+    return e == ESP_OK && ota_get(key) == v;
+}
+
+/* ---- 부팅 맨 앞 되돌리기(NVS 없이) ----
+ * 시험 부팅 횟수(NVS "ota"/"trial")는 저장소를 연 뒤에야 셀 수 있어, 새 펌웨어가 그 앞에서 죽거나 복구 콘솔로 가면
+ * 끝없이 재부팅했다. 재시작해도 남는 RTC 메모리에도 세어 app_main 첫 줄에서 본다. 전원을 끊으면 사라지는데,
+ * 그건 사람이 껐다 켠 것이라 세지 않아도 된다. */
+#define EARLY_MAGIC 0x4C594E54u        /* "LYNT" */
+RTC_NOINIT_ATTR static uint32_t s_e_magic, s_e_addr, s_e_count;
+
+void hub_ota_early_guard(void)
+{
+    if (s_e_magic != EARLY_MAGIC) {
+        return;
+    }
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    if (esp_reset_reason() == ESP_RST_POWERON || !run || run->address != s_e_addr) {
+        s_e_magic = 0;                                /* 전원을 넣었거나 이미 다른 칸에서 돈다 */
+        return;
+    }
+    if (++s_e_count > TRIAL_MAX + 1) {
+        s_e_magic = 0;
+        const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+        if (other && image_kind(other) == IMG_KIND && esp_ota_set_boot_partition(other) == ESP_OK) {
+            esp_rom_printf("HUB_OTA: 새 펌웨어가 %lu번 연달아 확정 전에 재시작 — 이전 칸(%s)으로 되돌림\n",
+                           (unsigned long)s_e_count, other->label);
+            esp_restart();
+        }
+    }
+}
+
+static void early_arm(const esp_partition_t *tgt) { s_e_addr = tgt->address; s_e_count = 0; s_e_magic = EARLY_MAGIC; }
+static void early_clear(void) { s_e_magic = 0; }
+
+/* 자기 웹 서버가 답하나(관리 화면·API·OTA 가 살아 있어야 원격으로 고칠 수 있다). 확정 조건과 아래 감시에 쓴다.
+ * HTTP 클라이언트 대신 소켓 하나로(힙을 덜 쓰게) — "HTTP/1." 로 시작하는 답이 오면 산 것(401 이어도) */
+static bool self_http_ok(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) return false;
+    struct timeval tv = { .tv_sec = 5 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(80), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    bool ok = false;
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) == 0) {
+        static const char q[] = "GET /api/stats HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+        char b[12] = "";
+        if (send(fd, q, sizeof(q) - 1, 0) == (int)sizeof(q) - 1 && recv(fd, b, sizeof(b) - 1, 0) >= 7) {
+            ok = !strncmp(b, "HTTP/1.", 7);
+        }
+    }
+    close(fd);
+    return ok;
+}
+
+/* 웹 서버 감시: 태스크 워치독은 유휴 태스크만 보고 걸려도 재부팅하지 않는다. 하나뿐인 웹 서버 태스크가 멈추면
+ * 관리 화면·API·OTA 가 모두 죽어 전원을 다시 넣는 것 말고 방법이 없었다. 1분마다 자기 웹 서버에 물어보고
+ * 5번 연달아(약 5분) 답이 없으면 계획된 재시작을 한다(OTA 올리는 중처럼 잠깐 바쁜 것은 넘긴다). */
+static void web_watch_task(void *arg)
+{
+    (void)arg;
+    int miss = 0;
+    vTaskDelay(pdMS_TO_TICKS(120000));               /* 부팅 직후는 건너뜀 */
+    for (;;) {
+        miss = self_http_ok() ? 0 : miss + 1;
+        if (miss >= 5) {
+            ESP_LOGE(TAG, "웹 서버가 5분 동안 답하지 않음 — 재시작");
+            hub_bbox_note("web server stuck 5 min — restart");
+            hub_ota_planned_reboot();
+            esp_restart();
+        }
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
+void hub_ota_web_watch_start(void)
+{
+    xTaskCreate(web_watch_task, "web_watch", 2560, NULL, 2, NULL);
 }
 
 static void trial_task(void *arg)
@@ -86,16 +171,18 @@ static void trial_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(5000));
         int64_t up = esp_timer_get_time() / 1000000;
         wifi_ap_record_t ap;
-        if (up >= TRIAL_OK_S && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        bool zb_ok = !(hub_uplink_mask() & HUB_UPLINK_ZIGBEE) || hub_zigbee_is_ready();   /* 스택이 떴나(가입은 망 사정이라 안 봄) */
+        if (up >= TRIAL_OK_S && esp_wifi_sta_get_ap_info(&ap) == ESP_OK && zb_ok && self_http_ok()) {
+            early_clear();
             ota_set("trial", 0);
             ota_set("rb", 0);
             s_trial = 0;
             s_rolled_back = false;
-            ESP_LOGW(TAG, "새 펌웨어 확정(부팅 %llds, 집 Wi-Fi 연결됨)", (long long)up);
+            ESP_LOGW(TAG, "새 펌웨어 확정(부팅 %llds, 집 Wi-Fi 연결·웹 서버 응답)", (long long)up);
             vTaskDelete(NULL);
         }
         if (up >= TRIAL_GIVEUP_S) {
-            ESP_LOGE(TAG, "새 펌웨어가 %d초 안에 집 Wi-Fi 에 붙지 못함 — 재시작(시험 %d/%d)", TRIAL_GIVEUP_S, s_trial, TRIAL_MAX);
+            ESP_LOGE(TAG, "새 펌웨어가 %d초 안에 확정되지 못함(집 Wi-Fi·웹 서버·Zigbee 스택) — 재시작(시험 %d/%d)", TRIAL_GIVEUP_S, s_trial, TRIAL_MAX);
             esp_restart();
         }
     }
@@ -106,6 +193,7 @@ void hub_ota_boot_guard(void)
     uint8_t n = ota_get("trial");
     s_rolled_back = ota_get("rb") != 0;
     if (!n) {
+        early_clear();
         return;
     }
     if (n > TRIAL_MAX) {
@@ -133,6 +221,9 @@ void hub_ota_planned_reboot(void)
     hub_sensors_flush();                /* 가스 사용량(지난 하루·한 시간)이 재시작을 넘겨 이어지게 */
     if (s_trial) {
         ota_set("trial", s_trial);      /* 이번 부팅은 세지 않는다(Zigbee 재가입 재시도 같은 의도한 재시작) */
+        if (s_e_magic == EARLY_MAGIC && s_e_count) {
+            s_e_count--;
+        }
     }
 }
 
@@ -172,12 +263,13 @@ int hub_ota_write_req(httpd_req_t *req, char *msg, size_t msglen, bool *do_reboo
         snprintf(msg, msglen, "메모리 부족");
         return 0;
     }
-    int got = 0;
+    int got = 0, idle = 0;
     while (got < total) {
         int r = httpd_req_recv(req, buf, OTA_RX_CHUNK);
-        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue;
+        if (r == HTTPD_SOCK_ERR_TIMEOUT && ++idle < 6) {   /* 잠깐 멈춤은 기다리되, 올리던 쪽이 사라지면 끝낸다 */
+            continue;                                       /* (하나뿐인 웹 서버 태스크가 영영 묶이지 않게) */
         }
+        idle = 0;
         if (r <= 0) {
             free(buf);
             esp_ota_abort(h);
@@ -208,13 +300,19 @@ int hub_ota_write_req(httpd_req_t *req, char *msg, size_t msglen, bool *do_reboo
         snprintf(msg, msglen, "외부 라디오용 펌웨어(-app-rcp.bin)는 더 지원하지 않습니다 — 적용하지 않음. -app.bin 을 올리세요.");
         return 0;
     }
+    /* 시험 표시를 먼저 저장하고 확인한다 — 저장 못 했는데 칸을 바꾸면 새 펌웨어가 확정 검사 없이 돈다 */
+    if (!ota_set("trial", 1) || !ota_set("rb", 0)) {
+        ota_set("trial", 0);
+        snprintf(msg, msglen, "시험 부팅 표시를 저장하지 못해 적용하지 않음(저장소 확인)");
+        return 0;
+    }
     e = esp_ota_set_boot_partition(tgt);
     if (e != ESP_OK) {
+        ota_set("trial", 0);
         snprintf(msg, msglen, "부팅 칸 전환 실패: %s", esp_err_to_name(e));
         return 0;
     }
-    ota_set("rb", 0);
-    ota_set("trial", 1);            /* 새 펌웨어는 시험 부팅으로 시작 — 확정 못 하면 스스로 이 칸으로 돌아온다 */
+    early_arm(tgt);                 /* 저장소를 열기 전에 죽는 경우도 세게(RTC 메모리) */
     ESP_LOGW(TAG, "OTA 적용: %s %d바이트 → 재시작", tgt->label, got);
     snprintf(msg, msglen, "완료: %d바이트. 새 펌웨어로 재시작합니다 — 잠시 뒤 관리 화면을 새로고침하세요.", got);
     *do_reboot = true;

@@ -914,6 +914,7 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
 void app_main(void)
 {
+    hub_ota_early_guard();   /* 맨 먼저 — 새 펌웨어가 저장소를 열기 전에 죽어도 되돌릴 수 있게 */
     hub_led_init();          /* 부팅 직후 바로 LED 끄기(초기 밝은 플래시 최소화) */
     hub_event(EV_BOOT, NULL, esp_reset_reason(), 0);
     /* 저장소 두 개를 연다: 앱 nvs + Zigbee 전용 zb_nvs(zboss 가 가입 정보를 저장, 안 열면 ezb_plat_datasets_init 에서
@@ -955,6 +956,7 @@ void app_main(void)
     }
     hub_onboard_init(&s_hub);
     ESP_ERROR_CHECK(hub_portal_start(&s_hub));
+    hub_ota_web_watch_start();   /* 웹 서버가 멈추면(5분) 스스로 재시작 — USB 없이 고칠 수 있게 */
     /* hub_lan(= 멀티허브 위성 다이얼러·중심 수신 서버가 사는 곳)은 ST 통로가 LAN 이거나, 멀티허브 모드가 켜져 있으면 띄운다.
      * (Zigbee 로 ST 에 붙는 중심/위성도 허브끼리는 LAN 으로 통신하므로 반드시 필요) */
     if ((hub_uplink_mask() & HUB_UPLINK_LAN) || hub_upstream_mode() != HUB_UP_OFF) {
