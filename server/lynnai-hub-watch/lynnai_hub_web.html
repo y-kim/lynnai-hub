@@ -36,6 +36,7 @@ header.top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 header.top svg { width: 28px; height: 28px; flex: none; }
 h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
 #src { color: var(--muted); font-size: 12.5px; }
+form.logout { margin: 0 0 0 auto; }
 nav.tabs { display: flex; gap: 2px; margin: 14px 0 0; border-bottom: 1px solid var(--grid); overflow-x: auto; }
 nav.tabs a {
   padding: 8px 12px; color: var(--ink2); text-decoration: none; white-space: nowrap;
@@ -118,6 +119,7 @@ td.t { font-variant-numeric: tabular-nums; color: var(--ink2); }
     <svg viewBox="0 0 256 256" aria-hidden="true"><rect width="256" height="256" rx="56" fill="#f55600"/><g fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"><path d="M150.5 203 204.2 172V84L128 40 51.8 84v88L110 205.6C124 213.7 128 200 128 178C107.2 178 91.2 162 91.2 141.2C91.2 123.6 100.8 112.4 110.4 102.8C110.4 115.6 115.2 123.6 123.2 125.2C118.4 107.6 123.2 88.4 132 74C136 96.4 164.8 110.8 164.8 141.2C164.8 158.8 153.6 171.6 139.2 173.2"/><path d="M139.2 173.2C128 174.8 118.4 166.8 118.4 155.6C118.4 146 126.4 141.2 129.6 131.6"/></g></svg>
     <h1>허브 기록</h1>
     <span id="src"></span>
+    <form class="logout" method="post" action="logout"><button class="btn" type="submit">로그아웃</button></form>
   </header>
 
   <nav class="tabs" role="tablist" aria-label="보기">
@@ -201,6 +203,7 @@ async function api(name, extra = {}) {
   const r = range();
   const q = new URLSearchParams({ from: Math.round(r.from), to: Math.round(r.to), ...extra });
   const res = await fetch(`api/log/${name}?${q}`);
+  if (res.status === 401) { location.href = "login"; throw new Error("로그인이 필요합니다"); }   // 세션이 끝났다
   const j = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
   if (!res.ok || j.error) throw new Error(j.error || `HTTP ${res.status}`);
   return j;

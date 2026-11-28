@@ -50,6 +50,9 @@ DB = os.environ.get("HUB_DB", os.path.join(HERE, "data", "hub.db"))
 DB_URL = os.environ.get("HUB_DB_URL", "").strip()
 WEB_PORT = int(os.environ.get("WEB_PORT", "0") or 0)   # 로그 브라우저(읽기 전용). 0 이면 안 띄움
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lynnai_hub_web.html")
+# 로그 브라우저 로그인 정보(아이디·암호 해시·세션 서명 키). 없으면 처음 들어온 사람이 만든다.
+# 잊으면 이 파일을 지우면 된다 → 다음 접속에서 다시 만들기 화면
+WEB_AUTH = os.environ.get("HUB_WEB_AUTH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "hubweb-auth.json"))
 
 # 와이파이 해제 사유(IEEE 802.11 reason) 중 자주 보는 것
 REASON = {1: "unspecified", 2: "auth_expire", 3: "기기가 떠남", 4: "무활동", 8: "기기가 떠남(assoc)",
@@ -740,6 +743,167 @@ def log_events(c, q):
 LOG_API = {"meta": log_meta, "rooms": log_rooms, "boiler": log_boiler, "hub": log_hub, "events": log_events}
 
 
+# ---------- 로그 브라우저 로그인 ----------
+# 아이디·암호는 WEB_AUTH 파일 하나(0600)에: 암호는 PBKDF2-SHA256(소금 16바이트, 30만 번)으로만 둔다.
+# 로그인하면 서명한 쿠키(아이디|만료|난수 + HMAC)를 30일 준다. 서명 키도 그 파일에 있어 파일을 지우면 모두 로그아웃.
+import base64
+import hashlib
+import hmac
+import secrets
+
+AUTH_ITER = 300_000
+SESSION_DAYS = 30
+COOKIE = "hubweb"
+FAIL_MAX, FAIL_WIN = 5, 900          # 한 주소에서 15분에 5번 틀리면 그 15분이 지날 때까지 막는다
+_fails = {}
+_fails_lock = threading.Lock()
+
+
+def _pw_hash(pw, salt, n=AUTH_ITER):
+    return hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, n).hex()
+
+
+def auth_load():
+    try:
+        with open(WEB_AUTH) as f:
+            a = json.load(f)
+        return a if a.get("user") and a.get("hash") and a.get("secret") else None
+    except (OSError, ValueError):
+        return None
+
+
+def auth_create(user, pw):
+    """처음 한 번만. 이미 있으면 False(동시에 두 사람이 만들려 해도 먼저 쓴 쪽만)."""
+    salt = secrets.token_bytes(16)
+    a = {"user": user, "salt": salt.hex(), "iter": AUTH_ITER, "hash": _pw_hash(pw, salt),
+         "secret": secrets.token_hex(32), "created": datetime.now().isoformat(timespec="seconds")}
+    os.makedirs(os.path.dirname(WEB_AUTH) or ".", exist_ok=True)
+    try:
+        fd = os.open(WEB_AUTH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        json.dump(a, f, ensure_ascii=False)
+    return True
+
+
+def auth_check(a, user, pw):
+    ok_user = hmac.compare_digest(user.encode(), a["user"].encode())
+    got = _pw_hash(pw, bytes.fromhex(a["salt"]), int(a.get("iter", AUTH_ITER)))   # 아이디가 틀려도 같은 시간
+    return ok_user and hmac.compare_digest(got, a["hash"])
+
+
+def _sign(a, body):
+    return hmac.new(bytes.fromhex(a["secret"]), body.encode(), hashlib.sha256).hexdigest()
+
+
+def session_make(a):
+    body = f'{base64.urlsafe_b64encode(a["user"].encode()).decode()}.{int(time.time()) + SESSION_DAYS * 86400}.{secrets.token_hex(8)}'
+    return f"{body}.{_sign(a, body)}"
+
+
+def session_ok(a, token):
+    try:
+        u64, exp, nonce, sig = token.split(".")
+    except (AttributeError, ValueError):
+        return False
+    body = f"{u64}.{exp}.{nonce}"
+    if not hmac.compare_digest(sig, _sign(a, body)):
+        return False
+    try:
+        return int(exp) > time.time() and base64.urlsafe_b64decode(u64).decode() == a["user"]
+    except ValueError:
+        return False
+
+
+def fail_blocked(ip):
+    now = time.time()
+    with _fails_lock:
+        ts = [t for t in _fails.get(ip, []) if now - t < FAIL_WIN]
+        _fails[ip] = ts
+        return len(ts) >= FAIL_MAX
+
+
+def fail_note(ip, ok):
+    with _fails_lock:
+        if ok:
+            _fails.pop(ip, None)
+        else:
+            _fails.setdefault(ip, []).append(time.time())
+
+
+LOGIN_HTML = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>허브 기록 · 로그인</title>
+<style>
+:root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --border:rgba(11,11,11,.14); --focus:#2a78d6; --crit:#d03b3b; --brand:#f55600; }
+@media (prefers-color-scheme: dark) { :root { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#f0efec;
+  --ink2:#c3c2b7; --muted:#898781; --border:rgba(255,255,255,.14); --focus:#3987e5; } }
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--page); color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  padding:24px max(16px,env(safe-area-inset-right)) 24px max(16px,env(safe-area-inset-left)); }
+main { width:100%; max-width:340px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px 24px 24px; }
+.head { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.head svg { width:32px; height:32px; flex:none; }
+h1 { font-size:18px; margin:0; font-weight:650; letter-spacing:-.01em; }
+p.lead { color:var(--ink2); margin:0 0 18px; font-size:13px; }
+label { display:block; font-size:12.5px; color:var(--ink2); margin:12px 0 4px; }
+input { width:100%; font:inherit; font-size:15px; padding:9px 11px; border:1px solid var(--border); border-radius:8px;
+  background:var(--page); color:var(--ink); }
+input:focus { outline:2px solid var(--focus); outline-offset:-1px; border-color:transparent; }
+.hint { color:var(--muted); font-size:12px; margin-top:4px; }
+button { width:100%; margin-top:20px; padding:10px; font:inherit; font-weight:600; border:0; border-radius:8px;
+  background:var(--brand); color:#fff; cursor:pointer; }
+button:hover { filter:brightness(1.06); }
+.err { color:var(--crit); font-size:13px; margin:14px 0 0; }
+</style></head>
+<body><main>
+<div class="head">%ICON%<h1>허브 기록</h1></div>
+<p class="lead">%LEAD%</p>
+<form method="post" action="login" autocomplete="on">
+<input type="hidden" name="mode" value="%MODE%">
+<label for="u">아이디</label>
+<input id="u" name="user" value="%USER%" autocomplete="username" autocapitalize="off" spellcheck="false" required maxlength="32" autofocus>
+<label for="%PWNAME%">%PWLABEL%</label>
+<input id="%PWNAME%" name="%PWNAME%" type="password" autocomplete="%PWAC%" required %PWMIN%>
+%CONFIRM%
+%ERR%
+<button type="submit">%BUTTON%</button>
+</form>
+</main></body></html>
+"""
+
+# 만들기 화면: 1Password 등이 첫 칸을 '지금 암호'로 잘못 읽지 않게 이름·id 를 new-password / confirm-password 로,
+# 둘 다 autocomplete=new-password + passwordrules 를 단다(그래야 첫 칸에서 암호 생성을 띄우고 확인 칸도 같이 채운다)
+LOGIN_CONFIRM = """<div class="hint" id="pwhint">8자 이상</div>
+<label for="confirm-password">새 암호 확인</label>
+<input id="confirm-password" name="confirm-password" type="password" autocomplete="new-password" required minlength="8"
+ passwordrules="minlength: 8;">"""
+
+
+def login_page(setup, user="", err=""):
+    from html import escape
+    v = {"ICON": ICON_SVG, "MODE": "setup" if setup else "login", "USER": escape(user),
+         "LEAD": "처음 오셨습니다. 이 화면에 쓸 아이디와 암호를 만드세요. 만든 뒤에는 이 아이디로만 들어올 수 있습니다."
+                 if setup else "로그인하세요.",
+         "PWAC": "new-password" if setup else "current-password",
+         "PWNAME": "new-password" if setup else "password", "PWLABEL": "새 암호" if setup else "암호",
+         "PWMIN": 'minlength="8" passwordrules="minlength: 8;" aria-describedby="pwhint"' if setup else "",
+         "CONFIRM": LOGIN_CONFIRM if setup else "", "BUTTON": "만들고 들어가기" if setup else "로그인",
+         "ERR": f'<p class="err" role="alert">{escape(err)}</p>' if err else ""}
+    out = LOGIN_HTML
+    for k, val in v.items():
+        out = out.replace(f"%{k}%", val)
+    return out.encode()
+
+
+ICON_SVG = '<svg viewBox="0 0 256 256" aria-hidden="true"><rect width="256" height="256" rx="56" fill="#f55600"/><g fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"><path d="M150.5 203 204.2 172V84L128 40 51.8 84v88L110 205.6C124 213.7 128 200 128 178C107.2 178 91.2 162 91.2 141.2C91.2 123.6 100.8 112.4 110.4 102.8C110.4 115.6 115.2 123.6 123.2 125.2C118.4 107.6 123.2 88.4 132 74C136 96.4 164.8 110.8 164.8 141.2C164.8 158.8 153.6 171.6 139.2 173.2"/><path d="M139.2 173.2C128 174.8 118.4 166.8 118.4 155.6C118.4 146 126.4 141.2 129.6 131.6"/></g></svg>'
+
+
+
 def start_web(port, block=False):
     """로그 브라우저. 읽기만 한다. DB 연결은 하나를 잠가서 같이 쓴다(드물게 오는 요청이라 충분)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -751,16 +915,83 @@ def start_web(port, block=False):
         def log_message(self, *a):
             pass
 
-        def send(self, code, body, ctype):
+        def send(self, code, body, ctype, headers=()):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            for k, v in headers:
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
 
+        def go(self, where, cookie=None):
+            hs = [("Location", where)]
+            if cookie is not None:
+                hs.append(("Set-Cookie", f"{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Strict"
+                                         + (f"; Max-Age={SESSION_DAYS * 86400}" if cookie else "; Max-Age=0")))
+            self.send(303, b"", "text/plain", hs)
+
+        def session(self):
+            a = auth_load()
+            if not a:
+                return None
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == COOKIE and session_ok(a, v):
+                    return a
+            return None
+
+        def same_origin(self):
+            o = self.headers.get("Origin")
+            return not o or o == "null" or urlparse(o).netloc == self.headers.get("Host")
+
+        def do_POST(self):
+            u = urlparse(self.path)
+            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+            form = dict(parse_qsl(self.rfile.read(n).decode("utf-8", "replace")))
+            if not self.same_origin():
+                return self.send(403, b"cross-origin", "text/plain")
+            if u.path.endswith("/logout"):
+                return self.go("login", "")
+            if not u.path.endswith("/login"):
+                return self.send(404, b"not found", "text/plain")
+            ip = self.client_address[0]
+            user = form.get("user", "").strip()
+            pw = form.get("new-password", form.get("password", ""))
+            a = auth_load()
+            html = "text/html; charset=utf-8"
+            if a is None:                                        # 처음: 만들기
+                err = ("아이디를 1~32자로, 띄어쓰기 없이 적어 주세요." if not re.fullmatch(r"\S{1,32}", user)
+                       else "암호는 8자 이상이어야 합니다." if len(pw) < 8
+                       else "암호 확인이 다릅니다." if pw != form.get("confirm-password", "")
+                       else "")
+                if err:
+                    return self.send(400, login_page(True, user, err), html)
+                if not auth_create(user, pw):
+                    return self.send(409, login_page(False, user, "방금 다른 곳에서 먼저 만들었습니다. 그 아이디로 로그인하세요."), html)
+                print(f"로그 브라우저: 로그인 정보 만듦({ip}, 아이디 {user})", flush=True)
+                return self.go("./", session_make(auth_load()))
+            if fail_blocked(ip):
+                return self.send(429, login_page(False, user, "여러 번 틀려 15분 동안 막았습니다. 잠시 뒤 다시 해 주세요."), html)
+            ok = auth_check(a, user, pw)
+            fail_note(ip, ok)
+            if not ok:
+                print(f"로그 브라우저: 로그인 실패({ip})", flush=True)
+                return self.send(401, login_page(False, user, "아이디나 암호가 틀렸습니다."), html)
+            return self.go("./", session_make(a))
+
         def do_GET(self):
             u = urlparse(self.path)
+            if u.path.endswith("/login"):
+                if self.session():
+                    return self.go("./")
+                return self.send(200, login_page(auth_load() is None), "text/html; charset=utf-8")
+            if not self.session():
+                if u.path.startswith("/api/"):
+                    return self.send(401, b'{"error":"login"}', "application/json")
+                return self.go("login")
             if u.path in ("/", "/index.html"):
                 try:
                     with open(WEB_HTML, "rb") as f:                 # 요청마다 읽는다(배포하면 바로 바뀜)
