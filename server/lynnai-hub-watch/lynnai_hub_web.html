@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>허브 기록</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cstyle%3Epath{fill:none;stroke:%23fff;stroke-width:7;stroke-linecap:round;stroke-linejoin:round}.s{display:none}%40media(max-width:95px){path{stroke-width:11}}%40media(max-width:31px){path{stroke-width:17}.c{display:none}.s{display:inline}}%3C/style%3E%3Crect width='256' height='256' rx='56' fill='%23f55600'/%3E%3Cpath d='M150.5 203 204.2 172V84L128 40 51.8 84v88L110 205.6C124 213.7 128 200 128 178C107.2 178 91.2 162 91.2 141.2C91.2 123.6 100.8 112.4 110.4 102.8C110.4 115.6 115.2 123.6 123.2 125.2C118.4 107.6 123.2 88.4 132 74C136 96.4 164.8 110.8 164.8 141.2C164.8 158.8 153.6 171.6 139.2 173.2'/%3E%3Cpath class='c' d='M139.2 173.2C128 174.8 118.4 166.8 118.4 155.6C118.4 146 126.4 141.2 129.6 131.6'/%3E%3Cpath class='s' d='M139.2 173.2C134.4 176.4 131.2 178 128 178'/%3E%3C/svg%3E%0A">
+<style>
+/* 색은 dataviz 기준 팔레트(검증됨: 1~3번 슬롯) + 프로젝트 주황(#f55600, 로고에만) */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10); --wash: rgba(11,11,11,.04);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --crit: #d03b3b; --brand: #f55600;
+  --off: #46453f;   /* 방이 꺼진 구간의 설정 온도 선(어두운 회색) */
+  --s1off: #1b4d8c; /* 방이 꺼진 구간의 현재 온도 선(어두운 파랑) */
+  --out: #7a5bb5;   /* 외출 구간 빗금 */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10); --wash: rgba(255,255,255,.05);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --crit: #d03b3b;
+    --off: #6e6d67; --s1off: #2a5a96; --out: #9c84d6;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+.wrap { max-width: 1240px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left)); }
+header.top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+header.top svg { width: 28px; height: 28px; flex: none; }
+h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+#src { color: var(--muted); font-size: 12.5px; }
+nav.tabs { display: flex; gap: 2px; margin: 14px 0 0; border-bottom: 1px solid var(--grid); overflow-x: auto; }
+nav.tabs a {
+  padding: 8px 12px; color: var(--ink2); text-decoration: none; white-space: nowrap;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; font-weight: 550;
+}
+nav.tabs a[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+nav.tabs a:hover { background: var(--wash); }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 12px 0 16px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { border: 0; background: none; color: var(--ink2); padding: 6px 11px; font: inherit; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.seg button:hover:not([aria-pressed="true"]) { background: var(--wash); }
+.navr { display: inline-flex; align-items: center; gap: 6px; }
+.btn {
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink); border-radius: 8px;
+  padding: 5px 10px; font: inherit; cursor: pointer;
+}
+.btn:hover { background: var(--wash); }
+.btn:disabled { opacity: .4; cursor: default; }
+#rangeLabel { color: var(--ink2); font-variant-numeric: tabular-nums; font-size: 13px; }
+label.auto { color: var(--ink2); font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+main.loading .view { opacity: .55; transition: opacity .15s; }
+.view[hidden] { display: none; }
+h2 { font-size: 15px; margin: 22px 0 10px; font-weight: 650; }
+h2:first-child { margin-top: 4px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px 8px; min-width: 0; }
+.card.wide { grid-column: 1 / -1; }
+.card h3 { font-size: 14px; margin: 0; font-weight: 650; }
+.card .sub { color: var(--muted); font-size: 12px; }
+.card .head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.now { font-variant-numeric: tabular-nums; color: var(--ink2); font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+.now b { color: var(--ink); font-size: 20px; font-weight: 600; }
+.pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--ink2); display: inline-flex; align-items: center; gap: 5px; }
+.pill i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink2); font-size: 12.5px; margin: 0 0 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key-line { width: 14px; height: 0; border-top: 2px solid; border-radius: 2px; display: inline-block; }
+.key-rect { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.key-line.dash { border-top-style: dashed; }
+.key-hatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; border: 1px solid;
+  background: repeating-linear-gradient(135deg, currentColor 0 1.5px, transparent 1.5px 4px); opacity: .7; }
+.chartbox { width: 100%; min-width: 0; }
+svg.chart { display: block; overflow: visible; touch-action: pan-y; }
+svg.chart:focus { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 4px; }
+svg.chart text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; }
+.tile .lab { color: var(--ink2); font-size: 12.5px; }
+.tile .val { font-size: 24px; font-weight: 600; margin-top: 2px; }
+.tile .val small { font-size: 14px; font-weight: 500; color: var(--ink2); margin-left: 3px; }
+.tile .note { color: var(--muted); font-size: 12px; }
+details.tbl { margin: 4px 0 6px; }
+details.tbl summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+.scroll { overflow-x: auto; max-width: 100%; }
+.scroll.tall { max-height: 360px; overflow-y: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink2); font-weight: 550; font-size: 12.5px; position: sticky; top: 0; background: var(--surface); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.desc { white-space: normal; min-width: 260px; }
+td.raw { color: var(--muted); font-variant-numeric: tabular-nums; }
+td.t { font-variant-numeric: tabular-nums; color: var(--ink2); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.chip {
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink2); border-radius: 999px;
+  padding: 3px 10px; font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.chip .n { color: var(--muted); margin-left: 4px; font-variant-numeric: tabular-nums; }
+.chip[aria-pressed="true"] .n { color: inherit; opacity: .7; }
+.empty { color: var(--muted); padding: 24px 0; }
+.err { color: var(--crit); padding: 12px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <svg viewBox="0 0 256 256" aria-hidden="true"><rect width="256" height="256" rx="56" fill="#f55600"/><g fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"><path d="M150.5 203 204.2 172V84L128 40 51.8 84v88L110 205.6C124 213.7 128 200 128 178C107.2 178 91.2 162 91.2 141.2C91.2 123.6 100.8 112.4 110.4 102.8C110.4 115.6 115.2 123.6 123.2 125.2C118.4 107.6 123.2 88.4 132 74C136 96.4 164.8 110.8 164.8 141.2C164.8 158.8 153.6 171.6 139.2 173.2"/><path d="M139.2 173.2C128 174.8 118.4 166.8 118.4 155.6C118.4 146 126.4 141.2 129.6 131.6"/></g></svg>
+    <h1>허브 기록</h1>
+    <span id="src"></span>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="보기">
+    <a href="#rooms" role="tab" data-tab="rooms">방 온도</a>
+    <a href="#boiler" role="tab" data-tab="boiler">보일러·가스</a>
+    <a href="#events" role="tab" data-tab="events">이벤트</a>
+    <a href="#hub" role="tab" data-tab="hub">허브 연결</a>
+  </nav>
+
+  <div class="filters">
+    <div class="seg" id="presets" role="group" aria-label="기간"></div>
+    <div class="navr">
+      <button class="btn" id="prev" aria-label="이전 기간">‹</button>
+      <span id="rangeLabel"></span>
+      <button class="btn" id="next" aria-label="다음 기간">›</button>
+      <button class="btn" id="now">지금</button>
+    </div>
+    <label class="auto"><input type="checkbox" id="auto" checked> 1분마다 새로</label>
+  </div>
+
+  <main id="main">
+    <section class="view" id="v-rooms" hidden></section>
+    <section class="view" id="v-boiler" hidden></section>
+    <section class="view" id="v-events" hidden></section>
+    <section class="view" id="v-hub" hidden></section>
+  </main>
+  <p class="foot">LYNNAI 허브 기록기(lynnai-hub-watch)가 쌓은 기록을 읽기만 합니다. 차트의 한 칸은 기간에 따라 1분·10분·1시간·하루 평균(또는 합)입니다.</p>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const NS = "http://www.w3.org/2000/svg";
+const HOUR = 36e5, DAY = 864e5;
+const PRESETS = [["6시간", 6 * HOUR], ["24시간", DAY], ["3일", 3 * DAY], ["7일", 7 * DAY], ["30일", 30 * DAY]];
+const TABS = ["rooms", "boiler", "events", "hub"];
+const TYPE_KO = {
+  boot: "허브 부팅", ap_join: "AP 붙음", ap_leave: "AP 떨어짐", sta_up: "Wi-Fi 연결", sta_down: "Wi-Fi 끊김",
+  link_open: "클라우드 연결 시작", link_dev_tls: "기기 TLS", link_cloud_tls: "클라우드 TLS", link_up: "클라우드 연결됨",
+  link_close: "연결 닫힘", link_reject: "연결 거절", bootstrap: "부트스트랩", zb_join_fail: "Zigbee 가입 실패",
+  zb_joined: "Zigbee 가입", zb_leave: "Zigbee 탈퇴", onboard: "온보딩", gas_pulse: "가스 펄스", store_bad: "저장 오류",
+  boil_burn: "보일러 연소", room_out: "각방 외출", gas_no_pulse: "펄스 없음 경고", cmd_revert: "명령 되돌아감",
+  boil_stg: "보일러 누계",
+};
+
+/* ---------------------------------------------------------------- 상태 */
+const st = { span: DAY, end: null, tab: "rooms", types: [] };
+try { Object.assign(st, JSON.parse(localStorage.getItem("hubwatch") || "{}")); } catch (e) {}
+st.end = null;                                   // 열 때는 늘 '지금'
+const save = () => { try { localStorage.setItem("hubwatch", JSON.stringify({ span: st.span, types: st.types })); } catch (e) {} };
+const range = () => { const to = st.end ?? Date.now(); return { from: to - st.span, to }; };
+const cache = {};
+
+/* ---------------------------------------------------------------- 도움 */
+const pad = n => String(n).padStart(2, "0");
+const md = d => `${d.getMonth() + 1}/${d.getDate()}`;
+const hm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function fmtT(ms) { const d = new Date(ms); return `${md(d)} ${hm(d)}`; }
+function fmtCell(t, step) {
+  const a = new Date(t), b = new Date(t + step * 1000);
+  if (step >= 86400) return `${a.getFullYear()}-${pad(a.getMonth() + 1)}-${pad(a.getDate())}`;
+  if (step <= 60) return fmtT(t);
+  return `${md(a)} ${hm(a)}–${hm(b)}`;
+}
+const fix = (v, d = 1) => v == null ? "–" : (+v).toLocaleString("ko-KR", { minimumFractionDigits: d, maximumFractionDigits: d });
+function h(tag, cls, text, parent) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function s(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+async function api(name, extra = {}) {
+  const r = range();
+  const q = new URLSearchParams({ from: Math.round(r.from), to: Math.round(r.to), ...extra });
+  const res = await fetch(`api/log/${name}?${q}`);
+  const j = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok || j.error) throw new Error(j.error || `HTTP ${res.status}`);
+  return j;
+}
+// 범례·툴팁의 표시: line(선) · dash(점선) · rect(막대) · hatch(빗금 띠) · none(표시 없음)
+function keyEl(kind, color, parent) {
+  if (kind === "none") return h("i", "key-line", null, parent).style.visibility = "hidden";
+  const k = h("i", kind === "rect" ? "key-rect" : kind === "hatch" ? "key-hatch" : kind === "dash" ? "key-line dash" : "key-line", null, parent);
+  if (kind === "rect") k.style.background = `var(${color})`;
+  else if (kind === "hatch") { k.style.color = `var(${color})`; k.style.borderColor = `var(${color})`; }
+  else k.style.borderColor = `var(${color})`;
+}
+function legend(parent, items) {
+  const L = h("div", "legend", null, parent);
+  for (const it of items) {
+    const sp = h("span", null, null, L);
+    keyEl(it.kind, it.color, sp);
+    h("span", null, it.name, sp);
+  }
+  return L;
+}
+function nice(lo, hi, n = 4, int = false) {
+  if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 1; }
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const raw = (hi - lo) / n, mag = 10 ** Math.floor(Math.log10(raw)), f = raw / mag;
+  let step = (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * mag;
+  if (int && step < 1) step = 1;               // 횟수 눈금은 정수만
+  const a = Math.floor(lo / step) * step, b = Math.ceil(hi / step) * step, ticks = [];
+  for (let v = a; v <= b + step / 2; v += step) ticks.push(+v.toFixed(9));
+  return { lo: a, hi: b, ticks };
+}
+function timeTicks(x0, x1, px) {
+  const steps = [10 * 6e4, 30 * 6e4, HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY];
+  const want = Math.max(2, Math.floor(px / 66));
+  const step = steps.find(v => (x1 - x0) / v <= want) || steps[steps.length - 1];
+  const m = new Date(x0); m.setHours(0, 0, 0, 0);
+  const out = [];
+  for (let t = m.getTime() + Math.ceil((x0 - m.getTime()) / step) * step; t <= x1; t += step) {
+    const d = new Date(t);
+    out.push([t, step >= DAY || (d.getHours() === 0 && d.getMinutes() === 0) ? md(d) : hm(d)]);
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------- 툴팁 */
+const tip = $("#tip");
+function showTip(x, y, title, rows) {
+  tip.textContent = "";
+  h("div", "th", title, tip);
+  for (const r of rows) {
+    const row = h("div", "row", null, tip);
+    keyEl(r.kind, r.color, row);
+    h("b", null, r.value, row);
+    h("span", null, r.name, row);
+  }
+  tip.hidden = false;
+  const w = tip.offsetWidth, hh = tip.offsetHeight;
+  let left = x + 14, top = y + 14;
+  if (left + w > innerWidth - 8) left = x - w - 14;
+  if (top + hh > innerHeight - 8) top = y - hh - 14;
+  tip.style.left = Math.max(8, left) + "px";
+  tip.style.top = Math.max(8, top) + "px";
+}
+const hideTip = () => { tip.hidden = true; };
+
+/* ---------------------------------------------------------------- 차트 */
+function frame(box, o) {
+  box.textContent = "";
+  const W = Math.max(260, box.clientWidth), H = o.height || 170;
+  const stripH = o.strip ? 12 : 0;
+  const m = { l: 38, r: 10, t: 8, b: 20 + stripH };
+  const svg = s("svg", { class: "chart", width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", tabindex: 0 }, box);
+  if (o.label) svg.setAttribute("aria-label", o.label);
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const X = t => m.l + (t - o.x0) / (o.x1 - o.x0) * pw;
+  const Y = v => m.t + (1 - (v - o.yLo) / (o.yHi - o.yLo)) * ph;
+  for (const v of o.yTicks) {
+    s("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), style: `stroke:var(${v === o.yLo ? "--axis" : "--grid"});stroke-width:1` }, svg);
+    s("text", { x: m.l - 6, y: Y(v) + 3.5, "text-anchor": "end" }, svg).textContent = o.yFmt ? o.yFmt(v) : v;
+  }
+  for (const [t, lab] of timeTicks(o.x0, o.x1, pw)) {
+    const x = X(t);
+    if (x < m.l + 8 || x > W - m.r - 8) continue;
+    s("text", { x, y: H - 5, "text-anchor": "middle" }, svg).textContent = lab;
+  }
+  // 화면 x → 시각. 기울기를 X(1)-X(0) 로 구하면 시각(약 1.8e12 ms)이 커서 정밀도가 깨진다 — 범위로 직접 되돌린다
+  const T = px => o.x0 + (px - m.l) / pw * (o.x1 - o.x0);
+  return { svg, W, H, m, pw, ph, X, Y, T };
+}
+
+// 선 차트: series [{name, color, pts:[[t,v]], step:bool, dim:t=>bool, dimDash:bool}], strip {name, color, pts:[[t,0..1]]},
+// band {color, on:t=>bool} — 켜진 칸마다 그림 영역 높이 전체에 빗금 띠(선보다 뒤). dim(t) 인 칸의 선은 dimColor(없으면 --off)로
+function lineChart(box, o) {
+  const vals = o.series.flatMap(sr => sr.pts.map(p => p[1])).filter(v => v != null);
+  const n = nice(o.yMin ?? Math.min(...vals), o.yMax ?? Math.max(...vals), o.yCount || 4);
+  const f = frame(box, { ...o, yLo: n.lo, yHi: n.hi, yTicks: n.ticks });
+  const stepMs = o.step * 1000, gap = stepMs * 2.5;
+  if (o.band) {
+    const id = "hatch" + Math.random().toString(36).slice(2, 8);
+    const pat = s("pattern", { id, width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" }, s("defs", {}, f.svg));
+    s("rect", { width: 6, height: 6, style: `fill:var(${o.band.color});opacity:.08` }, pat);
+    s("line", { x1: 0, y1: 0, x2: 0, y2: 6, style: `stroke:var(${o.band.color});stroke-width:2;opacity:.45` }, pat);
+    const times = [...new Set(o.series.flatMap(sr => sr.pts.map(p => p[0])))].sort((a, b) => a - b);
+    for (let i = 0; i < times.length; i++) {                       // 이어진 칸은 한 띠로
+      if (!o.band.on(times[i])) continue;
+      let j = i;
+      while (j + 1 < times.length && o.band.on(times[j + 1]) && times[j + 1] - times[j] <= gap) j++;
+      const x = Math.max(f.m.l, f.X(times[i])), x2 = Math.min(f.m.l + f.pw, f.X(times[j] + stepMs));
+      s("rect", { x, y: f.m.t, width: Math.max(1.5, x2 - x), height: f.ph, style: `fill:url(#${id})` }, f.svg);
+      i = j;
+    }
+  }
+  if (o.strip) {
+    const y = f.H - 20 - 9;
+    s("rect", { x: f.m.l, y, width: f.pw, height: 6, rx: 3, style: "fill:var(--grid)" }, f.svg);
+    for (const [t, v] of o.strip.pts) {
+      if (!v) continue;
+      const x = Math.max(f.m.l, f.X(t)), w = Math.max(1.5, Math.min(f.X(t + stepMs), f.m.l + f.pw) - x);
+      s("rect", { x, y, width: w, height: 6, style: `fill:var(${o.strip.color});opacity:${0.35 + 0.65 * v}` }, f.svg);
+    }
+  }
+  const maps = o.series.map(sr => new Map(sr.pts.map(p => [p[0], p[1]])));
+  o.series.forEach(sr => {
+    // 조각마다 그 칸의 상태(dim)로 색을 고른다: 보통 = 계열 색, dim = --off. 바뀌는 곳에서 끊기지 않게 앞 점에서 잇는다
+    // 펜이 이미 그 자리에 있으면 M 을 넣지 않는다(점선이 칸마다 처음부터 다시 시작해 실선처럼 보이지 않게)
+    const d = ["", ""], pen = [null, null], F = v => v.toFixed(1);
+    const seg = (k, x0, y0, tail, x1, y1) => {
+      const at = `${F(x0)},${F(y0)}`;
+      if (pen[k] !== at) d[k] += `M${at}`;
+      d[k] += tail; pen[k] = `${F(x1)},${F(y1)}`;
+    };
+    let prev = null;
+    for (const [t, v] of sr.pts) {
+      if (v == null) { prev = null; continue; }
+      const x = f.X(t + (sr.step ? 0 : stepMs / 2)), y = f.Y(v), k = sr.dim && sr.dim(t) ? 1 : 0;
+      if (prev && t - prev.t <= gap) {
+        if (sr.step) {
+          seg(prev.k, prev.x, prev.y, `H${F(x)}`, x, prev.y);       // 앞 칸의 수평은 앞 칸 상태로
+          seg(k, x, prev.y, `V${F(y)}`, x, y);
+        } else seg(k, prev.x, prev.y, `L${F(x)},${F(y)}`, x, y);
+      } else { d[k] += `M${F(x)},${F(y)}`; pen[k] = `${F(x)},${F(y)}`; }
+      prev = { t, x, y, k };
+    }
+    if (sr.step && prev) { const xe = f.X(prev.t + stepMs); seg(prev.k, prev.x, prev.y, `H${F(xe)}`, xe, prev.y); }
+    const base = "fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round";
+    if (d[0]) s("path", { d: d[0], style: `${base};stroke:var(${sr.color})` }, f.svg);
+    if (d[1]) s("path", { d: d[1], style: `${base};stroke:var(${sr.dimColor || "--off"})${sr.dimDash ? ";stroke-dasharray:4 4" : ""}` }, f.svg);
+  });
+  // 끝점
+  o.series.forEach(sr => {
+    const last = [...sr.pts].reverse().find(p => p[1] != null);
+    if (!last) return;
+    const dimmed = sr.dim && sr.dim(last[0]);
+    s("circle", { cx: f.X(last[0] + (sr.step ? stepMs : stepMs / 2)), cy: f.Y(last[1]), r: 4,
+      style: `fill:var(${dimmed ? sr.dimColor || "--off" : sr.color});stroke:var(--surface);stroke-width:2` }, f.svg);
+  });
+  const times = [...new Set(o.series.flatMap(sr => sr.pts.map(p => p[0])))].sort((a, b) => a - b);
+  const stripMap = o.strip ? new Map(o.strip.pts) : null;
+  crosshair(f, times, stepMs, t => {
+    const rows = o.series.map((sr, i) => ({ name: sr.name, color: sr.color, value: maps[i].has(t) ? o.fmt(maps[i].get(t)) : "–",
+      y: maps[i].has(t) ? f.Y(maps[i].get(t)) : null, x: f.X(t + (sr.step ? stepMs / 2 : stepMs / 2)) }));
+    if (o.strip) rows.push({ name: o.strip.name, color: o.strip.color, kind: "rect",
+      value: stripMap.has(t) ? Math.round(stripMap.get(t) * 100) + "%" : "–" });
+    if (o.status) { const st = o.status(t); if (st) rows.push({ name: "상태", ...st }); }
+    return { title: fmtCell(t, o.step), rows };
+  });
+}
+
+// 세로 막대(쌓기): stack [{name, color, pts:[[t,v]]}]
+function barChart(box, o) {
+  const maps = o.stack.map(sr => new Map(sr.pts));
+  const times = [...new Set(o.stack.flatMap(sr => sr.pts.map(p => p[0])))].sort((a, b) => a - b);
+  const tot = t => maps.reduce((a, m) => a + (m.get(t) || 0), 0);
+  const n = nice(0, Math.max(o.yMin || 1, ...times.map(tot)), 4, o.int);
+  const f = frame(box, { ...o, yLo: 0, yHi: n.hi, yTicks: n.ticks });
+  const stepMs = o.step * 1000;
+  const sw = f.X(o.x0 + stepMs) - f.X(o.x0), bw = Math.max(1, Math.min(24, sw - 2));
+  for (const t of times) {
+    const segs = o.stack.map((sr, i) => [sr, maps[i].get(t) || 0]).filter(x => x[1] > 0);
+    let acc = 0;
+    segs.forEach(([sr, v], i) => {
+      const bottom = f.Y(acc) - (i ? 2 : 0);          // 쌓인 조각 사이 2px 틈
+      acc += v;
+      const y = Math.min(f.Y(acc), bottom - 0.8), hgt = bottom - y;
+      const x = f.X(t) + (sw - bw) / 2;
+      const r = i === segs.length - 1 ? Math.min(4, bw / 2, hgt) : 0;   // 맨 위만 둥글게, 바닥은 각지게
+      const d = `M${x},${bottom}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${bottom}Z`;
+      s("path", { d, style: `fill:var(${sr.color})` }, f.svg);
+    });
+  }
+  crosshair(f, times, stepMs, t => ({
+    title: fmtCell(t, o.step),
+    rows: o.stack.map((sr, i) => ({ name: sr.name, color: sr.color, kind: "rect", value: o.fmt(maps[i].get(t) || 0) }))
+      .concat(o.stack.length > 1 ? [{ name: "합계", color: "--grid", kind: "rect", value: o.fmt(tot(t)) }] : []),
+  }), true);
+}
+
+// 포인터·키보드로 가장 가까운 칸을 찾는다. 막대는 칸 전체가 과녁.
+function crosshair(f, times, stepMs, read, bars) {
+  if (!times.length) return;
+  const line = s("line", { y1: f.m.t, y2: f.m.t + f.ph, style: "stroke:var(--axis);stroke-width:1", visibility: "hidden" }, f.svg);
+  const band = bars ? s("rect", { y: f.m.t, height: f.ph, style: "fill:var(--wash)", visibility: "hidden" }, f.svg) : null;
+  const dots = [];
+  const hit = s("rect", { x: f.m.l, y: 0, width: f.pw, height: f.H, style: "fill:transparent" }, f.svg);
+  let idx = times.length - 1;
+  function show(i, cx, cy) {
+    idx = Math.max(0, Math.min(times.length - 1, i));
+    const t = times[idx], r = read(t);
+    const x = bars ? f.X(t) : f.X(t + stepMs / 2);
+    if (band) { band.setAttribute("x", f.X(t)); band.setAttribute("width", Math.max(2, f.X(t + stepMs) - f.X(t))); band.setAttribute("visibility", "visible"); }
+    else { line.setAttribute("x1", x); line.setAttribute("x2", x); line.setAttribute("visibility", "visible"); }
+    dots.forEach(d => d.remove()); dots.length = 0;
+    for (const row of r.rows) if (row.y != null && !bars)
+      dots.push(s("circle", { cx: row.x, cy: row.y, r: 4, style: `fill:var(${row.color});stroke:var(--surface);stroke-width:2` }, f.svg));
+    if (cx == null) { const b = f.svg.getBoundingClientRect(); cx = b.left + x; cy = b.top + f.m.t; }
+    showTip(cx, cy, r.title, r.rows);
+  }
+  function near(clientX) {
+    const b = f.svg.getBoundingClientRect();
+    const target = f.T((clientX - b.left) * f.W / b.width);   // 화면 픽셀 → viewBox 좌표 → 시각
+    let lo = 0, hi = times.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (times[mid] + stepMs / 2 < target) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && Math.abs(times[lo - 1] + stepMs / 2 - target) < Math.abs(times[lo] + stepMs / 2 - target)) lo--;
+    return lo;
+  }
+  hit.addEventListener("pointermove", e => show(near(e.clientX), e.clientX, e.clientY));
+  hit.addEventListener("pointerdown", e => show(near(e.clientX), e.clientX, e.clientY));
+  const clear = () => { line.setAttribute("visibility", "hidden"); if (band) band.setAttribute("visibility", "hidden"); dots.forEach(d => d.remove()); hideTip(); };
+  hit.addEventListener("pointerleave", clear);
+  f.svg.addEventListener("focus", () => show(idx));
+  f.svg.addEventListener("blur", clear);
+  f.svg.addEventListener("keydown", e => {
+    if (e.key === "ArrowLeft") { show(idx - 1); e.preventDefault(); }
+    if (e.key === "ArrowRight") { show(idx + 1); e.preventDefault(); }
+  });
+}
+
+function tableDetails(parent, label, head, rows, numFrom = 1) {
+  const d = h("details", "tbl", null, parent);
+  h("summary", null, label, d);
+  d.addEventListener("toggle", () => {
+    if (!d.open || d.dataset.built) return;
+    d.dataset.built = 1;
+    const sc = h("div", "scroll tall", null, d), tb = h("table", null, null, sc);
+    const tr = h("tr", null, null, h("thead", null, null, tb));
+    head.forEach((x, i) => h("th", i >= numFrom ? "num" : null, x, tr));
+    const body = h("tbody", null, null, tb);
+    for (const r of rows) { const row = h("tr", null, null, body); r.forEach((x, i) => h("td", i >= numFrom ? "num" : "t", x, row)); }
+  });
+}
+function tile(parent, lab, val, unit, note) {
+  const t = h("div", "tile", null, parent);
+  h("div", "lab", lab, t);
+  const v = h("div", "val", val, t);
+  if (unit) h("small", null, unit, v);
+  if (note) h("div", "note", note, t);
+}
+function empty(view, msg) { h("div", "empty", msg || "이 기간에 기록이 없습니다.", view); }
+
+/* ---------------------------------------------------------------- 방 온도 */
+function drawRooms(d) {
+  const v = $("#v-rooms"); v.textContent = "";
+  const rooms = d.rooms.filter(r => r.pts.length);
+  if (!rooms.length) return empty(v);
+  const r = range();
+  const vals = rooms.flatMap(x => x.pts.flatMap(p => [p[1], p[2]])).filter(x => x != null);
+  const yMin = Math.floor(Math.min(...vals) - 1), yMax = Math.ceil(Math.max(...vals) + 1);   // 모든 방이 같은 눈금
+  legend(v, [{ name: "현재 온도", color: "--s1" }, { name: "설정 온도", color: "--s2" },
+             { name: "꺼짐(현재 온도)", color: "--s1off" }, { name: "꺼짐(설정 온도)", color: "--off", kind: "dash" },
+             { name: "외출", color: "--out", kind: "hatch" },
+             { name: "난방수 공급(막대 진하기 = 그 칸에서 공급한 비율)", color: "--s3", kind: "rect" }]);
+  const groups = new Map();
+  for (const x of rooms) { const k = x.label || "각방"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(x); }
+  for (const [label, list] of groups) {
+    h("h2", null, label, v);
+    const g = h("div", "grid", null, v);
+    for (const room of list) {
+      const c = h("div", "card", null, g);
+      const head = h("div", "head", null, c);
+      const left = h("div", null, null, head);
+      h("h3", null, room.name || room.zone, left);
+      h("div", "sub", `${room.mac} · ${room.zone}`, left);
+      const last = room.pts[room.pts.length - 1];
+      const now = h("div", "now", null, head);
+      h("b", null, `${fix(last[1], 0)}°`, now);
+      h("span", null, `설정 ${fix(last[2], 0)}°`, now);
+      const pill = h("span", "pill", null, now);
+      const dot = h("i", null, null, pill);
+      if (!last[4]) { dot.style.background = "var(--off)"; h("span", null, "꺼짐", pill); }
+      else if (last[5] >= 0.5) { dot.style.background = "var(--out)"; h("span", null, "외출", pill); }
+      else if (last[3] > 0) { dot.style.background = "var(--s3)"; h("span", null, "난방 중", pill); }
+      else { dot.style.background = "var(--s1)"; h("span", null, "켜짐", pill); }
+      const box = h("div", "chartbox", null, c);
+      // 칸 상태: 켜짐 비율이 절반 아래면 꺼짐(어두운 선), 외출 비율이 절반 이상이면 외출(빗금 띠)
+      const byT = new Map(room.pts.map(p => [p[0], p]));
+      const isOff = t => (byT.get(t)?.[4] ?? 1) < 0.5;
+      lineChart(box, {
+        x0: r.from, x1: r.to, step: d.step, yMin, yMax, height: 170, fmt: x => fix(x, 1) + "°", yFmt: x => x + "°",
+        label: `${label} ${room.name} 현재·설정 온도와 난방수 공급, 꺼진 구간은 어두운 선, 외출 구간은 빗금`,
+        series: [{ name: "현재 온도", color: "--s1", pts: room.pts.map(p => [p[0], p[1]]), dim: isOff, dimColor: "--s1off" },
+                 { name: "설정 온도", color: "--s2", step: true, pts: room.pts.map(p => [p[0], p[2]]), dim: isOff, dimDash: true }],
+        strip: { name: "난방수 공급", color: "--s3", pts: room.pts.map(p => [p[0], p[3]]) },
+        band: { color: "--out", on: t => (byT.get(t)?.[5] ?? 0) >= 0.5 },
+        status: t => { const p = byT.get(t); if (!p) return null;
+          return p[4] < 0.5 ? { value: "꺼짐", color: "--off", kind: "line" }
+               : (p[5] ?? 0) >= 0.5 ? { value: "외출", color: "--out", kind: "hatch" } : { value: "켜짐", color: "--s1", kind: "none" }; },
+      });
+      tableDetails(c, "표로 보기", ["시각", "현재 °C", "설정 °C", "난방 %", "켜짐 %", "외출 %"],
+        [...room.pts].reverse().map(p => [fmtCell(p[0], d.step), fix(p[1]), fix(p[2]), Math.round(p[3] * 100), Math.round(p[4] * 100),
+                                          Math.round((p[5] ?? 0) * 100)]));
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- 보일러·가스 */
+function drawBoiler(d) {
+  const v = $("#v-boiler"); v.textContent = "";
+  const r = range();
+  const liters = d.gas.reduce((a, x) => a + x[1], 0);
+  const heatMin = d.burn.reduce((a, x) => a + x[1], 0), hwMin = d.burn.reduce((a, x) => a + x[2], 0);
+  const tiles = h("div", "tiles", null, v);
+  tile(tiles, "가스 사용량 (계량기 펄스)", fix(liters / 1000, 2), "㎥", `${d.gas.reduce((a, x) => a + x[2], 0).toLocaleString()} 펄스`);
+  tile(tiles, "연소 시간", `${Math.round(heatMin + hwMin).toLocaleString()}`, "분", `난방 ${Math.round(heatMin)}분 · 온수 ${Math.round(hwMin)}분`);
+  if (d.meter && d.meter.m3 != null) tile(tiles, "계량기 지침", fix(d.meter.m3, 2), "㎥", `${d.meter.ts.replace("T", " ").slice(5, 16)} 기준`);
+  if (d.stg_last) tile(tiles, "보일러 자체 누계", `${d.stg_last.heat_gas + d.stg_last.hw_gas}`, "㎥",
+    `난방 ${d.stg_last.heat_gas} · 온수 ${d.stg_last.hw_gas} ㎥, 버너 ${d.stg_last.heat_h}h/${d.stg_last.hw_h}h`);
+  const g = h("div", "grid", null, v);
+  const c1 = h("div", "card wide", null, g);
+  h("h3", null, "가스 사용량", c1); h("div", "sub", "계량기 펄스 합 (L / 칸)", c1);
+  const b1 = h("div", "chartbox", null, c1);
+  if (d.gas.length) barChart(b1, { x0: r.from, x1: r.to, step: d.step, height: 190, fmt: x => `${fix(x, 0)} L`, yFmt: x => x,
+    label: "가스 사용량 막대", stack: [{ name: "가스", color: "--s1", pts: d.gas.map(x => [x[0], x[1]]) }] });
+  else empty(b1, "이 기간에 가스 펄스가 없습니다.");
+  tableDetails(c1, "표로 보기", ["칸", "가스 L", "펄스"], [...d.gas].reverse().map(x => [fmtCell(x[0], d.step), fix(x[1], 0), x[2]]));
+  const c2 = h("div", "card wide", null, g);
+  h("h3", null, "연소 시간", c2); h("div", "sub", "보일러 연소 이벤트로 잰 분 / 칸", c2);
+  legend(c2, [{ name: "난방 연소", color: "--s1", kind: "rect" }, { name: "온수 연소", color: "--s2", kind: "rect" }]);
+  const b2 = h("div", "chartbox", null, c2);
+  if (d.burn.length) barChart(b2, { x0: r.from, x1: r.to, step: d.step, height: 190, fmt: x => `${fix(x, 1)}분`, yFmt: x => x,
+    label: "난방·온수 연소 시간 막대", stack: [{ name: "난방 연소", color: "--s1", pts: d.burn.map(x => [x[0], x[1]]) },
+                                                 { name: "온수 연소", color: "--s2", pts: d.burn.map(x => [x[0], x[2]]) }] });
+  else empty(b2, "이 기간에 연소가 없습니다.");
+  tableDetails(c2, "표로 보기", ["칸", "난방 분", "온수 분"], [...d.burn].reverse().map(x => [fmtCell(x[0], d.step), fix(x[1]), fix(x[2])]));
+  const c3 = h("div", "card wide", null, g);
+  h("h3", null, "보일러 자체 사용량 (stg)", c3);
+  h("div", "sub", "보일러가 약 1시간마다 올리는 누계의 증가분 — 정수(1 ㎥·1 h)라 거칠고, 계량기보다 약 10 % 많게 셉니다", c3);
+  if (!d.stg.length) empty(c3, "이 기간에 늘어난 누계가 없습니다.");
+  else {
+    const sc = h("div", "scroll tall", null, c3), tb = h("table", null, null, sc);
+    const tr = h("tr", null, null, h("thead", null, null, tb));
+    ["시각", "난방 가스 ㎥", "온수 가스 ㎥", "난방 h", "온수 h"].forEach((x, i) => h("th", i ? "num" : null, x, tr));
+    const body = h("tbody", null, null, tb);
+    for (const x of [...d.stg].reverse()) { const row = h("tr", null, null, body); h("td", "t", fmtT(x[0]), row); for (let i = 1; i < 5; i++) h("td", "num", `+${x[i]}`, row); }
+  }
+}
+
+/* ---------------------------------------------------------------- 이벤트 */
+let evRows = [], evMore = false;
+async function loadEvents(append) {
+  const extra = { limit: 300 };
+  if (st.types.length) extra.types = st.types.join(",");
+  if (append && evRows.length) extra.before = evRows[evRows.length - 1][0];
+  const d = await api("events", extra);
+  evRows = append ? evRows.concat(d.rows) : d.rows;
+  evMore = d.more;
+  if (!append) cache.eventsCounts = d.counts;
+  drawEvents();
+}
+function drawEvents() {
+  const v = $("#v-events"); v.textContent = "";
+  const chips = h("div", "chips", null, v);
+  const all = h("button", "chip", "모두", chips);
+  all.setAttribute("aria-pressed", st.types.length ? "false" : "true");
+  all.onclick = () => { st.types = []; save(); reload(); };
+  for (const [t, n] of cache.eventsCounts || []) {
+    const b = h("button", "chip", TYPE_KO[t] || t, chips);
+    h("span", "n", n.toLocaleString(), b);
+    b.title = t;
+    b.setAttribute("aria-pressed", st.types.includes(t) ? "true" : "false");
+    b.onclick = () => { st.types = st.types.includes(t) ? st.types.filter(x => x !== t) : st.types.concat(t); save(); reload(); };
+  }
+  if (!evRows.length) return empty(v);
+  const sc = h("div", "scroll card", null, v), tb = h("table", null, null, sc);
+  const tr = h("tr", null, null, h("thead", null, null, tb));
+  [["시각"], ["종류"], ["기기"], ["설명"], ["a", "num"], ["b", "num"]].forEach(([x, c]) => h("th", c, x, tr));
+  const body = h("tbody", null, null, tb);
+  for (const [ts, t, mac, a, b, desc] of evRows) {
+    const row = h("tr", null, null, body);
+    h("td", "t", ts.replace("T", " ").slice(5, 23), row);
+    h("td", null, TYPE_KO[t] || t, row).title = t;
+    h("td", "t", mac || "", row);
+    h("td", "desc", desc, row);
+    h("td", "num raw", a ?? "", row);
+    h("td", "num raw", b ?? "", row);
+  }
+  if (evMore) {
+    const more = h("button", "btn", "더 오래된 것 300개", v);
+    more.style.marginTop = "10px";
+    more.onclick = () => { more.disabled = true; loadEvents(true).catch(showErr); };
+  }
+}
+
+/* ---------------------------------------------------------------- 허브 연결 */
+function drawHub(d) {
+  const v = $("#v-hub"); v.textContent = "";
+  const r = range();
+  const n = d.polls.reduce((a, x) => a + x[1], 0), ok = d.polls.reduce((a, x) => a + x[2], 0);
+  const heaps = d.state.map(x => x[1]).filter(x => x != null), rssi = d.state.map(x => x[2]).filter(x => x != null);
+  const tiles = h("div", "tiles", null, v);
+  tile(tiles, "허브 응답", n ? fix(ok / n * 100, 1) : "–", "%", `${ok.toLocaleString()} / ${n.toLocaleString()} 번 응답`);
+  tile(tiles, "재부팅", `${d.boots.length}`, "번", d.boots.length ? `마지막 ${fmtT(d.boots[d.boots.length - 1][0])}` : "이 기간에 없음");
+  tile(tiles, "가장 적은 여유 메모리", heaps.length ? fix(Math.min(...heaps) / 1024, 0) : "–", "KB", "칸마다 최저값 중 최저");
+  tile(tiles, "Wi-Fi 신호 평균", rssi.length ? fix(rssi.reduce((a, x) => a + x, 0) / rssi.length, 0) : "–", "dBm");
+  const g = h("div", "grid", null, v);
+  const c1 = h("div", "card wide", null, g);
+  h("h3", null, "응답 없음", c1); h("div", "sub", "기록기가 허브에 물었는데 답이 없던 횟수 / 칸", c1);
+  const fails = d.polls.map(x => [x[0], x[1] - x[2]]).filter(x => x[1] > 0);
+  const b1 = h("div", "chartbox", null, c1);
+  if (fails.length) barChart(b1, { x0: r.from, x1: r.to, step: d.step, height: 150, fmt: x => `${x}번`, yFmt: x => x,
+    label: "허브 응답 없음 막대", int: true, stack: [{ name: "응답 없음", color: "--crit", pts: fails }] });
+  else empty(b1, "이 기간에 응답이 빠진 적이 없습니다.");
+  if (d.errors.length) tableDetails(c1, "실패 사유", ["사유", "횟수"], d.errors.map(x => [x[0] || "", x[1]]));
+  const c2 = h("div", "card", null, g);
+  h("h3", null, "여유 메모리 (최저)", c2); h("div", "sub", "KB, 칸마다 최저", c2);
+  const b2 = h("div", "chartbox", null, c2);
+  if (heaps.length) lineChart(b2, { x0: r.from, x1: r.to, step: d.step, height: 160, fmt: x => `${fix(x, 0)} KB`, yFmt: x => x,
+    label: "허브 여유 메모리 선", series: [{ name: "여유 메모리", color: "--s1", pts: d.state.map(x => [x[0], x[1] == null ? null : x[1] / 1024]) }] });
+  else empty(b2);
+  const c3 = h("div", "card", null, g);
+  h("h3", null, "Wi-Fi 신호", c3); h("div", "sub", "dBm, 칸 평균 (0 에 가까울수록 셈)", c3);
+  const b3 = h("div", "chartbox", null, c3);
+  if (rssi.length) lineChart(b3, { x0: r.from, x1: r.to, step: d.step, height: 160, fmt: x => `${fix(x, 0)} dBm`, yFmt: x => x,
+    label: "Wi-Fi 신호 선", series: [{ name: "신호", color: "--s1", pts: d.state.map(x => [x[0], x[2]]) }] });
+  else empty(b3);
+  if (d.boots.length) {
+    const c4 = h("div", "card wide", null, g);
+    h("h3", null, "재부팅", c4);
+    const tb = h("table", null, null, h("div", "scroll", null, c4));
+    for (const [t, why] of [...d.boots].reverse()) { const row = h("tr", null, null, tb); h("td", "t", fmtT(t), row); h("td", null, why, row); }
+  }
+}
+
+/* ---------------------------------------------------------------- 불러오기 */
+const DRAW = { rooms: drawRooms, boiler: drawBoiler, hub: drawHub };
+let busy = 0;
+function showErr(e) {
+  const v = $(`#v-${st.tab}`); v.textContent = "";
+  h("div", "err", `불러오지 못했습니다: ${e.message || e}`, v);
+}
+async function reload() {
+  const tab = st.tab, my = ++busy;
+  $("#main").classList.add("loading");
+  drawRange();
+  try {
+    api("meta").then(m => {
+      $("#src").textContent = `${m.db} · 마지막 기록 ${(m.last || "–").replace("T", " ").slice(5, 16)}`;
+    }).catch(() => {});
+    if (tab === "events") await loadEvents(false);
+    else { const d = await api(tab); if (my !== busy) return; cache[tab] = d; DRAW[tab](d); }
+  } catch (e) { if (my === busy) showErr(e); }
+  if (my === busy) $("#main").classList.remove("loading");
+}
+function drawRange() {
+  const r = range();
+  $("#rangeLabel").textContent = `${fmtT(r.from)} – ${st.end ? fmtT(r.to) : "지금"}`;
+  $("#next").disabled = st.end == null;
+  for (const b of $("#presets").children) b.setAttribute("aria-pressed", +b.dataset.span === st.span ? "true" : "false");
+}
+function setTab(t) {
+  st.tab = TABS.includes(t) ? t : "rooms";
+  for (const a of document.querySelectorAll("nav.tabs a")) a.setAttribute("aria-selected", a.dataset.tab === st.tab ? "true" : "false");
+  for (const t2 of TABS) $(`#v-${t2}`).hidden = t2 !== st.tab;
+  hideTip();
+  reload();
+}
+for (const [lab, span] of PRESETS) {
+  const b = h("button", null, lab, $("#presets"));
+  b.dataset.span = span;
+  b.onclick = () => { st.span = span; save(); reload(); };
+}
+$("#prev").onclick = () => { st.end = (st.end ?? Date.now()) - st.span; reload(); };
+$("#next").onclick = () => { const e = st.end + st.span; st.end = e >= Date.now() ? null : e; reload(); };
+$("#now").onclick = () => { st.end = null; reload(); };
+addEventListener("hashchange", () => setTab(location.hash.slice(1)));
+setInterval(() => { if ($("#auto").checked && st.end == null && !document.hidden && st.tab !== "events") reload(); }, 60000);
+let rt;
+addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (cache[st.tab] && DRAW[st.tab]) DRAW[st.tab](cache[st.tab]); }, 150); });
+setTab(location.hash.slice(1) || "rooms");
+</script>
+</body>
+</html>

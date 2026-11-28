@@ -25,6 +25,8 @@ lynnai-hub-watch — LYNNAI 허브 장기 기록기 (표준 라이브러리만, 
 환경변수: HUB_URL(필수, 예 http://192.168.0.50) HUB_TOKEN POLL_SEC(60) EVENT_SEC(30) HUB_DB(data/hub.db)
   HUB_DB_URL  주면 SQLite 파일 대신 PostgreSQL 에 쓴다 (예 postgresql://user:암호@192.168.0.7:5432/lynnai_hub,
               psycopg 3 필요: pip install "psycopg[binary]"). 비우면 HUB_DB 파일.
+  WEB_PORT    주면 그 포트에 로그 브라우저(읽기 전용 웹 화면 lynnai_hub_web.html + /api/log/*)를 같이 띄운다.
+  python lynnai_hub_watch.py web [포트]       # 기록 없이 로그 브라우저만 (기본 포트 WEB_PORT 또는 8497)
   python lynnai_hub_watch.py to-pg [hub.db]   # SQLite 기록을 HUB_DB_URL 로 옮긴다(이미 있는 줄은 건너뜀 — 여러 번 돌려도 됨)
 시각(ts)은 두 DB 모두 ISO 글자('2026-11-27T13:00:00', 이벤트는 밀리초까지). Postgres 에선 ts::timestamp 로 바꿔 쓰면 된다.
 """
@@ -33,6 +35,7 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,7 +48,10 @@ POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
 EVENT_SEC = int(os.environ.get("EVENT_SEC", "30"))
 DB = os.environ.get("HUB_DB", os.path.join(HERE, "data", "hub.db"))
 DB_URL = os.environ.get("HUB_DB_URL", "").strip()
+WEB_PORT = int(os.environ.get("WEB_PORT", "0") or 0)   # 로그 브라우저(읽기 전용). 0 이면 안 띄움
+WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lynnai_hub_web.html")
 
+# 와이파이 해제 사유(IEEE 802.11 reason) 중 자주 보는 것
 REASON = {1: "unspecified", 2: "auth_expire", 3: "기기가 떠남", 4: "무활동", 8: "기기가 떠남(assoc)",
           15: "4way 타임아웃", 200: "비콘 끊김", 201: "AP 못찾음", 202: "인증실패", 204: "핸드셰이크 타임아웃"}
 CLOSER = {0: "연결 전 실패", 1: "기기가 닫음", 2: "클라우드가 닫음", 3: "유휴(200초)"}
@@ -319,6 +325,8 @@ def main():
     stamp = os.stat(me).st_mtime_ns
     c = db()
     catch_up_usage(c)
+    if WEB_PORT:
+        start_web(WEB_PORT)
     print(f"lynnai-hub-watch 시작: {HUB_URL} 상태 {POLL_SEC}초·이벤트 {EVENT_SEC}초 → {c.where()}"
           f"{' (토큰 사용)' if HUB_TOKEN else ''}", flush=True)
     next_state = 0.0
@@ -528,9 +536,269 @@ def temps(hours):
             print(f"  {h}시  {t:5.1f}°C  {rh:4.0f}%")
 
 
+# ---------------------------------------------------------------- 로그 브라우저 (읽기 전용)
+
+RESET = {0: "알 수 없음", 1: "전원 켬", 2: "외부 리셋", 3: "소프트웨어 재시작", 4: "패닉", 5: "인터럽트 워치독",
+         6: "태스크 워치독", 7: "워치독", 8: "딥슬립", 9: "전압 저하", 12: "JTAG", 14: "전원 글리치", 15: "CPU 멈춤"}
+
+
+def short_mac(mac):
+    """이벤트 mac 칸: 기기 MAC 6바이트, 또는 앞 3바이트(끝 3자리 기기 구분)만 쓰고 나머지 0."""
+    if not mac:
+        return ""
+    p = mac.split(":")
+    if all(x == "00" for x in p):
+        return ""
+    return "".join(p[:3]) if len(p) == 6 and p[3:] == ["00", "00", "00"] else mac
+
+
+def ev_desc(typ, mac, a, bb):
+    """이벤트 한 줄을 사람 말로 (펌웨어 hub_events.h 의 칸 뜻)."""
+    a = a or 0
+    bb = bb or 0
+    mac = short_mac(mac)
+    if typ == "boot":
+        return f"허브 부팅 — {RESET.get(a, f'사유 {a}')}"
+    if typ == "ap_join":
+        return f"기기 {mac} 가 허브 AP 에 붙음"
+    if typ == "ap_leave":
+        return f"기기 {mac} 가 허브 AP 에서 떨어짐 — {REASON.get(a, f'사유 {a}')}, {bb / 1000:,.0f}초 붙어 있었음"
+    if typ == "sta_up":
+        return f"집 Wi-Fi 연결 (채널 {a})"
+    if typ == "sta_down":
+        return f"집 Wi-Fi 끊김 — {REASON.get(a, f'사유 {a}')}"
+    if typ == "link_open":
+        return f".{a} 기기가 클라우드 연결 시작"
+    if typ in ("link_dev_tls", "link_cloud_tls"):
+        side = "기기 쪽" if typ == "link_dev_tls" else "클라우드 쪽"
+        return f".{a} {side} TLS " + (f"{bb:,} ms" if bb >= 0 else f"실패 (코드 {bb})")
+    if typ == "link_up":
+        return f".{a} 기기 클라우드 연결됨"
+    if typ == "link_close":
+        try:
+            who = CLOSER.get(int((mac or "00")[:2], 16), "?")
+        except ValueError:
+            who = "?"
+        mac = None
+        return f".{a} 연결 닫힘 — {who}, {bb / 1000:,.0f}초 유지"
+    if typ == "link_reject":
+        return f".{a} 연결 거절"
+    if typ == "bootstrap":
+        return f".{a} 부트스트랩 " + ("성공" if bb else "실패")
+    if typ == "zb_join_fail":
+        return f"Zigbee 가입 실패 (상태 {a}), {bb / 1000:,.0f}초 뒤 다시"
+    if typ == "zb_joined":
+        return f"Zigbee 가입됨 (PAN {a:04x}, 채널 {bb})"
+    if typ == "zb_leave":
+        return f"Zigbee 탈퇴 (타입 {a})"
+    if typ == "onboard":
+        return "온보딩 " + ("성공" if a else "실패")
+    if typ == "gas_pulse":
+        return f"가스 {bb} L (누적 {a:,} 펄스)"
+    if typ == "store_bad":
+        return f"저장 데이터 오류 (이번 부팅 {a}건)"
+    if typ == "boil_burn":
+        mode = {0: "연소 멈춤", 1: "난방 연소", 2: "온수 연소", 3: "난방+온수 연소"}.get(a & 3, str(a))
+        return f"보일러 {mode} (가스 누적 {bb:,} 펄스)"
+    if typ == "room_out":
+        return f"각방 {mac} 존{a + 1} 외출 " + ("켬" if bb else "끔")
+    if typ == "gas_no_pulse":
+        return f"가스 펄스 없음 경고 — 그동안 연소 {bb:,}초" if a else "가스 펄스 없음 경고 풀림"
+    if typ == "cmd_revert":
+        return f"명령이 되돌아감 — 기기 {mac} (f0{a:x}), {bb}초 뒤"
+    if typ == "boil_stg":
+        return (f"보일러 사용량 누계 — 난방 가스 {a & 0xffff} ㎥, 온수 가스 {(a >> 16) & 0xffff} ㎥, "
+                f"난방 {bb & 0xffff} h, 온수 {(bb >> 16) & 0xffff} h")
+    return ""
+
+
+def _iso(ms):
+    return datetime.fromtimestamp(int(ms) / 1000).isoformat(timespec="seconds")
+
+
+def _bucket(span_s):
+    """기간 길이 → (ts 앞 몇 글자로 묶을지, 한 칸 초). 칸 수가 300~450 안팎이 되게."""
+    for lim, n, step in ((8 * 3600, 16, 60), (3 * 86400, 15, 600), (16 * 86400, 13, 3600)):
+        if span_s <= lim:
+            return n, step
+    return 10, 86400
+
+
+def _key_ms(k):
+    k = {16: k, 15: k + "0", 13: k + ":00", 10: k + "T00:00"}[len(k)]
+    return int(datetime.fromisoformat(k).timestamp() * 1000)
+
+
+def _floor(dt, step):
+    if step >= 86400:
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if step >= 3600:
+        return dt.replace(minute=0, second=0, microsecond=0)
+    return dt.replace(minute=dt.minute - dt.minute % (step // 60), second=0, microsecond=0)
+
+
+def log_meta(c, q):
+    since = (datetime.now() - timedelta(days=7)).isoformat(timespec="seconds")
+    rooms = [{"mac": m, "label": l, "zone": z, "name": n} for m, l, z, n in c.execute(
+        "select mac, max(label), zone, max(name) from zones where ts>=? group by mac, zone order by max(label), mac, zone",
+        (since,)).fetchall()]
+    first, last = c.execute("select min(ts), max(ts) from state").fetchone()
+    types = c.execute("select type, count(*) from events group by type order by 2 desc").fetchall()
+    return {"db": "PostgreSQL" if c.pg else "SQLite", "where": c.where(), "hub": HUB_URL, "first": first, "last": last,
+            "rooms": rooms, "types": types}
+
+
+def log_rooms(c, q):
+    a, b = _iso(q["from"]), _iso(q["to"])
+    n, step = _bucket((int(q["to"]) - int(q["from"])) / 1000)
+    out = {}
+    # 점 = [칸 시각 ms, 현재, 설정, 난방 비율, 켜짐 비율, 외출 비율] — 비율은 그 칸 안의 기록 중 그 상태였던 몫(0~1)
+    for k, mac, zone, cur, setp, heat, on, out_, label, name in c.execute(
+            f"""select substr(ts,1,{n}) k, mac, zone, avg(cur), avg(setp), avg(heating), avg(on_), avg(coalesce(outing,0)),
+                       max(label), max(name)
+                from zones where ts>=? and ts<? group by k, mac, zone order by k""", (a, b)).fetchall():
+        r = out.setdefault((mac, zone), {"mac": mac, "zone": zone, "label": label, "name": name, "pts": []})
+        r["pts"].append([_key_ms(k), cur, setp, heat, on, out_])
+    return {"step": step, "rooms": sorted(out.values(), key=lambda r: (r["label"] or "", r["mac"] or "", r["zone"]))}
+
+
+def log_boiler(c, q):
+    a, b = _iso(q["from"]), _iso(q["to"])
+    n, step = _bucket((int(q["to"]) - int(q["from"])) / 1000)
+    gas = [[_key_ms(k), l or 0, cnt] for k, l, cnt in c.execute(
+        f"select substr(ts,1,{n}) k, sum(b), count(*) from events where type='gas_pulse' and ts>=? and ts<? group by k order by k",
+        (a, b)).fetchall()]
+    # 연소: boil_burn 은 '바뀐 순간'만 있다 → 기간 앞 마지막 상태부터 구간으로 펴서 칸마다 분으로 나눈다
+    evs = c.execute("select ts, a from events where type='boil_burn' and ts<? order by ts desc limit 1", (a,)).fetchall()
+    evs += c.execute("select ts, a from events where type='boil_burn' and ts>=? and ts<? order by ts", (a, b)).fetchall()
+    t_end = min(datetime.fromisoformat(b), datetime.now())
+    burn = {}
+    for i, (ts, mode) in enumerate(evs):
+        t0 = max(datetime.fromisoformat(ts[:19]), datetime.fromisoformat(a))
+        t1 = datetime.fromisoformat(evs[i + 1][0][:19]) if i + 1 < len(evs) else t_end
+        while t0 < t1 and mode:
+            cell = _floor(t0, step)
+            nxt = min(t1, cell + timedelta(seconds=step))
+            m = (nxt - t0).total_seconds() / 60
+            r = burn.setdefault(int(cell.timestamp() * 1000), [0.0, 0.0])
+            if mode & 1:
+                r[0] += m
+            if mode & 2:
+                r[1] += m
+            t0 = nxt
+    # 보일러 자체 누계(stg): 기간 안의 줄마다 앞 줄과의 차
+    rows = c.execute("select ts, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h from boiler_usage where ts<? order by ts desc limit 1",
+                     (a,)).fetchall()
+    rows += c.execute("select ts, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h from boiler_usage where ts>=? and ts<? order by ts",
+                      (a, b)).fetchall()
+    stg = []
+    for p, r in zip(rows, rows[1:]):
+        d = [r[i] - p[i] for i in range(1, 5)]
+        if min(d) >= 0 and any(d):
+            stg.append([int(datetime.fromisoformat(r[0]).timestamp() * 1000)] + d)
+    last = rows[-1] if rows else None
+    meter = c.execute("select ts, gas_meter_m3, gas_pulses from state where gas_pulses is not null and ts<? order by ts desc limit 1",
+                      (b,)).fetchone()
+    return {"step": step, "gas": gas, "burn": sorted([k] + v for k, v in burn.items()), "stg": stg,
+            "stg_last": last and {"ts": last[0], "heat_gas": last[1], "hw_gas": last[2], "heat_h": last[3], "hw_h": last[4]},
+            "meter": meter and {"ts": meter[0], "m3": meter[1], "pulses": meter[2]}}
+
+
+def log_hub(c, q):
+    a, b = _iso(q["from"]), _iso(q["to"])
+    n, step = _bucket((int(q["to"]) - int(q["from"])) / 1000)
+    polls = [[_key_ms(k), cnt, int(ok or 0)] for k, cnt, ok in c.execute(
+        f"select substr(ts,1,{n}) k, count(*), sum(ok) from polls where ts>=? and ts<? group by k order by k", (a, b)).fetchall()]
+    st = [[_key_ms(k), hm, rssi] for k, hm, rssi in c.execute(
+        f"select substr(ts,1,{n}) k, min(heap_min), avg(rssi) from state where ts>=? and ts<? group by k order by k", (a, b)).fetchall()]
+    boots = [[int(datetime.fromisoformat(ts[:19]).timestamp() * 1000), ev_desc("boot", None, aa, None)] for ts, aa in c.execute(
+        "select ts, a from events where type='boot' and ts>=? and ts<? order by ts", (a, b)).fetchall()]
+    errs = c.execute("select err, count(*) from polls where ok=0 and ts>=? and ts<? group by err order by 2 desc limit 8",
+                     (a, b)).fetchall()
+    return {"step": step, "polls": polls, "state": st, "boots": boots, "errors": errs}
+
+
+def log_events(c, q):
+    a, b = _iso(q["from"]), _iso(q["to"])
+    where, args = ["ts>=?", "ts<?"], [a, b]
+    types = [t for t in (q.get("types") or "").split(",") if re.fullmatch(r"[a-z_]{1,24}", t)]
+    if types:
+        where.append("type in (" + ",".join("?" * len(types)) + ")")
+        args += types
+    if q.get("before"):
+        where.append("ts<?")
+        args.append(q["before"])
+    w = " and ".join(where)
+    limit = max(1, min(int(q.get("limit") or 200), 1000))
+    rows = c.execute(f"select ts, type, mac, a, b from events where {w} order by ts desc limit {limit}", args).fetchall()
+    counts = c.execute("select type, count(*) from events where ts>=? and ts<? group by type order by 2 desc", (a, b)).fetchall()
+    return {"rows": [[ts, t, "" if t == "link_close" else short_mac(m), x, y, ev_desc(t, m, x, y)] for ts, t, m, x, y in rows],
+            "counts": counts,
+            "more": len(rows) == limit}
+
+
+LOG_API = {"meta": log_meta, "rooms": log_rooms, "boiler": log_boiler, "hub": log_hub, "events": log_events}
+
+
+def start_web(port, block=False):
+    """로그 브라우저. 읽기만 한다. DB 연결은 하나를 잠가서 같이 쓴다(드물게 오는 요청이라 충분)."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qsl, urlparse
+    lock = threading.Lock()
+    conn = [None]
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def send(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path in ("/", "/index.html"):
+                try:
+                    with open(WEB_HTML, "rb") as f:                 # 요청마다 읽는다(배포하면 바로 바뀜)
+                        return self.send(200, f.read(), "text/html; charset=utf-8")
+                except OSError:
+                    return self.send(404, b"lynnai_hub_web.html not found", "text/plain")
+            name = u.path[len("/api/log/"):] if u.path.startswith("/api/log/") else None
+            if name not in LOG_API:
+                return self.send(404, b"not found", "text/plain")
+            q = dict(parse_qsl(u.query))
+            now = int(time.time() * 1000)
+            q.setdefault("to", str(now))
+            q.setdefault("from", str(int(q["to"]) - 86400000))
+            with lock:
+                try:
+                    if conn[0] is None:
+                        conn[0] = db()
+                    out = LOG_API[name](conn[0], q)
+                    conn[0].commit()           # Postgres 는 읽기만 해도 트랜잭션이 열린다 — 닫아 둔다
+                except Exception as e:
+                    if conn[0] is not None:
+                        conn[0].recover()
+                    return self.send(500, json.dumps({"error": str(e)}, ensure_ascii=False).encode(), "application/json")
+            self.send(200, json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode(), "application/json")
+
+    ThreadingHTTPServer.allow_reuse_address = True
+    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    srv.daemon_threads = True
+    print(f"로그 브라우저: http://0.0.0.0:{port}/", flush=True)
+    if block:
+        srv.serve_forever()
+    else:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    arg = float(sys.argv[2]) if len(sys.argv) > 2 and cmd not in ("import-stg", "to-pg") else None
+    arg = float(sys.argv[2]) if len(sys.argv) > 2 and cmd not in ("import-stg", "to-pg", "web") else None
     if cmd == "summary":
         summary(arg or 24)
     elif cmd == "gas":
@@ -543,6 +811,8 @@ if __name__ == "__main__":
         usage(int(arg or 7))
     elif cmd == "import-stg":
         import_stg(sys.argv[2:])
+    elif cmd == "web":
+        start_web(int(sys.argv[2]) if len(sys.argv) > 2 else (WEB_PORT or 8497), block=True)
     elif cmd == "to-pg":
         to_pg(sys.argv[2] if len(sys.argv) > 2 else DB)
     else:

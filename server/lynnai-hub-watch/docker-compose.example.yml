@@ -11,5 +11,8 @@ services:
       - HUB_DB_URL=${HUB_DB_URL:-}   # 예 postgresql://user:암호@192.168.0.7:5432/lynnai_hub — 비우면 ./data/hub.db
       - POLL_SEC=60
       - EVENT_SEC=30
+      - WEB_PORT=8497            # 로그 브라우저(읽기 전용). 0 이면 끔
+    ports:
+      - "8497:8497"             # http://NAS주소:8497 — LAN 전용, 인터넷에 열지 말 것
     volumes:
       - ./data:/data
