@@ -36,7 +36,7 @@ static const char *const CH_NAME[EXPOSE_NCH] = { "Zigbee", "LAN", "Matter" };
 static const uint8_t CH_UPLINK[EXPOSE_NCH] = { HUB_UPLINK_ZIGBEE, HUB_UPLINK_LAN, HUB_UPLINK_MATTER };
 
 #define ALL_BITS 0x7FFFFFFFu
-#define MAX_HID  8                      /* 기기 수(hub_rinnai MAX_DEV 6) + 여유 */
+#define MAX_HID  16                     /* 로컬 6 + 위성 조절기(멀티허브 14대까지) + 여유 — 저장 blob 은 항목 수만큼이라 옛 저장과 맞음 */
 
 typedef struct {
     uint8_t kind;
@@ -68,7 +68,7 @@ const hub_room_t HUB_ROOMS[HUB_NROOMS] = {
 bool hub_room_present(const hub_dev_t *d, int i)
 {
     int s = HUB_ROOMS[i].stat;
-    return d->kind == HUB_KIND_F09 && s + 3 < d->n && (d->blob[s] || d->blob[s + 3]);
+    return d->kind == HUB_KIND_F09 && s < d->n && (d->blob[s] & 0x01);   /* 응답 비트 — v0.8 의 방 존재 기준 */
 }
 
 /* 종류별 컨트롤 표 */

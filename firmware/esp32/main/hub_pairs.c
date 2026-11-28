@@ -28,7 +28,7 @@ static SemaphoreHandle_t s_pairs_mx_get(void)
 #define LOCK()   xSemaphoreTakeRecursive(s_pairs_mx_get(), portMAX_DELAY)
 #define UNLOCK() xSemaphoreGiveRecursive(s_pairs_mx_get())
 static const char *TAG = "HUB_PAIRS";
-#define MAX_PAIRS 6
+#define MAX_PAIRS 16             /* 멀티허브로 기기가 14대까지 — 키가 p0~ 라 늘려도 옛 저장과 맞음 */
 
 typedef struct {
     char f09[7];    /* 6 hex + NUL */
@@ -38,7 +38,7 @@ static pair_t s_pairs[MAX_PAIRS];
 static int s_n;
 
 /* 별명(아래에 정의, hub_pairs_load 가 먼저 쓰므로 선언을 위로) */
-#define MAX_ALIAS 8
+#define MAX_ALIAS 16             /* 멀티허브로 기기가 14대까지(키 a0~) */
 #define ALIAS_LEN 64             /* UTF-8 바이트(한글 3바이트 → 약 20자, 팝업 maxlength=20) */
 typedef struct { char mac[7]; char name[ALIAS_LEN]; } alias_t;
 static alias_t s_alias[MAX_ALIAS];

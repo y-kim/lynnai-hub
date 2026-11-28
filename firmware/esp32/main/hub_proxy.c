@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "esp_http_server.h"
 #include <fcntl.h>
 #include <errno.h>
@@ -1701,6 +1702,21 @@ static esp_err_t boot_send(httpd_req_t *req, int code, const char *body)
  *           클라우드가 답을 못 하면(끊김·잘림) 이 기기의 저장된 답, 그것도 없으면 502.
  *   단독  : 허브가 만든 답(BOOT_LOCAL)만 — 저장한 클라우드 계정·암호는 단독에서 내주지 않는다.
  *   허브 AP 대역에서 온 요청만 받는다(집 LAN 쪽은 403). */
+/* Ck-Mac 머리("34:5F:45:…" 또는 "345f45…")가 이 요청을 보낸 AP 단말의 MAC 인가. 다른 단말이 남의 MAC 을 적어
+ * 그 기기의 저장된 계정 답을 받아 가지 못하게(폴백 중 저장된 답을 줄 때만 본다 — 처음 붙는 기기를 막지 않게) */
+static bool ckmac_is_peer(const char *ck, uint32_t ip)
+{
+    uint8_t m[6];
+    int n = 0;
+    for (const char *p = ck; *p && n < 12; p++) {
+        if (!isxdigit((unsigned char)*p)) continue;
+        int v = isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10);
+        if (n % 2 == 0) m[n / 2] = (uint8_t)(v << 4); else m[n / 2] |= (uint8_t)v;
+        n++;
+    }
+    return n == 12 && hub_wifi_ap_peer_is(ip, m);
+}
+
 esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
 {
     char svc[32] = "", mac[32] = "", key[16];
@@ -1723,7 +1739,11 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
     esp_err_t e;
     if (!sa && s_fb_active) {
         /* 폴백 중: 닿지 않는 클라우드에 다시 묻느라 기기를 기다리게 하지 않는다 — 이 기기의 저장된 답(없으면 허브가 만든 답) */
-        bool have = boot_cache_get(key, buf, BOOT_CAP);
+        bool mine = ckmac_is_peer(mac, peer_ip(httpd_req_to_sockfd(req)));
+        bool have = mine && boot_cache_get(key, buf, BOOT_CAP);
+        if (!mine) {
+            ESP_LOGW(TAG, "부트스트랩(폴백): Ck-Mac 이 보낸 단말과 다름 — 저장된 답 대신 허브가 만든 답");
+        }
         ESP_LOGI(TAG, "부트스트랩(폴백): %s", have ? "이 기기의 저장된 답" : "허브가 만든 답");
         hub_event(EV_BOOTSTRAP, NULL, dev, 1);
         e = boot_send(req, 200, have ? buf : BOOT_LOCAL);
@@ -1739,7 +1759,7 @@ esp_err_t hub_proxy_bootstrap_handler(httpd_req_t *req)
             ESP_LOGW(TAG, "부트스트랩: 클라우드가 %d / 성공 아님 — 그대로 전달(저장 안 함)", code);
             hub_event(EV_BOOTSTRAP, NULL, dev, 0);
             e = boot_send(req, code, body);
-        } else if (boot_cache_get(key, buf, BOOT_CAP)) {
+        } else if (ckmac_is_peer(mac, peer_ip(httpd_req_to_sockfd(req))) && boot_cache_get(key, buf, BOOT_CAP)) {
             ESP_LOGW(TAG, "부트스트랩: 클라우드 응답 없음 — 이 기기의 저장된 답 사용");
             hub_event(EV_BOOTSTRAP, NULL, dev, 1);
             e = boot_send(req, 200, buf);

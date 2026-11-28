@@ -14,6 +14,12 @@
 
 static const char *TAG = "HUB_STATE";
 
+typedef struct {
+    char sta_ssid[HUB_SSID_MAX + 1], sta_pass[HUB_PASS_MAX + 1];
+    char ap_ssid[HUB_SSID_MAX + 1], ap_pass[HUB_PASS_MAX + 1];
+} wifi_blob_t;
+
+
 #define NS             "lynnai"
 #define PBKDF2_ITERS   10000
 #define SALT_LEN       16
@@ -62,6 +68,17 @@ esp_err_t hub_state_load(hub_state_t *st)
     get_str(h, "ap_pass", st->ap_pass, sizeof(st->ap_pass));
     get_str(h, "sta_ssid", st->sta_ssid, sizeof(st->sta_ssid));
     get_str(h, "sta_pass", st->sta_pass, sizeof(st->sta_pass));
+    wifi_blob_t wb;                                   /* 관리 화면에서 바꾼 Wi-Fi(한 값으로 저장 — 있으면 이게 먼저) */
+    size_t wn = sizeof(wb);
+    if (hs_get_blob(h, NS, "wifi4", &wb, &wn) == ESP_OK && wn == sizeof(wb) &&
+        wb.sta_ssid[HUB_SSID_MAX] == 0 && wb.sta_pass[HUB_PASS_MAX] == 0 && wb.ap_ssid[HUB_SSID_MAX] == 0 &&
+        wb.ap_pass[HUB_PASS_MAX] == 0 && wb.sta_ssid[0] && wb.ap_ssid[0]) {
+        strlcpy(st->sta_ssid, wb.sta_ssid, sizeof(st->sta_ssid));
+        strlcpy(st->sta_pass, wb.sta_pass, sizeof(st->sta_pass));
+        strlcpy(st->ap_ssid, wb.ap_ssid, sizeof(st->ap_ssid));
+        strlcpy(st->ap_pass, wb.ap_pass, sizeof(st->ap_pass));
+    }
+    memset(&wb, 0, sizeof(wb));
     nvs_close(h);
     return ESP_OK;
 }
@@ -156,14 +173,20 @@ esp_err_t hub_state_set_wifi(hub_state_t *st,
         FAIL("이름·암호에 쓸 수 없는 문자가 있습니다");
     }
 
+    /* 네 값을 한 값(wifi4)으로 쓴다 — 따로 쓰면 그 사이에 꺼졌을 때 새 이름에 옛 암호가 남아 집 Wi-Fi 에 못 붙었다.
+     * 처음 설정 때 쓴 네 값은 그대로 두고, 읽을 때 wifi4 가 있으면 그것을 먼저 본다(관리자 암호 adm_cred 와 같은 방식) */
+    wifi_blob_t wb;
+    memset(&wb, 0, sizeof(wb));
+    strlcpy(wb.sta_ssid, sta_ssid, sizeof(wb.sta_ssid));
+    strlcpy(wb.sta_pass, sta_pass, sizeof(wb.sta_pass));
+    strlcpy(wb.ap_ssid, ap_ssid, sizeof(wb.ap_ssid));
+    strlcpy(wb.ap_pass, ap_pass, sizeof(wb.ap_pass));
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) FAIL("저장소 열기 실패");
-    esp_err_t e = hs_set_str(h, "sta_ssid", sta_ssid);
-    if (e == ESP_OK) e = hs_set_str(h, "sta_pass", sta_pass);
-    if (e == ESP_OK) e = hs_set_str(h, "ap_ssid", ap_ssid);
-    if (e == ESP_OK) e = hs_set_str(h, "ap_pass", ap_pass);
+    esp_err_t e = hs_set_blob(h, "wifi4", &wb, sizeof(wb));
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
+    memset(&wb, 0, sizeof(wb));
     if (e != ESP_OK) FAIL("저장 실패");
 
     strlcpy(st->sta_ssid, sta_ssid, sizeof(st->sta_ssid));

@@ -348,7 +348,7 @@ static int64_t s_sess_until;
 
 static bool authed(httpd_req_t *req)
 {
-    char ck[160];
+    char ck[512];                                    /* 같은 주소에 다른 쿠키가 있으면 길다(160 이면 로그인이 안 됐다) */
     if (!s_sess[0] || esp_timer_get_time() > s_sess_until ||
         httpd_req_get_hdr_value_str(req, "Cookie", ck, sizeof(ck)) != ESP_OK) {
         return false;
@@ -1258,7 +1258,7 @@ esp_err_t hub_portal_start(hub_state_t *st)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.lru_purge_enable = true;          /* 폰이 연결을 여러 개 열어도 오래된 것부터 정리 */
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 40;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다 */
+    cfg.max_uri_handlers = 48;            /* 기본 8개면 /api 가 늘 때 맨 마지막 와일드카드가 빠진다(지금 38개 + 여유) */
     cfg.stack_size = 8192;                /* 6144 에서: 암호 해시 계산 + 저장이 한 요청에 겹칠 때 여유 */
     cfg.open_fn = on_open;
     cfg.close_fn = on_close;
@@ -1326,7 +1326,9 @@ esp_err_t hub_portal_start(hub_state_t *st)
     httpd_register_uri_handler(srv, &mnow);
     hub_api_register(srv);                         /* /api/v1/state, /metrics (서버 기록·그래프용) */
     hub_events_register(srv);                      /* /api/events, /api/stats (NAS 기록기용) */
-    httpd_register_uri_handler(srv, &any);         /* 맨 마지막: 나머지 전부 */
+    if (httpd_register_uri_handler(srv, &any) != ESP_OK) {   /* 맨 마지막: 나머지 전부 — 칸이 모자라면 조용히 빠졌다 */
+        ESP_LOGE(TAG, "URI 핸들러 칸 부족 — max_uri_handlers 를 늘리세요(캡티브 처리 빠짐)");
+    }
     ESP_LOGI(TAG, "설정 포털 시작 (:80)");
     return ESP_OK;
 }

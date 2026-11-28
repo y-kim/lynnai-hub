@@ -243,6 +243,8 @@ bool hub_upstream_guest_target(char *ip, int ipcap, char *tok, int tokcap)
 
 void hub_rinnai_resend(void);   /* 병합 목록 다시 보내게 깨운다(hub_rinnai.c) */
 
+static void clean_label(char *s);
+
 int hub_upstream_guest_join(int fd, int tokslot, const char *id, const char *label, const char *ip)
 {
     lk();
@@ -274,6 +276,7 @@ int hub_upstream_guest_join(int fd, int tokslot, const char *id, const char *lab
         snprintf(s_guest[gi].id, sizeof(s_guest[gi].id), "%s", id ? id : "");
         if (label && label[0]) {
             snprintf(s_guest[gi].label, sizeof(s_guest[gi].label), "%s", label);
+            clean_label(s_guest[gi].label);
         }
         snprintf(s_guest[gi].ip, sizeof(s_guest[gi].ip), "%s", ip ? ip : "");
     }
@@ -336,9 +339,35 @@ static remote_t *own_l(const uint8_t *mac, int gi, bool create, bool local)
     return r;
 }
 
+/* 선에서 온 라벨을 저장할 모양으로: 제어 문자·따옴표·역슬래시는 빼고(상태 API 의 JSON 을 깨지 않게), 끝에서 잘린
+ * UTF-8 글자는 버린다. 제자리에서 고친다. */
+static void clean_label(char *s)
+{
+    char *w = s;
+    for (const char *r = s; *r; r++) {
+        unsigned char c = (unsigned char)*r;
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') continue;
+        *w++ = (char)c;
+    }
+    *w = 0;
+    size_t n = strlen(s), i = n;
+    while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) i--;     /* 이어지는 바이트들 앞의 첫 바이트 */
+    if (i > 0 && ((unsigned char)s[i - 1] & 0x80)) {
+        unsigned char lead = (unsigned char)s[i - 1];
+        size_t want = (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
+        if (n - (i - 1) < want) s[i - 1] = 0;                           /* 글자가 다 오지 않음 */
+    }
+}
+
 void hub_upstream_guest_frame(int gi, uint8_t cmd, const uint8_t *p, int n)
 {
     if (gi < 0 || gi >= MAX_GUESTS) {
+        return;
+    }
+    lk();
+    bool live = s_guest[gi].used;                    /* 지운 위성의 버퍼에 남은 프레임이 지운 칸에 방을 다시 만들지 않게 */
+    uk();
+    if (!live) {
         return;
     }
     if (cmd == HUB_RK_CMD_STATE && n >= 4 && p[0] == HUB_KIND_F09) {
@@ -446,6 +475,7 @@ void hub_upstream_guest_frame(int gi, uint8_t cmd, const uint8_t *p, int n)
                 int c = ln < LABEL_MAX ? ln : LABEL_MAX;
                 memcpy(s_guest[gi].label, p + i + 5, c);
                 s_guest[gi].label[c] = 0;
+                clean_label(s_guest[gi].label);
             }
             i += 5 + ln;
         }

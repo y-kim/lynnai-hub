@@ -541,10 +541,10 @@ out:
         s_preauth--;
     }
     xSemaphoreGive(s_lock);
-    close(fd);
     if (gi >= 0) {
-        hub_upstream_guest_leave(gi, fd);
+        hub_upstream_guest_leave(gi, fd);            /* 먼저 표에서 — 닫은 뒤 다른 연결이 같은 번호를 받을 수 있다 */
     }
+    close(fd);
     if (authed) {
         ESP_LOGI(TAG, "%s", consumer ? "위성 허브 연결 끊김" : "드라이버 연결 끊김");
     }

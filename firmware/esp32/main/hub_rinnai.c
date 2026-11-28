@@ -170,7 +170,7 @@ static bool mac3_eq(const uint8_t *a, const uint8_t *b) { return !memcmp(a, b, 3
  *   - 칸이 바뀌었다 = 제어기가 명령을 받았다. 보일러가 그 값을 안 받으면 제어기는 20초쯤 뒤 원래 값으로 되돌리는데
  *     (꺼진 채 온돌 설정 등), 그건 다시 보내도 같으므로 여기서 다루지 않는다.
  *   - 같은 칸에 새 명령이 오면 옛 명령은 잊는다(켰다 바로 끈 경우 옛 '켜기'를 다시 보내지 않게). */
-#define PEND_MAX      8
+#define PEND_MAX      12            /* 방 7개 외출(7칸) 직후의 명령도 추적되게 — 칸 하나 약 330바이트라 넉넉히만 */
 #define PEND_WAIT_MS  2500
 #define PEND_TRIES    3
 #define PEND_QUEUE_MS 10000         /* 주입 큐에서 이만큼 못 나가면(연결이 막힘) 포기 */
@@ -775,6 +775,9 @@ hub_link_tap_t *hub_rinnai_link_open(uint32_t peer_ip)
         t->pending = false;
         if (!t->cmds) {
             t->cmds = xQueueCreate(16, sizeof(cmd_t *));   /* 방 7개에 한꺼번에(외출 등) + 여유 */
+            if (!t->cmds) {
+                ESP_LOGE(TAG, "명령 큐를 못 만듦(메모리 부족) — 이 링크로는 명령을 보내지 못함");
+            }
         }
         t->used = true;
     }
@@ -931,6 +934,10 @@ static bool enqueue_pub(hub_link_tap_t *t, const char *topic, int tl, const char
 
 static bool enqueue_pub2(hub_link_tap_t *t, const char *topic, int tl, const char *json, int j, uint8_t src, int pend)
 {
+    if (!t || !t->cmds) {                            /* 링크를 열 때 큐를 못 만들었다(TLS 를 여는 때라 메모리가 가장 빠듯) */
+        ESP_LOGW(TAG, "명령 큐 없음 — 버림");
+        return false;
+    }
     cmd_t *c = malloc(sizeof(cmd_t));
     if (c) {
         c->src = src;
@@ -1377,7 +1384,8 @@ static void zb_task(void *arg)
             poll_status(false);         /* 단독 모드에서 막 구독한 기기 */
         }
         /* 연결 목록 (로컬 + 상류 중계 1층 기기 병합) */
-        uint8_t links[(MAX_TAPS + 4) * 4], models[(MAX_TAPS + 4) * 5], labels[256];
+        /* 라벨은 160바이트까지(조절기 5대쯤) — LAN 한 줄 한도(200)·Zigbee 한 프레임을 넘지 않게. 넘치는 조절기는 라벨 없이 */
+        uint8_t links[(MAX_TAPS + 4) * 4], models[(MAX_TAPS + 4) * 5], labels[160];
         int ln, mn, lbn;
         bool send_links;
         lock();
