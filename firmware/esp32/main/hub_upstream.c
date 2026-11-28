@@ -315,19 +315,43 @@ void hub_upstream_guest_leave(int gi, int fd)
 }
 
 /* 위성이 올린 프레임(f09 만) */
+/* 위성 gi 가 이 MAC 을 말해도 되나: 중심 자기 버스의 기기면 안 되고, 다른 위성이 (지금 연결돼) 가진 방이면 안 된다.
+ * 되면 그 위성의 칸(없고 create 면 만든다), 안 되면 NULL. lk() 안에서. 위성 칸 주인을 확인하지 않으면 위성(또는
+ * 위성인 척하는 기기)이 중심의 방 상태를 덮어쓰고, 남의 방을 지우고, 그 방으로 가는 명령을 자기 쪽으로 빼 간다. */
+static remote_t *own_l(const uint8_t *mac, int gi, bool create, bool local)
+{
+    if (local) {
+        return NULL;
+    }
+    remote_t *r = rem_find(mac);
+    if (r && r->guest != gi) {
+        if (r->online && r->guest >= 0 && r->guest < MAX_GUESTS && s_guest[r->guest].fd >= 0) {
+            return NULL;                              /* 다른 위성이 지금 가진 방 */
+        }
+        r->guest = gi;                                /* 주인이 끊겨 있으면 넘겨받는다(조절기를 다른 층 위성으로 옮김) */
+    }
+    if (!r && create) {
+        r = rem_add(mac, gi);
+    }
+    return r;
+}
+
 void hub_upstream_guest_frame(int gi, uint8_t cmd, const uint8_t *p, int n)
 {
     if (gi < 0 || gi >= MAX_GUESTS) {
         return;
     }
     if (cmd == HUB_RK_CMD_STATE && n >= 4 && p[0] == HUB_KIND_F09) {
+        bool local = hub_rinnai_is_local(p + 1);     /* 버스 잠금은 이 모듈 잠금 밖에서 */
         lk();
-        remote_t *r = rem_find(p + 1);
-        bool isnew = !r;
+        bool isnew = !rem_find(p + 1);
+        remote_t *r = own_l(p + 1, gi, true, local);
         if (!r) {
-            r = rem_add(p + 1, gi);
+            uk();
+            ESP_LOGW(TAG, "위성 %d 가 자기 것 아닌 기기(%02x%02x%02x) 상태를 올림 — 버림", gi, p[1], p[2], p[3]);
+            return;
         }
-        if (r) {
+        {
             r->guest = gi;
             r->online = true;
             r->n = n - 4;
@@ -337,12 +361,19 @@ void hub_upstream_guest_frame(int gi, uint8_t cmd, const uint8_t *p, int n)
             memcpy(r->blob, p + 4, r->n);
         }
         uk();
-        hub_uplink_send(HUB_RK_CMD_STATE, p, n);     /* ST 로 그대로(MAC 이 다르니 안전) */
+        hub_uplink_send(HUB_RK_CMD_STATE, p, n);     /* ST 로 그대로(이 위성의 방인 것을 위에서 확인) */
         if (isnew) {
             hub_rinnai_resend();
         }
     } else if (cmd == HUB_RK_CMD_LINKS) {
         bool changed = false;
+        bool local[MAX_REMOTE] = { false };
+        for (int i = 0, k = 0; i + 4 <= n && k < MAX_REMOTE; i += 4) {   /* 버스 잠금은 이 모듈 잠금 밖에서 */
+            if (p[i] == HUB_KIND_F09) {
+                local[k++] = hub_rinnai_is_local(p + i + 1);
+            }
+        }
+        int k = 0;
         lk();
         uint8_t seen[MAX_REMOTE][3];
         int ns = 0;
@@ -351,16 +382,20 @@ void hub_upstream_guest_frame(int gi, uint8_t cmd, const uint8_t *p, int n)
                 continue;                            /* 보일러 등은 위성에서 안 받음 */
             }
             const uint8_t *mac = p + i + 1;
+            bool loc = k < MAX_REMOTE ? local[k] : true;
+            k++;
+            bool existed = rem_find(mac) != NULL;
+            remote_t *r = own_l(mac, gi, true, loc);  /* 중심 것·다른 위성 것은 이 위성의 목록으로 받지 않는다 */
+            if (!r) {
+                continue;
+            }
             if (ns < MAX_REMOTE) {
                 memcpy(seen[ns++], mac, 3);
             }
-            remote_t *r = rem_find(mac);
-            if (!r) {
-                r = rem_add(mac, gi);
+            if (!existed) {
                 changed = true;
             }
-            if (r) {
-                r->guest = gi;
+            {
                 if (!r->online) {
                     r->online = true;
                     changed = true;
@@ -418,10 +453,15 @@ void hub_upstream_guest_frame(int gi, uint8_t cmd, const uint8_t *p, int n)
     } else if (cmd == HUB_RK_CMD_FORGET && n >= 4 && p[0] == HUB_KIND_F09) {
         lk();
         remote_t *r = rem_find(p + 1);
-        if (r && r->guest == gi) {
+        bool mine = r && r->guest == gi;             /* 그 위성의 방일 때만 지운다 — 남의 방 삭제를 SmartThings 로 넘기지 않게 */
+        if (mine) {
             r->used = r->online = false;
         }
         uk();
+        if (!mine) {
+            ESP_LOGW(TAG, "위성 %d 가 자기 것 아닌 기기 삭제를 올림 — 버림", gi);
+            return;
+        }
         hub_uplink_send(HUB_RK_CMD_FORGET, p, n);
         hub_rinnai_resend();
     }

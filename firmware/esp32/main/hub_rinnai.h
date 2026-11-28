@@ -49,6 +49,8 @@ void hub_rinnai_start(void);
 int hub_rinnai_snapshot(hub_dev_t *out, int max);
 /* 보일러(f06)를 아나(끊겨 있어도 기억하는 기기면 true). mac3 가 있으면 첫 보일러의 MAC끝3 */
 bool hub_rinnai_has_boiler(uint8_t mac3[3]);
+/* 이 허브 버스의 기기인가(MAC끝3) — 위성이 남의 MAC 으로 프레임을 올리지 못하게 중심이 확인 */
+bool hub_rinnai_is_local(const uint8_t mac3[3]);
 
 /* 관리 화면: 기기 삭제(MAC끝3 6hex). 찾아 지웠으면 true. */
 bool hub_rinnai_forget(const char *mac6);

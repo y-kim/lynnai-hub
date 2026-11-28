@@ -1434,6 +1434,20 @@ static void zb_task(void *arg)
     }
 }
 
+bool hub_rinnai_is_local(const uint8_t mac3[3])
+{
+    bool found = false;
+    if (!s_lock) {
+        return false;
+    }
+    lock();
+    for (int i = 0; i < MAX_DEV && !found; i++) {
+        found = s_dev[i].used && !memcmp(s_dev[i].mac3, mac3, 3);
+    }
+    unlock();
+    return found;
+}
+
 bool hub_rinnai_has_boiler(uint8_t mac3[3])
 {
     bool found = false;
