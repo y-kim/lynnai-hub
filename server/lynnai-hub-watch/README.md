@@ -36,6 +36,10 @@ DB 암호와 토큰은 화면에 내보내지 않는다(빈 칸으로 저장하�
 허브 주소가 아무 데도 없으면 기록은 쉬고 로그 브라우저만 떠서 설정 탭에서 정하기를 기다린다.
 기록 없이 화면만 띄우려면 `python lynnai_hub_watch.py web [포트]`.
 
+- **보관 기한:** `HUB_RETAIN_DAYS=<일>` 을 주면 그보다 오래된 상태·방·응답·이벤트 기록을 하루 한 번 지운다(기본 0 = 그대로 둠).
+  `boiler_usage` 는 1시간에 한 줄이라 지우지 않는다.
+- **컨테이너:** 예제 compose 는 root 가 아닌 사용자(`PUID`/`PGID`, 기본 1000)로, 읽기 전용 루트 파일 시스템으로 돈다 —
+  처음이면 `chown -R 1000:1000 data`. 로그 브라우저는 동시 연결 32개·요청 15초 제한.
 - 시각 칸 `ts` 는 두 DB 모두 ISO 글자다(Postgres 는 `collate "C"`). Grafana 등에서는 `ts::timestamp` 로 쓴다.
 
 ## 허브 서버 인터페이스 (펌웨어 `main/hub_api.c`, `main/hub_events.c`)

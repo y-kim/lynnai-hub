@@ -98,6 +98,7 @@ HUB_TOKEN = str(_pick("hub_token", "HUB_TOKEN", "")).strip()
 POLL_SEC = int(_pick("poll_sec", "POLL_SEC", 60))
 EVENT_SEC = int(_pick("event_sec", "EVENT_SEC", 30))
 DB_URL = str(_pick("db_url", "HUB_DB_URL", "")).strip()     # 웹 설정의 "" 는 일부러 SQLite 를 고른 것
+RETAIN_DAYS = int(os.environ.get("HUB_RETAIN_DAYS", "0") or 0)   # 이보다 오래된 기록은 하루 한 번 지운다(0 = 그대로 둠)
 WEB_PORT = int(os.environ.get("WEB_PORT", "0") or 0)   # 로그 브라우저(읽기 전용). 0 이면 안 띄움
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lynnai_hub_web.html")
 # 로그 브라우저 로그인 정보(아이디·암호 해시·세션 서명 키). 없으면 처음 들어온 사람이 만든다.
@@ -419,6 +420,20 @@ def catch_up_usage(c):
         print(f"보일러 사용량: 이벤트에서 {n}줄 옮김", flush=True)
 
 
+def prune(c, days):
+    """보관 기한이 지난 줄을 지운다(state·zones·polls·events). boiler_usage 는 작아서 둔다(1시간에 한 줄)."""
+    if days <= 0:
+        return
+    cut = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    n = 0
+    for t in ("state", "zones", "polls", "events"):
+        cur = c.execute(f"delete from {t} where ts < ?", (cut,))
+        n += max(getattr(cur, "rowcount", 0) or 0, 0)
+    c.commit()
+    if n:
+        print(f"보관 기한({days}일) 지난 기록 {n}줄 지움", flush=True)
+
+
 def main():
     if not HUB_URL:
         if not WEB_PORT:
@@ -436,7 +451,15 @@ def main():
     print(f"lynnai-hub-watch 시작: {HUB_URL} 상태 {POLL_SEC}초·이벤트 {EVENT_SEC}초 → {c.where()}"
           f"{' (토큰 사용)' if HUB_TOKEN else ''}", flush=True)
     next_state = 0.0
+    next_prune = 0.0
     while True:
+        if RETAIN_DAYS and time.time() >= next_prune:
+            next_prune = time.time() + 86400
+            try:
+                prune(c, RETAIN_DAYS)
+            except Exception as e:
+                print(f"보관 기한 정리 오류: {e}", flush=True)
+                c.recover()
         try:
             alive = poll_events(c)
             if alive and time.time() >= next_state:
@@ -1199,6 +1222,8 @@ def start_web(port, block=False):
     conn = [None]
 
     class H(BaseHTTPRequestHandler):
+        timeout = 15                                   # 말없이 붙어만 있는 연결은 15초 뒤 끊는다
+
         def log_message(self, *a):
             pass
 
@@ -1239,7 +1264,12 @@ def start_web(port, block=False):
 
         def do_POST(self):
             u = urlparse(self.path)
-            n = min(int(self.headers.get("Content-Length") or 0), 8192)
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 8192:                     # -1 이면 read(-1) 이 연결이 닫힐 때까지 기다렸다
+                return self.send(400, b"bad length", "text/plain")
             raw = self.rfile.read(n).decode("utf-8", "replace")
             if not self.same_origin():
                 return self.send(403, b"cross-origin", "text/plain")
@@ -1321,8 +1351,28 @@ def start_web(port, block=False):
                     return self.send(500, json.dumps({"error": str(e)}, ensure_ascii=False).encode(), "application/json")
             self.send(200, json.dumps(out, ensure_ascii=False, separators=(",", ":")).encode(), "application/json")
 
-    ThreadingHTTPServer.allow_reuse_address = True
-    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    class Srv(ThreadingHTTPServer):
+        """동시 연결 상한 — 연결마다 스레드라 마구 열면 기록기까지 느려진다. 넘치면 바로 닫는다."""
+        allow_reuse_address = True
+        slots = threading.BoundedSemaphore(32)
+
+        def process_request(self, request, client_address):
+            if not self.slots.acquire(blocking=False):
+                self.shutdown_request(request)
+                return
+            try:
+                super().process_request(request, client_address)
+            except Exception:
+                self.slots.release()
+                raise
+
+        def process_request_thread(self, request, client_address):
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self.slots.release()
+
+    srv = Srv(("0.0.0.0", port), H)
     srv.daemon_threads = True
     print(f"로그 브라우저: http://0.0.0.0:{port}/", flush=True)
     if block:

@@ -5,13 +5,18 @@ services:
     container_name: lynnai-hub-watch
     restart: unless-stopped
     init: true                  # PID 1 은 tini — SIGTERM 을 파이썬에 넘겨 docker stop 이 바로 끝나게
+    user: "${PUID:-1000}:${PGID:-1000}"   # root 로 돌리지 않는다 — ./data 의 주인을 이 번호로(chown 1000:1000 data)
+    read_only: true             # 쓰는 곳은 /data 볼륨뿐
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       - HUB_URL=${HUB_URL:?HUB_URL(허브 주소, 예 http://192.168.0.50)을 .env 에}
       - HUB_TOKEN=${HUB_TOKEN:-}
       - HUB_DB_URL=${HUB_DB_URL:-}   # 예 postgresql://user:암호@192.168.0.7:5432/lynnai_hub — 비우면 ./data/hub.db
       - POLL_SEC=60
       - EVENT_SEC=30
-      - WEB_PORT=8497            # 로그 브라우저(읽기 전용). 0 이면 끔
+      - WEB_PORT=8497            # 로그 브라우저(로그인 필요). 0 이면 끔
+      - HUB_RETAIN_DAYS=${HUB_RETAIN_DAYS:-0}   # 이보다 오래된 기록은 하루 한 번 지움(0 = 그대로 둠 — 방 기록만 1년에 약 370만 줄)
     ports:
       - "8497:8497"             # http://NAS주소:8497 — LAN 전용, 인터넷에 열지 말 것
     volumes:
