@@ -562,7 +562,7 @@ esp_err_t hub_bbox_scan_http(httpd_req_t *req)
         }
         if (httpd_query_key_value(q, "minlqi", v, sizeof(v)) == ESP_OK) {      /* 가입 최소 신호 품질(0~254, 255 = 스택 기본값) */
             int m = atoi(v);
-            if (m >= 0 && m <= 255) {
+            if ((m >= 20 && m <= 100) || m == 255) {   /* 너무 높으면 어떤 부모도 못 받아 재가입이 막힌다(0~19 는 의미 없음) */
                 s_minlqi = (uint8_t)m;
                 bbox_set_u8("minlqi", s_minlqi);
                 if (hub_zigbee_is_ready()) {        /* 지금도 바로 적용(255 면 이번 부팅의 스택 값으로 되돌림) */
@@ -898,6 +898,9 @@ void hub_bbox_start(void)
         }
         nvs_get_u8(h, "scandur", &s_scandur);
         nvs_get_u8(h, "minlqi", &s_minlqi);
+        if (!((s_minlqi >= 20 && s_minlqi <= 100) || s_minlqi == 255)) {
+            s_minlqi = MIN_JOIN_LQI_DEFAULT;          /* 예전 판이 받던 범위 밖 값(예 254)이면 기본값 — 가입이 막히지 않게 */
+        }
         nvs_get_u8(h, "scanfail", &s_scan_on_fail);
         nvs_get_u16(h, "scanauto", &s_auto_s);
         nvs_get_u16(h, "rbmin", &s_rb_min);

@@ -35,6 +35,7 @@
 #include "hub_proxy.h"
 #include "hub_diag.h"
 #include "hub_dbgkey.h"
+#include "hub_portal.h"
 #include "hub_trace.h"
 #include "hub_bbox.h"
 #include "hub_ota.h"
@@ -748,10 +749,40 @@ static esp_err_t trace_get(httpd_req_t *req)
     return hub_trace_http(req);
 }
 
-/* GET /api/v1/bootlog — 부팅 기록(이번·직전 부팅 로그, 부팅 이력). 읽기 API 와 같은 인증 */
+/* 진단 주소의 '값을 바꾸는' 인자(저장되는 설정·시험 손잡이·라디오를 쓰는 스캔)는 읽기 권한으로는 안 된다:
+ * API 토큰이 없으면(기본) 집 LAN 누구나, 토큰이 있어도 기록기·Prometheus 에 넣어 둔 '읽기용' 토큰으로 허브 동작이
+ * 바뀌었다. 이런 인자가 하나라도 있으면 원격 디버그 키(헤더) 또는 관리자 세션만 받는다 — 둘 다 다른 사이트의
+ * 이미지 태그 같은 GET 으로는 실리지 않는다(쿠키는 SameSite=Strict). 인자 없이 읽기만은 지금처럼 읽기 인증. */
+static bool needs_admin(httpd_req_t *req, const char *const *keys)
+{
+    char q[128] = "", v[8];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+        return false;
+    }
+    for (int i = 0; keys[i]; i++) {
+        if (httpd_query_key_value(q, keys[i], v, sizeof(v)) != ESP_ERR_NOT_FOUND) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool admin_or_dbg(httpd_req_t *req)
+{
+    if (hub_dbgkey_check(req) || hub_portal_authed(req)) {
+        return true;
+    }
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_sendstr(req, "값을 바꾸는 인자는 원격 디버그 키(Authorization: Bearer) 또는 관리자 로그인이 필요합니다");
+    return false;
+}
+
+/* GET /api/v1/bootlog — 부팅 기록(이번·직전 부팅 로그, 부팅 이력). 읽기 API 와 같은 인증(바꾸는 인자는 위 규칙) */
 static esp_err_t bootlog_get(httpd_req_t *req)
 {
-    if (!api_or_dbg(req)) {
+    static const char *const SET[] = { "zblvl", "cloudblock", "cmddrop", "preoff", "reboot", NULL };
+    if (needs_admin(req, SET) ? !admin_or_dbg(req) : !api_or_dbg(req)) {
         return ESP_OK;
     }
     return hub_bbox_http(req);
@@ -773,7 +804,9 @@ static esp_err_t roomtest_get(httpd_req_t *req)
 /* GET /api/v1/zbscan — Zigbee 스캔 시험(hub_bbox). 라디오를 잠깐 쓰고 pause=1 이면 Wi-Fi 도 멈추므로 읽기 API 와 같은 인증 */
 static esp_err_t zbscan_get(httpd_req_t *req)
 {
-    if (!api_or_dbg(req)) {
+    /* n = 스캔 실행(라디오를 쓰고 pause 면 Wi-Fi 도 멈춤), 나머지는 저장되는 설정 */
+    static const char *const SET[] = { "n", "setdur", "minlqi", "onfail", "auto", NULL };
+    if (needs_admin(req, SET) ? !admin_or_dbg(req) : !api_or_dbg(req)) {
         return ESP_OK;
     }
     return hub_bbox_scan_http(req);
