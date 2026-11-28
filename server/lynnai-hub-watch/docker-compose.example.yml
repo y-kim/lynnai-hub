@@ -8,6 +8,7 @@ services:
     environment:
       - HUB_URL=${HUB_URL:?HUB_URL(허브 주소, 예 http://192.168.0.50)을 .env 에}
       - HUB_TOKEN=${HUB_TOKEN:-}
+      - HUB_DB_URL=${HUB_DB_URL:-}   # 예 postgresql://user:암호@192.168.0.7:5432/lynnai_hub — 비우면 ./data/hub.db
       - POLL_SEC=60
       - EVENT_SEC=30
     volumes:

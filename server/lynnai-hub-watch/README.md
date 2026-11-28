@@ -1,7 +1,18 @@
 # lynnai-hub-watch
 
-LYNNAI 허브의 장기 기록기. 허브가 여는 서버 인터페이스를 읽어 SQLite(`data/hub.db`)에 쌓는다.
-표준 라이브러리만 쓰므로 파이썬 3.8+ 어디서나 돈다.
+LYNNAI 허브의 장기 기록기. 허브가 여는 서버 인터페이스를 읽어 SQLite 파일(`data/hub.db`) 또는 PostgreSQL 에 쌓는다.
+SQLite 로 쓰면 표준 라이브러리만 쓰므로 파이썬 3.8+ 어디서나 돈다. PostgreSQL 은 `psycopg` 3 가 필요하다(Dockerfile 에 들어 있음).
+
+## 저장소 고르기
+
+- **SQLite(기본):** `HUB_DB`(기본 `data/hub.db`) 파일 하나.
+- **PostgreSQL:** `HUB_DB_URL=postgresql://계정:암호@호스트:포트/DB` 를 주면 그쪽에 쓴다. 표는 처음 뜰 때 만든다.
+  기록기 전용 계정이 DB 를 소유하게 만들면 된다(`create role … login password …; create database … owner …;`).
+- **옮기기:** `HUB_DB_URL=… python lynnai_hub_watch.py to-pg [data/hub.db]` — SQLite 기록을 Postgres 로 복사한다.
+  같은 줄은 건너뛰므로 여러 번 돌려도 된다. 순서: ① to-pg ② 기록기를 `HUB_DB_URL` 로 다시 띄움
+  ③ to-pg 한 번 더(그 사이 SQLite 에만 쌓인 줄 채움). 이벤트는 허브 버퍼(256개)에서 다시 받아 오므로 빠지지 않는다.
+
+- 시각 칸 `ts` 는 두 DB 모두 ISO 글자다(Postgres 는 `collate "C"`). Grafana 등에서는 `ts::timestamp` 로 쓴다.
 
 ## 허브 서버 인터페이스 (펌웨어 `main/hub_api.c`, `main/hub_events.c`)
 
@@ -9,7 +20,7 @@ LYNNAI 허브의 장기 기록기. 허브가 여는 서버 인터페이스를 �
 |---|---|
 | `GET /api/v1/state` | 지금 상태 전체(JSON): 허브(힙·RSSI), 연결, 보일러(해독 값 + `raw`), 각방, 온습도계, 가스 누적 |
 | `GET /metrics` | 같은 값의 Prometheus 텍스트 형식 (`lynnai_*`) — Prometheus/Grafana 로 바로 긁기 |
-| `GET /api/events?since=N` | 이벤트 링(256): 연결 끊김, Zigbee, `gas_pulse`(a=누적, b=1펄스 L) |
+| `GET /api/events?since=N` | 이벤트 링(256): 연결 끊김, Zigbee, `gas_pulse`(a=누적, b=1펄스 L), `boil_stg`(보일러 사용량 누계, 아래) |
 | `GET /api/stats` | 이벤트 종류별 누적 횟수, 부팅 id, 힙 |
 
 허브 관리 화면(`/admin` → 서버 연동)에서 API 토큰을 만들면 위 경로 모두 `Authorization: Bearer <토큰>` 이 필요하다.
@@ -25,7 +36,13 @@ HUB_URL=http://<허브> HUB_TOKEN=<토큰> python lynnai_hub_watch.py   # 기록
 python lynnai_hub_watch.py summary 24   # 연결 품질
 python lynnai_hub_watch.py gas 14       # 날짜별 가스 사용량
 python lynnai_hub_watch.py temps 24     # 방별 온도·난방 비율
+python lynnai_hub_watch.py usage 7      # 보일러 자체 사용량(stg) 날짜별·시간별
+python lynnai_hub_watch.py import-stg hubtrace-*.jsonl   # 지난 허브 통신 기록의 stg 를 넣기
 ```
 
-표: `state`(1분마다 한 줄), `zones`(방별), `events`(허브 이벤트), `polls`(허브 응답 여부).
-그래프는 이 DB 를 Grafana(SQLite 데이터 소스)로 보거나, 허브 `/metrics` 를 Prometheus 로 따로 긁는다.
+표: `state`(1분마다 한 줄), `zones`(조절기 mac·층 라벨·방별 — 현재·설정 온도, 켜짐, 난방수 공급, 외출, 예약, 시간 난방 간격 원값 `ivl`), `events`(허브 이벤트), `polls`(허브 응답 여부),
+`boiler_usage`(보일러가 약 1시간마다 올리는 누계 한 줄씩 — 난방·온수 가스 ㎥, 버너 시간, 모두 정수. 그 시간 사용량은 앞 줄과의 차).
+
+`boiler_usage` 는 허브의 `boil_stg` 이벤트(a = 난방 가스 | 온수 가스 << 16, b = 난방 시간 | 온수 시간 << 16)에서 온다.
+허브가 프록시든 단독이든 보일러의 `stg` 를 직접 받으므로 클라우드가 필요 없다. 기록기는 자기 파일이 바뀌면 스스로 다시 뜬다.
+그래프는 이 DB 를 Grafana(SQLite·PostgreSQL 데이터 소스)로 보거나, 허브 `/metrics` 를 Prometheus 로 따로 긁는다.
