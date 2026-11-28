@@ -40,4 +40,5 @@ int  hub_tariff_months(void);
 int  hub_tariff_month_at(int i, int *year, int *month, double *m3, uint32_t *won, int *closed, int *src);   /* src 1 계량기 2 보일러 */
 /* 사용량 기준: 지금 쓰는 것(0 없음 / 1 계량기 / 2 보일러). cfg 에 설정(0 자동 / 1 / 2) */
 int  hub_tariff_source(int *cfg);
+bool hub_tariff_set_period_use(uint32_t use_l, char *msg, int msglen);   /* 이번 청구 기간 사용량 맞추기(L) */
 void hub_tariff_send_bill(void);   /* 보일러 카드용 이번 기간 사용량·예상 청구액(CMD 0x0f) */

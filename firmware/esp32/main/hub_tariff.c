@@ -567,6 +567,7 @@ static bool src_total(int src, const uint8_t *want, uint32_t *l, uint8_t mac3[3]
 
 /* 직전에 본 누계(기준·보일러 MAC 과 함께) — 누계 감소 판정용, s_lock 아래에서만 */
 static bool s_last_ok;
+static bool s_use_live;            /* 이번 부팅에 마지막 기록의 use_l 을 한 번이라도 셈했나(아니면 플래시의 낡은 값) */
 static uint8_t s_last_src, s_last_mac[3];
 static uint32_t s_last_l;
 
@@ -620,6 +621,15 @@ static void months_update(void)
          * 그때까지 센 양은 두고 새 기준의 지금 값부터 이어 센다 */
         ESP_LOGI(TAG, "사용량 기준 %s → %s (이번 기간 %.1f ㎥ 이어서)", cur->src == SRC_BOILER ? "보일러" : "계량기",
                  src == SRC_BOILER ? "보일러" : "계량기", cur->use_l / 1000.0);
+        /* 이어 붙일 양: 이번 부팅에 한 번이라도 센 값이면 그것, 아니면(부팅 직후 첫 셈) 옛 기준으로 지금 값을 셈해 본다 —
+         * 계량기 사용량은 플래시에 저장하지 않아(펄스마다 쓰면 닳는다) 저장된 use_l 은 낡았다 */
+        if (!s_use_live && cur->src == SRC_METER && !dropped) {
+            uint32_t old_l;
+            uint8_t om[3];
+            if (src_total(SRC_METER, NULL, &old_l, om) && old_l >= cur->start_l) {
+                cur->use_l = cur->carry_l + (old_l - cur->start_l);
+            }
+        }
         cur->carry_l = cur->use_l;
         cur->src = (uint8_t)src;
         memcpy(cur->mac3, mac3, 3);
@@ -627,6 +637,7 @@ static void months_update(void)
         dirty = true;
     }
     uint32_t use = cur->carry_l + (cur_l - cur->start_l);   /* 진행 중 라이브 */
+    s_use_live = true;
     /* 보일러 누계는 허브가 다시 켜진 뒤 한 시간쯤 지나야 오므로 그동안 보여 줄 값을 저장해 둔다(바뀔 때만 — 1시간에 한 번꼴).
      * 계량기는 펄스 수가 허브 NVS 에 남아 켜자마자 다시 셀 수 있어 저장하지 않는다(펄스마다 쓰면 플래시가 닳는다) */
     if (src == SRC_BOILER && use != cur->use_l) dirty = true;
@@ -838,6 +849,41 @@ bool hub_tariff_period(uint32_t *use_l, uint32_t *won, int *src)
     }
     xSemaphoreGive(s_lock);
     return ok;
+}
+
+/* 이번 청구 기간 사용량을 사람이 맞춘다(계량기를 바꿨거나 허브를 초기화한 경우 등). 지금 기준의 지금 값부터 이어 센다 */
+bool hub_tariff_set_period_use(uint32_t use_l, char *msg, int msglen)
+{
+    if (!s_lock) return false;
+    long now = time(NULL);
+    if (!CLOCK_OK(now)) { snprintf(msg, msglen, "시계가 아직 맞지 않습니다"); return false; }
+    int src = src_pick();
+    uint32_t cur_l;
+    uint8_t mac3[3];
+    if (!src || !src_total(src, NULL, &cur_l, mac3)) { snprintf(msg, msglen, "지금 셀 기준(계량기·보일러)이 없습니다"); return false; }
+    uint16_t key = period_key(now);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    tmon_t *cur = s_mon_n ? &s_mon[s_mon_n - 1] : NULL;
+    if (!cur || cur->ym != key || cur->closed) {
+        xSemaphoreGive(s_lock);
+        snprintf(msg, msglen, "이번 기간 기록이 아직 없습니다 — 잠시 뒤 다시");
+        return false;
+    }
+    cur->src = (uint8_t)src;
+    memcpy(cur->mac3, mac3, 3);
+    cur->start_l = cur_l;
+    cur->carry_l = use_l;
+    cur->use_l = use_l;
+    cur->won = won_of(use_l / 1000.0);
+    s_last_ok = false;
+    s_use_live = true;
+    xSemaphoreGive(s_lock);
+    mon_save();
+    s_bill_want = true;
+    if (s_task) xTaskNotifyGive(s_task);
+    ESP_LOGW(TAG, "이번 기간 사용량을 %.3f ㎥ 로 맞춤", use_l / 1000.0);
+    snprintf(msg, msglen, "이번 기간 사용량을 %.2f ㎥ 로 맞췄습니다", use_l / 1000.0);
+    return true;
 }
 
 int hub_tariff_source(int *cfg)
@@ -1091,6 +1137,11 @@ void hub_tariff_render(char *out, size_t cap)
     catf(out, cap, "<option value=%d%s>말일</option></select></div>", BILLDAY_LAST, s_billday == BILLDAY_LAST ? " selected" : "");
     catf(out, cap, "</div>");
     catf(out, cap, "<button class=sv>저장</button></form>");
+    /* 이번 기간 사용량 맞추기 — 계량기를 바꿨거나 허브를 초기화해 이번 기간 값이 틀어졌을 때 */
+    catf(out, cap, "<form method=post action=/admin/gas><input type=hidden name=op value=fixuse>"
+                   "<label>이번 청구 기간 사용량 맞추기 (㎥)</label><input name=use_m3 inputmode=decimal placeholder=\"예 31.27\">"
+                   "<button>맞추기</button><p class=muted>계량기를 바꿨거나 허브를 초기화해 이번 기간 값이 틀어졌을 때만. "
+                   "지금부터 이 값에 이어 셉니다.</p></form>");
     if (s_billday == BILLDAY_LAST) {
         catf(out, cap, "<p class=muted style='margin:8px 0 0'>요금 기간: 매월 <b>1일</b>부터 <b>말일</b>까지. "
                        "즉 'N월' 막대 = N월 1일 ~ N월 말일 사용분입니다.</p>");

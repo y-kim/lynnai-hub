@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "esp_http_server.h"
 #include "lwip/sockets.h"
 #include "esp_netif.h"
@@ -852,7 +853,8 @@ static esp_err_t boiler_post(httpd_req_t *req)
 static esp_err_t gas_post(httpd_req_t *req)
 {
     log_req(req);
-    if (!authed(req)) {
+    bool admin = authed(req);
+    if (!admin && !hub_dbgkey_check(req)) {
         return login_page(req, "로그인이 필요합니다");
     }
     char body[512], err[96] = "";
@@ -861,6 +863,24 @@ static esp_err_t gas_post(httpd_req_t *req)
     }
     char op[12];
     form_get(body, "op", op, sizeof(op));
+    if (strcmp(op, "fixuse") == 0) {                 /* 이번 기간 사용량 맞추기(㎥) — 관리자 또는 디버그 키 */
+        char v[16] = "", m[96] = "";
+        form_get(body, "use_m3", v, sizeof(v));
+        char *end = NULL;
+        double m3 = strtod(v, &end);
+        bool ok = end != v && isfinite(m3) && m3 >= 0 && m3 < 100000 &&
+                  hub_tariff_set_period_use((uint32_t)llround(m3 * 1000), m, sizeof(m));
+        if (!ok && !m[0]) snprintf(m, sizeof(m), "사용량은 0 이상의 숫자(㎥)로");
+        if (!admin) {                                /* 디버그 키: 관리 화면 대신 짧은 글자 */
+            httpd_resp_set_type(req, "text/plain; charset=utf-8");
+            if (!ok) httpd_resp_set_status(req, "400 Bad Request");
+            return httpd_resp_sendstr(req, m);
+        }
+        return admin_page(req, m, ok);
+    }
+    if (!admin) {
+        return login_page(req, "로그인이 필요합니다");
+    }
     if (strcmp(op, "refresh") == 0) {
         hub_tariff_refresh();
         return admin_page(req, "지금 다시 받는 중입니다", true);
