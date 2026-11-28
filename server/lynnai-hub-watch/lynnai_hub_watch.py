@@ -203,8 +203,8 @@ def schema(pg):
             gas_pulses {I}, gas_l_total {I}, gas_meter_m3 {R}, gas_flow_lph {I},
             r_raw text)""",
         f"""create table if not exists boiler_usage(
-            ts {T} primary key, src text, mac text,
-            heat_gas_m3 {I}, hw_gas_m3 {I}, heat_burn_h {I}, hw_burn_h {I})""",
+            ts {T}, src text, mac text not null default '',
+            heat_gas_m3 {I}, hw_gas_m3 {I}, heat_burn_h {I}, hw_burn_h {I}, primary key(ts, mac))""",
     ]
 
 
@@ -226,8 +226,32 @@ def db(url=None):
     else:
         migrate_zones(c)
     c.execute("create index if not exists zones_ts on zones(ts)")
+    migrate_usage(c)
     c.commit()
     return c
+
+
+def migrate_usage(c):
+    """boiler_usage: 예전 표는 ts 하나가 키였고 mac 모양이 섞여 있었다 → mac 을 6자리로 맞추고 키를 (ts, mac) 으로."""
+    if c.pg:
+        pk = c.execute("select pg_get_constraintdef(oid) from pg_constraint where conrelid='boiler_usage'::regclass "
+                       "and contype='p'").fetchone()
+        if pk and "mac" not in pk[0]:
+            c.execute("update boiler_usage set mac=lower(substr(regexp_replace(coalesce(mac,''), '[^0-9A-Fa-f]', '', 'g'), 1, 6))")
+            c.execute("alter table boiler_usage alter column mac set default ''")
+            c.execute("alter table boiler_usage alter column mac set not null")
+            c.execute("alter table boiler_usage drop constraint boiler_usage_pkey")
+            c.execute("alter table boiler_usage add primary key (ts, mac)")
+            print("boiler_usage 를 보일러(mac)별 키로 옮겼습니다", flush=True)
+        return
+    sql = c.execute("select sql from sqlite_master where name='boiler_usage'").fetchone()
+    if sql and "primary key(ts, mac)" not in sql[0]:
+        rows = c.execute("select ts, src, mac, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h from boiler_usage").fetchall()
+        c.execute("drop table boiler_usage")
+        c.execute(schema(False)[-1])
+        for r in rows:
+            c.insert("boiler_usage", USAGE_COLS, (r[0], r[1], mac6(r[2])) + tuple(r[3:]))
+        print(f"boiler_usage 를 보일러(mac)별 키로 옮겼습니다({len(rows)}줄)", flush=True)
 
 
 def migrate_zones(c):
@@ -265,14 +289,37 @@ def b(v):
     return None if v is None else int(bool(v))
 
 
+def mac6(m):
+    """보일러 MAC 끝 3바이트를 6자리 소문자 hex 로(허브 이벤트 'a1:b2:c3:00:00:00' · 통신 기록 'a1b2c3' 을 한 모양으로)."""
+    return re.sub(r"[^0-9a-f]", "", (m or "").lower())[:6]
+
+
 def add_usage(c, ts, src, mac, hg, wg, hh, wh):
-    """보일러 stg 누계 한 줄. 같은 stg 를 두 원천(허브 이벤트·지난 통신 기록)에서 받을 수 있어 앞뒤 2분 안에 있으면 건너뛴다."""
+    """보일러 stg 누계 한 줄. 같은 stg 를 두 원천(허브 이벤트·지난 통신 기록)에서 받을 수 있어
+    같은 보일러의 앞뒤 2분 안 줄이 있으면 건너뛴다(다른 보일러 것은 따로)."""
     t = datetime.fromisoformat(ts)
+    m = mac6(mac)
     lo, hi = (t - timedelta(minutes=2)).isoformat(timespec="seconds"), (t + timedelta(minutes=2)).isoformat(timespec="seconds")
-    if c.execute("select 1 from boiler_usage where ts between ? and ?", (lo, hi)).fetchone():
+    if c.execute("select 1 from boiler_usage where mac=? and ts between ? and ?", (m, lo, hi)).fetchone():
         return False
-    c.insert("boiler_usage", USAGE_COLS, (t.isoformat(timespec="seconds"), src, mac, hg, wg, hh, wh))
+    c.insert("boiler_usage", USAGE_COLS, (t.isoformat(timespec="seconds"), src, m, hg, wg, hh, wh))
     return True
+
+
+def usage_diffs(rows):
+    """boiler_usage 줄들(ts, mac, 난방가스, 온수가스, 난방h, 온수h — ts 순) → 보일러마다 앞 줄과의 차.
+    [(ts, mac, d4, gap_h)] — 누계가 줄었으면(보일러 쪽 초기화) 그 칸은 0."""
+    prev, out = {}, []
+    for r in rows:
+        p = prev.get(r[1])
+        if p:
+            d = [r[i] - p[i] for i in range(2, 6)]
+            if min(d) < 0:
+                d = [0, 0, 0, 0]
+            gap = (datetime.fromisoformat(r[0]) - datetime.fromisoformat(p[0])).total_seconds() / 3600
+            out.append((r[0], r[1], d, gap))
+        prev[r[1]] = r
+    return out
 
 
 def stg_event(c, ts, mac, a, bb):
@@ -502,33 +549,33 @@ def usage(days):
     """보일러 자체 사용량(stg 누계)의 날짜별·시간별 차."""
     c = db()
     since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
-    rows = c.execute("select ts, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h, src from boiler_usage order by ts").fetchall()
+    rows = c.execute("select ts, mac, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h, src from boiler_usage order by ts").fetchall()
     if not rows:
         print("boiler_usage 가 비어 있습니다")
         return
-    print(f"== 보일러 사용량 (stg 누계, 최근 {days}일) — 기록 {len(rows)}줄 {rows[0][0]} ~ {rows[-1][0]} ==")
+    macs = sorted({r[1] for r in rows})
+    print(f"== 보일러 사용량 (stg 누계, 최근 {days}일) — 기록 {len(rows)}줄 {rows[0][0]} ~ {rows[-1][0]}"
+          + (f", 보일러 {len(macs)}대(합계)" if len(macs) > 1 else "") + " ==")
     day = {}
-    prev = None
     hours = []
-    for r in rows:
-        if prev and r[0] >= since:
-            d = [r[i] - prev[i] for i in range(1, 5)]
-            if min(d) < 0:            # 누계가 줄었으면(보일러 쪽 초기화) 그 칸은 건너뜀
-                d = [0, 0, 0, 0]
-            k = r[0][:10]
-            day[k] = [x + y for x, y in zip(day.get(k, [0, 0, 0, 0]), d)]
-            gap = (datetime.fromisoformat(r[0]) - datetime.fromisoformat(prev[0])).total_seconds() / 3600
-            hours.append((r[0], d, gap))
-        prev = r
+    for ts, mac, d, gap in usage_diffs(rows):        # 보일러마다 앞 줄과의 차 → 날짜별로 더함
+        if ts < since:
+            continue
+        k = ts[:10]
+        day[k] = [x + y for x, y in zip(day.get(k, [0, 0, 0, 0]), d)]
+        hours.append((ts, d, gap, mac))
     print("  날짜        난방가스 온수가스  난방h 온수h")
     for k, (hg, wg, hh, wh) in sorted(day.items()):
         print(f"  {k}  {hg:6} ㎥ {wg:5} ㎥ {hh:5} {wh:5}")
     print("\n-- 쓴 시간만 (그 줄까지의 차, 앞 줄과 1.5시간 넘게 떨어졌으면 표시)")
-    for ts, (hg, wg, hh, wh), gap in hours:
+    for ts, (hg, wg, hh, wh), gap, mac in hours:
         if hg or wg or hh or wh:
-            print(f"  {ts[5:16]}  난방 +{hg} ㎥ 온수 +{wg} ㎥  버너 +{hh}h/+{wh}h" + (f"  ({gap:.1f}시간치)" if gap > 1.5 else ""))
-    last = rows[-1]
-    print(f"\n마지막 누계 {last[0]} ({last[5]}): 난방 가스 {last[1]} ㎥, 온수 가스 {last[2]} ㎥, 난방 {last[3]} h, 온수 {last[4]} h")
+            print(f"  {ts[5:16]}  " + (f"[{mac}] " if len(macs) > 1 else "") + f"난방 +{hg} ㎥ 온수 +{wg} ㎥  버너 +{hh}h/+{wh}h"
+                  + (f"  ({gap:.1f}시간치)" if gap > 1.5 else ""))
+    for m in macs:
+        last = [r for r in rows if r[1] == m][-1]
+        print(f"\n마지막 누계 {last[0]} ({last[6]}" + (f", {m}" if len(macs) > 1 else "")
+              + f"): 난방 가스 {last[2]} ㎥, 온수 가스 {last[3]} ㎥, 난방 {last[4]} h, 온수 {last[5]} h")
 
 
 def import_stg(paths):
@@ -749,16 +796,21 @@ def log_boiler(c, q):
                 r[1] += m
             t0 = nxt
     # 보일러 자체 누계(stg): 기간 안의 줄마다 앞 줄과의 차
-    rows = c.execute("select ts, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h from boiler_usage where ts<? order by ts desc limit 1",
-                     (a,)).fetchall()
-    rows += c.execute("select ts, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h from boiler_usage where ts>=? and ts<? order by ts",
-                      (a, b)).fetchall()
-    stg = []
-    for p, r in zip(rows, rows[1:]):
-        d = [r[i] - p[i] for i in range(1, 5)]
-        if min(d) >= 0 and any(d):
-            stg.append([int(datetime.fromisoformat(r[0]).timestamp() * 1000)] + d)
-    last = rows[-1] if rows else None
+    # 보일러마다 기간 앞 마지막 줄 + 기간 안 줄 → 보일러마다 앞 줄과의 차(여러 대면 보일러별 줄, x[5] = mac)
+    cols = "ts, mac, heat_gas_m3, hw_gas_m3, heat_burn_h, hw_burn_h"
+    rows = []
+    for (m,) in c.execute("select distinct mac from boiler_usage where ts<?", (b,)).fetchall():
+        rows += c.execute(f"select {cols} from boiler_usage where mac=? and ts<? order by ts desc limit 1", (m, a)).fetchall()
+    rows += c.execute(f"select {cols} from boiler_usage where ts>=? and ts<? order by ts", (a, b)).fetchall()
+    rows.sort(key=lambda r: r[0])
+    stg = [[int(datetime.fromisoformat(ts).timestamp() * 1000)] + d + [mac] for ts, mac, d, _ in usage_diffs(rows) if any(d)]
+    lasts = {}
+    for r in rows:
+        lasts[r[1]] = r
+    last = None
+    if lasts:                                     # 여러 대면 보일러마다 마지막 누계를 더한다
+        ls = list(lasts.values())
+        last = (max(r[0] for r in ls),) + tuple(sum(r[i] for r in ls) for i in range(2, 6))
     meter = c.execute("select ts, gas_meter_m3, gas_pulses from state where gas_pulses is not null and ts<? order by ts desc limit 1",
                       (b,)).fetchone()
     return {"step": step, "gas": gas, "burn": sorted([k] + v for k, v in burn.items()), "stg": stg,

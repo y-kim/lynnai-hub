@@ -636,9 +636,14 @@ function drawBoiler(d) {
   else {
     const sc = h("div", "scroll tall", null, c3), tb = h("table", null, null, sc);
     const tr = h("tr", null, null, h("thead", null, null, tb));
-    ["시각", "난방 가스 ㎥", "온수 가스 ㎥", "난방 h", "온수 h"].forEach((x, i) => h("th", i ? "num" : null, x, tr));
+    const many = new Set(d.stg.map(x => x[5])).size > 1;   // 보일러가 여러 대면 어느 보일러인지(MAC 끝 6자리)
+    [...(many ? ["시각", "보일러"] : ["시각"]), "난방 가스 ㎥", "온수 가스 ㎥", "난방 h", "온수 h"].forEach((x, i) => h("th", i > (many ? 1 : 0) ? "num" : null, x, tr));
     const body = h("tbody", null, null, tb);
-    for (const x of [...d.stg].reverse()) { const row = h("tr", null, null, body); h("td", "t", fmtT(x[0]), row); for (let i = 1; i < 5; i++) h("td", "num", `+${x[i]}`, row); }
+    for (const x of [...d.stg].reverse()) {
+      const row = h("tr", null, null, body); h("td", "t", fmtT(x[0]), row);
+      if (many) h("td", null, x[5], row);
+      for (let i = 1; i < 5; i++) h("td", "num", `+${x[i]}`, row);
+    }
   }
 }
 
