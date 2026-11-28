@@ -105,7 +105,8 @@ class Store:
             self.c.adapters.register_loader("numeric", FloatLoader)   # avg()·나눗셈이 Decimal 대신 float
         else:
             os.makedirs(os.path.dirname(DB) or ".", exist_ok=True)
-            self.c = sqlite3.connect(DB)
+            # 로그 브라우저는 요청마다 스레드가 다르다 — 부르는 쪽이 잠금으로 한 번에 하나만 쓰게 하고, 스레드 검사는 끈다
+            self.c = sqlite3.connect(DB, check_same_thread=False)
 
     def where(self):
         return re.sub(r"//[^@/]*@", "//", self.url) if self.pg else DB     # 암호는 빼고 보여 준다
