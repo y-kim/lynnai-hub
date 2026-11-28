@@ -181,6 +181,17 @@ static void send_line(int fd, const char *line, int n)
     }
 }
 
+static bool client_room(void)                         /* s_clients 에 빈 칸이 있나 */
+{
+    bool room = false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < MAX_CLIENTS && !room; i++) {
+        room = s_clients[i] < 0;
+    }
+    xSemaphoreGive(s_lock);
+    return room;
+}
+
 static int client_add(int fd)                         /* s_clients 빈 칸에 넣는다(= hub_lan_send 가 뿌릴 대상) */
 {
     int slot = -1;
@@ -356,10 +367,13 @@ static void client_task(void *arg)
                         }
                         send_line(fd, ok, k);
                     } else {
+                        if (!client_room()) {            /* 빈 칸부터 — ok 뒤에 busy 를 보내면 상대가 붙은 줄 안다 */
+                            send_line(fd, "busy\n", 5);
+                            goto out;
+                        }
                         send_line(fd, ok, k);            /* 등록 전에 보내 다른 줄과 섞이지 않게 */
                         slot = client_add(fd);
-                        if (slot < 0) {
-                            send_line(fd, "busy\n", 5);
+                        if (slot < 0) {                  /* 그 사이 다른 연결이 칸을 가져감(드묾) — 끊는다 */
                             goto out;
                         }
                     }
