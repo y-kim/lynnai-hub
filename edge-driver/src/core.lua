@@ -202,6 +202,10 @@ local ROOM_KEY, GAS_KEY = "room", "gas"
 local function bkey(mac) return "b" .. mac end
 local function vbkey(mac) return "v" .. mac end       -- 가상 보일러(단독 써머스탯용)
 local function zkey(mac, id) return "t" .. mac .. "_" .. id end
+-- 방이 '미설치'로 보고된 뒤 기기를 지우기까지(그동안은 오프라인). 뺀 방과 방 조절기 전원·배선 문제를 상태만으로는
+-- 가를 수 없어 넉넉히 — 지우면 다시 생길 때 기기 ID 가 바뀌어 루틴·씬이 끊긴다(HA 통합 entity.py 와 같은 값)
+local ZONE_GONE_S = 24 * 3600
+
 local function parse_key(key)
   local mac = key:match("^b(%x+)$")
   if mac then return "boiler", mac end
@@ -846,9 +850,9 @@ local function on_state(parent, b)
       else                                                            -- 미설치(설치 비트 꺼짐) 또는 빈 슬롯
         s.absent[zk] = (s.absent[zk] or 0) + 1                        -- auto_boiler 가 '방금 안 보임=모름'으로 1~2회 판단 보류하는 데만 씀
         if s.absent[zk] >= 3 and s.had then s.had[zk] = nil end
-        if c then                                                     -- 전에 있던 방이 미설치로 바뀜: refresh_zone 이 오프라인(장치 해제), 10분 뒤 삭제
+        if c then                                                     -- 전에 있던 방이 미설치로 바뀜: refresh_zone 이 오프라인(장치 해제), ZONE_GONE_S 뒤 삭제
           s.gone_at[zk] = s.gone_at[zk] or os.time()
-          if os.time() - s.gone_at[zk] >= 600 then
+          if os.time() - s.gone_at[zk] >= ZONE_GONE_S then
             s.gone_at[zk] = nil
             delete_child(c)
           end
@@ -952,6 +956,19 @@ local function on_links(parent, b)
   s.link_since = since
   update_outing(parent)
   refresh_all(parent)
+  -- 드라이버가 재시작해 상태를 모르는 자식(메모리에 없음)은 refresh_all 이 안 돈다: 목록에 없는 기기의 자식은 여기서 오프라인
+  -- (허브는 끊긴 기기의 옛 상태를 더 보내지 않으므로, 이게 없으면 옛 값으로 계속 온라인이었다)
+  for _, d in ipairs(driver:get_devices()) do
+    local p = is_child(d) and d:get_parent_device()
+    if p and p.id == parent.id then
+      local kind, mac = parse_key(d.parent_assigned_child_key)
+      local key = (kind == "boiler" and "6:" or (kind == "zone" or kind == "vboiler") and "9:" or nil)
+      local known = (kind == "boiler" and s.boilers[mac]) or ((kind == "zone" or kind == "vboiler") and s.thermos[mac])
+      if key and not s.linked[key .. mac] and not known then
+        go_offline(d, kind == "zone", true)
+      end
+    end
+  end
 end
 
 -- 허브에 직접 꽂은 센서(허브 1개당 하나) — 식별 MAC 없음, 키 고정
