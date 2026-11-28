@@ -292,15 +292,56 @@ static esp_err_t deferred_driver_init(void)
 
 static void zb_join_session_end(void);
 
+/* 가입 세션(Wi-Fi 를 멈추고 Zigbee 가입)은 스택이 결과 신호를 줄 때 끝난다. 시작이 거절되거나 신호가 끝내 안 오면
+ * AP·집 Wi-Fi 가 꺼진 채 남으므로: 시작 결과를 보고(실패면 바로 끝), 그래도 ZB_SESSION_MAX_S 가 지나면 무조건 끝낸다.
+ * 감시는 Zigbee 알람이 아니라 esp_timer 로(Zigbee 태스크가 멈춰도 돈다). */
+#define ZB_SESSION_MAX_S 200
+static volatile int64_t s_session_t0;
+static esp_timer_handle_t s_session_wd;
+
+static void session_wd_cb(void *arg)
+{
+    (void)arg;
+    if (s_session_t0 && esp_timer_get_time() - s_session_t0 > (int64_t)ZB_SESSION_MAX_S * 1000000) {
+        ESP_LOGW(TAG, "Zigbee 가입 세션이 %d초를 넘음 — Wi-Fi 를 다시 켠다", ZB_SESSION_MAX_S);
+        hub_bbox_note("join session timeout %ds — wifi resume", ZB_SESSION_MAX_S);
+        s_session_t0 = 0;
+        zb_join_session_end();
+    }
+}
+
+static void session_wd_start(void)
+{
+    if (!s_session_wd) {
+        const esp_timer_create_args_t a = { .callback = session_wd_cb, .name = "zb_sess_wd" };
+        if (esp_timer_create(&a, &s_session_wd) == ESP_OK) {
+            esp_timer_start_periodic(s_session_wd, 10 * 1000000);
+        }
+    }
+}
+
+/* 커미셔닝 시작 — 거절되면 세션을 바로 끝낸다(결과 신호가 오지 않으므로). Zigbee 잠금을 쥔 채로 부른다 */
+static bool zb_commission_l(ezb_bdb_comm_mode_mask_t mode)
+{
+    ezb_err_t e = ezb_bdb_start_top_level_commissioning(mode);
+    if (e != EZB_ERR_NONE) {
+        ESP_LOGW(TAG, "Zigbee 커미셔닝 시작 거절(%d)", (int)e);
+        hub_bbox_note("commissioning start rejected: %d", (int)e);
+        return false;
+    }
+    return true;
+}
+
 static void esp_zigbee_alarm_bdb_commissioning(alarm_timer_arg_t arg)
 {
     esp_zigbee_lock_acquire(portMAX_DELAY);
     bool joined = ezb_bdb_dev_joined();
+    bool started = true;
     if (!joined) {
-        (void)ezb_bdb_start_top_level_commissioning(arg);
+        started = zb_commission_l(arg);
     }
     esp_zigbee_lock_release();
-    if (joined) {                                    /* 그 사이 가입됨(버튼 등) — 남은 재시도 타이머는 무시 */
+    if (joined || !started) {                        /* 그 사이 가입됨(버튼 등) 또는 시작 거절 — 세션 끝 */
         zb_join_session_end();
     }
 }
@@ -494,6 +535,7 @@ static void zb_try_steer(void)
     }
     if (!s_join_session) {
         s_join_session = true;
+        s_session_t0 = esp_timer_get_time();
         hub_wifi_radio_pause();                     /* 가입하는 동안 Wi-Fi 중단 */
     }
     esp_zigbee_lock_acquire(portMAX_DELAY);
@@ -504,8 +546,11 @@ static void zb_try_steer(void)
     if (!fresh) {
         s_zb_up = false;                             /* 망에서 떨어진 상태 — 이 뒤의 탈퇴는 '삭제'가 아니라 '분실' */
     }
-    (void)ezb_bdb_start_top_level_commissioning(fresh ? EZB_BDB_MODE_NETWORK_STEERING : EZB_BDB_MODE_INITIALIZATION);
+    bool started = zb_commission_l(fresh ? EZB_BDB_MODE_NETWORK_STEERING : EZB_BDB_MODE_INITIALIZATION);
     esp_zigbee_lock_release();
+    if (!started) {
+        zb_join_session_end();
+    }
 }
 
 /* 가입 세션 종료: Wi-Fi 다시 켠다. */
@@ -513,6 +558,7 @@ static void zb_join_session_end(void)
 {
     if (s_join_session) {
         s_join_session = false;
+        s_session_t0 = 0;
         hub_wifi_radio_resume();
     }
     if (s_lan_pair_after) {
@@ -537,11 +583,15 @@ static void esp_zigbee_alarm_reinit(alarm_timer_arg_t arg)
     }
     if (!s_join_session) {
         s_join_session = true;
+        s_session_t0 = esp_timer_get_time();
         hub_wifi_radio_pause();
     }
     esp_zigbee_lock_acquire(portMAX_DELAY);
-    (void)ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
+    bool started = zb_commission_l(EZB_BDB_MODE_INITIALIZATION);
     esp_zigbee_lock_release();
+    if (!started) {
+        zb_join_session_end();
+    }
 }
 
 /* 지금 가입 시도를 시작할 수 있나(hub_zigbee_join_now 가 true 를 돌려줄 조건). 응답을 먼저 보내고 시작하려는 호출부용 */
@@ -743,6 +793,14 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
                     if (xTaskCreate(zb_restore_task, "zb_restore", 4096, (void *)(uintptr_t)wait, 5, NULL) != pdPASS) {
                         s_restore_pending = false;
                     }
+                } else if (hub_crypt_zb_snapshot_joined() && !s_restore_pending) {
+                    /* 되살리기 한도(재시작 3번)를 다 썼어도 가입 정보는 플래시에 되써 둔다 — 재시작은 하지 않는다.
+                     * SmartThings 허브가 오래 꺼져 있던 경우(정전 뒤 이 허브가 먼저 켜짐 등) 나중의 재부팅이 다시 재가입한다.
+                     * 지금 RAM 의 스택은 초기 상태라 이번 부팅엔 다시 붙지 않는다(전원을 껐다 켜거나 재부팅하면 시도) */
+                    int n = hub_crypt_zb_restore_missing();
+                    ESP_LOGE(TAG, "재가입 실패로 가입 정보가 지워짐 — 되살리기 한도라 재시작 없이 플래시에만 되써 둠(%d개). "
+                             "재부팅하면 다시 재가입", n);
+                    hub_bbox_note("restore limit: rewrote %d entries without restart", n);
                 } else {
                     ESP_LOGE(TAG, "재가입 실패로 Zigbee 가입 정보가 사라짐 — SmartThings 에서 '기기 추가' 필요");
                 }
@@ -844,6 +902,7 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 #endif                                    /* 라우터(라디오가 따로인 보드)는 늘 수신한다 — 폴링 설정이 없다 */
 
     ESP_ERROR_CHECK(esp_zigbee_start(false));
+    session_wd_start();
     hub_zigbee_mark_ready();              /* 이제 ezb_* 안전 — 이 전의 센서 전송은 무시됨 */
 
     esp_zigbee_launch_mainloop();
