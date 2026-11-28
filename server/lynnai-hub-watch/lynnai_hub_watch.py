@@ -42,12 +42,40 @@ import urllib.request
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HUB_URL = os.environ.get("HUB_URL", "").strip().rstrip("/")
-HUB_TOKEN = os.environ.get("HUB_TOKEN", "").strip()
-POLL_SEC = int(os.environ.get("POLL_SEC", "60"))
-EVENT_SEC = int(os.environ.get("EVENT_SEC", "30"))
+# 웹 화면(설정 탭)에서 바꾼 값. 있으면 환경변수보다 먼저 쓴다. DB 주소·토큰이 들어 있어 0600
+SETTINGS_FILE = os.environ.get("HUB_WEB_SETTINGS", os.path.join(HERE, "data", "hubweb-settings.json"))
+
+
+def settings_load():
+    try:
+        with open(SETTINGS_FILE) as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+WEB_SET = settings_load()
+SRC = {}        # 값마다 어디서 왔는지: "web" | "env" | "default"
+
+
+def _pick(key, env, default):
+    if key in WEB_SET:
+        SRC[key] = "web"
+        return WEB_SET[key]
+    if os.environ.get(env, "").strip():
+        SRC[key] = "env"
+        return os.environ[env].strip()
+    SRC[key] = "default"
+    return default
+
+
+HUB_URL = str(_pick("hub_url", "HUB_URL", "")).strip().rstrip("/")
+HUB_TOKEN = str(_pick("hub_token", "HUB_TOKEN", "")).strip()
+POLL_SEC = int(_pick("poll_sec", "POLL_SEC", 60))
+EVENT_SEC = int(_pick("event_sec", "EVENT_SEC", 30))
 DB = os.environ.get("HUB_DB", os.path.join(HERE, "data", "hub.db"))
-DB_URL = os.environ.get("HUB_DB_URL", "").strip()
+DB_URL = str(_pick("db_url", "HUB_DB_URL", "")).strip()     # 웹 설정의 "" 는 일부러 SQLite 를 고른 것
 WEB_PORT = int(os.environ.get("WEB_PORT", "0") or 0)   # 로그 브라우저(읽기 전용). 0 이면 안 띄움
 WEB_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lynnai_hub_web.html")
 # 로그 브라우저 로그인 정보(아이디·암호 해시·세션 서명 키). 없으면 처음 들어온 사람이 만든다.
@@ -323,7 +351,12 @@ def catch_up_usage(c):
 
 def main():
     if not HUB_URL:
-        sys.exit("HUB_URL(허브 주소, 예 http://192.168.0.50)을 지정하세요")
+        if not WEB_PORT:
+            sys.exit("HUB_URL(허브 주소, 예 http://192.168.0.50)을 지정하세요")
+        print(f"허브 주소가 없어 기록은 쉽니다 — 로그 브라우저(:{WEB_PORT})의 설정 탭에서 정하세요", flush=True)
+        start_web(WEB_PORT)
+        RESTART.wait()
+        os.execv(sys.executable, [sys.executable, "-u", os.path.abspath(__file__)])
     me = os.path.abspath(__file__)
     stamp = os.stat(me).st_mtime_ns
     c = db()
@@ -345,7 +378,10 @@ def main():
         except Exception as e:
             print(f"폴링 오류: {e}", flush=True)
             c.recover()
-        time.sleep(EVENT_SEC)
+        if RESTART.wait(EVENT_SEC):                # 설정 탭에서 저장 → 새 값으로 다시 뜬다
+            print("설정이 바뀌어 다시 뜹니다", flush=True)
+            c.close()
+            os.execv(sys.executable, [sys.executable, "-u", me])
         try:
             if os.stat(me).st_mtime_ns != stamp:   # 배포로 이 파일이 바뀌면 새 코드로 다시 뜬다(컨테이너 재시작 불필요)
                 print("코드가 바뀌어 다시 뜹니다", flush=True)
@@ -903,6 +939,155 @@ def login_page(setup, user="", err=""):
 ICON_SVG = '<svg viewBox="0 0 256 256" aria-hidden="true"><rect width="256" height="256" rx="56" fill="#f55600"/><g fill="none" stroke="#fff" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"><path d="M150.5 203 204.2 172V84L128 40 51.8 84v88L110 205.6C124 213.7 128 200 128 178C107.2 178 91.2 162 91.2 141.2C91.2 123.6 100.8 112.4 110.4 102.8C110.4 115.6 115.2 123.6 123.2 125.2C118.4 107.6 123.2 88.4 132 74C136 96.4 164.8 110.8 164.8 141.2C164.8 158.8 153.6 171.6 139.2 173.2"/><path d="M139.2 173.2C128 174.8 118.4 166.8 118.4 155.6C118.4 146 126.4 141.2 129.6 131.6"/></g></svg>'
 
 
+# ---------- 설정 탭(웹에서 허브 주소·DB 바꾸기) ----------
+# 비밀값(DB 암호·허브 토큰)은 브라우저로 내보내지 않는다: "있음"만 알리고, 빈 칸으로 저장하면 지금 값을 그대로 둔다.
+from urllib.parse import quote, unquote, urlsplit
+
+RESTART = threading.Event()
+WEB_ONLY = False
+
+
+def _pg_parts(url):
+    if not url:
+        return None
+    u = urlsplit(url)
+    return {"host": u.hostname or "", "port": u.port or 5432, "name": unquote(u.path.lstrip("/")),
+            "user": unquote(u.username or ""), "password": unquote(u.password or ""), "params": u.query}
+
+
+def _pg_url(d):
+    auth = quote(d["user"], safe="")
+    if d.get("password"):
+        auth += ":" + quote(d["password"], safe="")
+    host = f'[{d["host"]}]' if ":" in d["host"] else d["host"]
+    return f'postgresql://{auth}@{host}:{int(d["port"])}/{quote(d["name"], safe="")}' + (f'?{d["params"]}' if d.get("params") else "")
+
+
+def settings_view():
+    pg = _pg_parts(DB_URL) or {}
+    return {
+        "hub_url": HUB_URL, "hub_token_set": bool(HUB_TOKEN), "poll_sec": POLL_SEC, "event_sec": EVENT_SEC,
+        "db": {"kind": "pg" if DB_URL else "sqlite", "host": pg.get("host", ""), "port": pg.get("port", 5432),
+               "name": pg.get("name", ""), "user": pg.get("user", ""), "password_set": bool(pg.get("password")),
+               "params": pg.get("params", ""), "sqlite": DB},
+        "source": {k: SRC.get(k, "default") for k in ("hub_url", "hub_token", "poll_sec", "event_sec", "db_url")},
+        "web_file": bool(WEB_SET),
+    }
+
+
+def _clean(body):
+    """화면에서 온 값 → (저장할 dict, 오류). 비운 비밀값은 지금 값으로 채운다."""
+    hub = str(body.get("hub_url", "")).strip().rstrip("/")
+    if not re.fullmatch(r"https?://[A-Za-z0-9.\-\[\]:]+", hub):
+        return None, "허브 주소는 http://192.168.0.50 처럼 주소(와 포트)까지만 적어 주세요."
+    try:
+        poll, ev = int(body.get("poll_sec")), int(body.get("event_sec"))
+    except (TypeError, ValueError):
+        return None, "주기는 숫자로 적어 주세요."
+    if not (10 <= poll <= 3600 and 5 <= ev <= 600):
+        return None, "상태 주기는 10~3600초, 이벤트 주기는 5~600초입니다."
+    tok = body.get("hub_token")
+    tok = HUB_TOKEN if tok is None else str(tok).strip()        # None = 그대로, "" = 지우기(화면의 '토큰 지우기')
+    out = {"hub_url": hub, "hub_token": tok, "poll_sec": poll, "event_sec": ev}
+    d = body.get("db") or {}
+    if d.get("kind") == "sqlite":
+        out["db_url"] = ""
+    else:
+        cur = _pg_parts(DB_URL) or _pg_parts(os.environ.get("HUB_DB_URL", "").strip()) or {}   # SQLite 에서 돌아올 때는 환경변수 암호
+        pg = {"host": str(d.get("host", "")).strip(), "port": d.get("port") or 5432, "name": str(d.get("name", "")).strip(),
+              "user": str(d.get("user", "")).strip(), "params": str(d.get("params", "")).strip().lstrip("?"),
+              "password": d.get("password") or cur.get("password", "")}
+        if not pg["host"] or not pg["name"] or not pg["user"]:
+            return None, "PostgreSQL 은 호스트·DB 이름·사용자를 모두 적어 주세요."
+        try:
+            if not 1 <= int(pg["port"]) <= 65535:
+                raise ValueError
+        except (TypeError, ValueError):
+            return None, "포트는 1~65535 입니다."
+        out["db_url"] = _pg_url(pg)
+    return out, None
+
+
+def _test_hub(url, tok):
+    try:
+        req = urllib.request.Request(url + "/api/v1/state")
+        if tok:
+            req.add_header("Authorization", "Bearer " + tok)
+        with urllib.request.urlopen(req, timeout=5) as r:
+            j = json.loads(r.read().decode())
+        hub = j.get("hub") or {}
+        return {"ok": True, "msg": f'허브 {j.get("id", "?")} 응답 · 펌웨어 {hub.get("fw_build", "?")}'}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "msg": f"허브가 {e.code} 로 거절" + (" — 토큰을 확인하세요" if e.code in (401, 403) else "")}
+    except Exception as e:
+        return {"ok": False, "msg": f"허브에 닿지 않음: {e}"}
+
+
+def _test_db(url):
+    """연결해 보고, 기록기 표가 있으면 몇 건·마지막이 언제인지(이 DB 가 지금까지 쓰던 곳인지 알 수 있게)."""
+    try:
+        st = Store(url) if url else None
+        if st is None:                       # SQLite: 파일을 만들지는 않고 있는지만
+            if not os.path.exists(DB):
+                return {"ok": True, "msg": f"SQLite {DB} — 아직 파일 없음(새로 만듦)"}
+            st = Store(None)
+        try:
+            n, last = st.execute("select count(*), max(ts) from state").fetchone()
+            info = f"기록 {n}건, 마지막 {(last or '–').replace('T', ' ')[:16]}" if n else "기록기 표는 있으나 비어 있음"
+        except Exception:
+            st.recover()
+            info = "기록기 표 없음(새로 만듦)"
+        finally:
+            st.close()
+        return {"ok": True, "msg": ("PostgreSQL 연결됨 · " if url else f"SQLite {DB} · ") + info}
+    except Exception as e:
+        msg = re.sub(r"//[^@/]*@", "//", str(e)).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+        return {"ok": False, "msg": f"DB 연결 실패: {msg}"}
+
+
+def settings_test(body):
+    v, err = _clean(body)
+    if err:
+        return {"error": err}
+    return {"hub": _test_hub(v["hub_url"], v["hub_token"]), "db": _test_db(v["db_url"])}
+
+
+def settings_save(body):
+    if body.get("reset"):
+        try:
+            os.remove(SETTINGS_FILE)
+        except FileNotFoundError:
+            pass
+        restart_soon()
+        return {"ok": True, "msg": "웹 설정을 지웠습니다. 환경변수 값으로 다시 시작합니다."}
+    v, err = _clean(body)
+    if err:
+        return {"error": err}
+    dbt = _test_db(v["db_url"])
+    if not dbt["ok"]:
+        return {"error": dbt["msg"] + " — 저장하지 않았습니다.", "db": dbt}
+    hubt = _test_hub(v["hub_url"], v["hub_token"])
+    os.makedirs(os.path.dirname(SETTINGS_FILE) or ".", exist_ok=True)
+    tmp = SETTINGS_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(dict(v, saved=datetime.now().isoformat(timespec="seconds")), f, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, SETTINGS_FILE)
+    print(f"설정 저장(웹): 허브 {v['hub_url']} · DB {'PostgreSQL' if v['db_url'] else 'SQLite'}", flush=True)
+    restart_soon()
+    return {"ok": True, "hub": hubt, "db": dbt, "msg": "저장했습니다. 새 설정으로 다시 시작합니다."}
+
+
+def restart_soon():
+    """기록 루프가 돌면 그쪽이 안전한 자리에서 다시 뜬다. 화면만 띄운 경우(web)는 여기서 바로."""
+    RESTART.set()
+    if WEB_ONLY:
+        def go():
+            time.sleep(0.5)
+            os.execv(sys.executable, [sys.executable, "-u"] + sys.argv)
+        threading.Thread(target=go, daemon=True).start()
+
 
 def start_web(port, block=False):
     """로그 브라우저. 읽기만 한다. DB 연결은 하나를 잠가서 같이 쓴다(드물게 오는 요청이라 충분)."""
@@ -947,12 +1132,27 @@ def start_web(port, block=False):
             o = self.headers.get("Origin")
             return not o or o == "null" or urlparse(o).netloc == self.headers.get("Host")
 
+        def json_out(self, code, obj):
+            self.send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json")
+
         def do_POST(self):
             u = urlparse(self.path)
-            n = min(int(self.headers.get("Content-Length") or 0), 4096)
-            form = dict(parse_qsl(self.rfile.read(n).decode("utf-8", "replace")))
+            n = min(int(self.headers.get("Content-Length") or 0), 8192)
+            raw = self.rfile.read(n).decode("utf-8", "replace")
             if not self.same_origin():
                 return self.send(403, b"cross-origin", "text/plain")
+            if u.path.startswith("/api/settings"):
+                if not self.session():
+                    return self.json_out(401, {"error": "login"})
+                if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                    return self.json_out(415, {"error": "json only"})     # 다른 사이트의 폼 전송을 막는다
+                try:
+                    body = json.loads(raw or "{}")
+                except ValueError:
+                    return self.json_out(400, {"error": "bad json"})
+                out = settings_test(body) if u.path == "/api/settings/test" else settings_save(body)
+                return self.json_out(400 if "error" in out else 200, out)
+            form = dict(parse_qsl(raw))
             if u.path.endswith("/logout"):
                 return self.go("login", "")
             if not u.path.endswith("/login"):
@@ -992,6 +1192,8 @@ def start_web(port, block=False):
                 if u.path.startswith("/api/"):
                     return self.send(401, b'{"error":"login"}', "application/json")
                 return self.go("login")
+            if u.path == "/api/settings":
+                return self.json_out(200, settings_view())
             if u.path in ("/", "/index.html"):
                 try:
                     with open(WEB_HTML, "rb") as f:                 # 요청마다 읽는다(배포하면 바로 바뀜)
@@ -1043,6 +1245,7 @@ if __name__ == "__main__":
     elif cmd == "import-stg":
         import_stg(sys.argv[2:])
     elif cmd == "web":
+        WEB_ONLY = True
         start_web(int(sys.argv[2]) if len(sys.argv) > 2 else (WEB_PORT or 8497), block=True)
     elif cmd == "to-pg":
         to_pg(sys.argv[2] if len(sys.argv) > 2 else DB)
