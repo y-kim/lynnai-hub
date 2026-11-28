@@ -1,5 +1,6 @@
 {
   "name": "LYNNAI Hub",
   "homeassistant": "2025.1.0",
-  "render_readme": false
+  "render_readme": false,
+  "country": "KR"
 }

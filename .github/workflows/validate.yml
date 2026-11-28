@@ -1,0 +1,28 @@
+# Home Assistant 마켓플레이스(HACS 기본 목록) 등록 요건: HACS 검사와 hassfest 가 오류 없이 통과해야 한다.
+name: Validate
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
