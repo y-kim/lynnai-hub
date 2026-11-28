@@ -1,5 +1,5 @@
 name: 'LYNNAI Hub (Zigbee)'
 packageKey: 'lynnai.hub.zigbee'
-description: 'LYNNAI boiler hub over Zigbee — unofficial, not affiliated with Rinnai (v1.1)'
+description: 'LYNNAI boiler hub over Zigbee — unofficial, not affiliated with Rinnai (v1.2)'
 permissions:
   zigbee: {}
