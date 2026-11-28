@@ -2,7 +2,11 @@
 --
 -- 찾기: SSDP M-SEARCH (ST: urn:lynnai-com:device:hub:1) → 허브가 LYNNAI-ID / LYNNAI-PORT 로 답한다.
 -- 연결: TCP 줄 단위(펌웨어 hub_lan.c)
---   → "hello <토큰>"   ← "ok <id>" | "denied"(허브 버튼 짧게 누른 뒤 3분 안에 다시)
+--   v2(토큰을 선에 싣지 않음): → "hello2 <cn>"  ← "chal <sn>"  → "auth <HMAC(토큰,'c|cn|sn')>"
+--                               ← "ok <id> <HMAC(토큰,'s|sn|cn|id')>" | "denied" | "busy"
+--   v1(페어링·옛 펌웨어):       → "hello <토큰>"   ← "ok <id>" | "denied"(허브 버튼 짧게 누른 뒤 3분 안에 다시)
+--   한 번 v2 가 통한 허브에는 다시 v1(평문 토큰)을 보내지 않는다 — 허브인 척하는 기기가 'denied' 나 옛 판 흉내로
+--   토큰을 받아 가지 못하게(필드 "v2", 저장).
 --   ← "<명령 16진 2자리> <내용 16진>"   → "00 <명령 텍스트 16진>"   ← "ping"(30초마다)
 -- 토큰은 기기마다 한 번 만들어 저장한다. 허브는 버튼을 짧게 누른 뒤 3분(페어링 창) 안에 온 새 토큰만 기억한다.
 -- 허브가 "ok <id>" 로 답한 id 가 찾은 허브의 id 와 같아야 붙는다(다른 기기가 허브인 척 답해도 명령을 보내지 않게).
@@ -12,6 +16,7 @@ local cosock = require "cosock"
 local socket = cosock.socket
 local log = require "log"
 local core = require "core"
+local hmac = require "hmac"
 
 local SSDP_ST = "urn:lynnai-com:device:hub:1"
 local DNI_PREFIX = "lynnai-hub-"
@@ -144,9 +149,39 @@ local function run(device)
     end
     if connected then
       c:settimeout(10)
-      c:send("hello " .. token_of(device) .. "\n")
-      local first = c:receive("*l")
-      local got = first and first:match("^ok (%w+)$")
+      local first, got
+      local v2_seen = device:get_field("v2") == true
+      if device:get_field("try_v1") and not v2_seen then
+        device:set_field("try_v1", nil)
+        c:send("hello " .. token_of(device) .. "\n")            -- v1: 페어링(새 토큰 등록) 또는 v2 를 모르는 옛 펌웨어
+        first = c:receive("*l")
+        got = first and first:match("^ok (%w+)$")
+      else
+        local tok, cn = token_of(device), new_token(device)
+        c:send("hello2 " .. cn .. "\n")
+        local chal = c:receive("*l")
+        local sn = chal and chal:match("^chal (%x+)$")
+        if sn and #sn == 32 then
+          sn = sn:lower()
+          c:send("auth " .. hmac.proof(tok, "c", cn, sn) .. "\n")
+          first = c:receive("*l")
+          local gid, sp = (first or ""):match("^ok (%w+) (%x+)$")
+          if gid then
+            if hmac.same(sp, hmac.proof(tok, "s", sn, cn, gid)) then
+              got = gid
+              if not v2_seen then device:set_field("v2", true, { persist = true }) end
+            else
+              log.warn("허브 증명이 맞지 않음(토큰을 모르는 기기) — 끊음")
+              first, got = "denied", nil
+            end
+          elseif first == "denied" and not v2_seen then
+            device:set_field("try_v1", true)                       -- 허브가 이 토큰을 모름 = 아직 페어링 전 → 다음은 v1
+          end
+        else
+          first = chal
+          if not chal and not v2_seen then device:set_field("try_v1", true) end   -- chal 없이 닫힘 = hello2 를 모르는 옛 펌웨어
+        end
+      end
       if first and first:match("^ok") and got ~= id then
         -- 다른 허브(또는 허브인 척하는 기기)가 답함: 주소를 잊고 다시 찾는다
         log.warn(string.format("허브 id 다름(%s ≠ %s) — 끊고 다시 찾음", tostring(got), id))
@@ -189,8 +224,14 @@ local function run(device)
         mark_lost()
         backoff = 30
       elseif first == "denied" then
-        log.warn("허브가 거절함: 허브 버튼을 짧게 눌러 페어링 창을 연 뒤 새로고침")
-        show(device, "페어링 필요: 허브 버튼 짧게")
+        if device:get_field("v2") == true then
+          -- v2 로 붙던 허브가 거절: 허브에서 토큰이 지워졌거나(초기화) 허브인 척하는 기기. 평문 토큰은 보내지 않는다
+          log.warn("허브가 거절함(v2) — 허브를 초기화했다면 이 허브 기기를 지우고 다시 추가")
+          show(device, "인증 실패: 허브 기기를 다시 추가")
+        else
+          log.warn("허브가 거절함: 허브 버튼을 짧게 눌러 페어링 창을 연 뒤 새로고침")
+          show(device, "페어링 필요: 허브 버튼 짧게")
+        end
         mark_lost()
         backoff = 30
       end

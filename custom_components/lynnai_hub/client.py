@@ -1,8 +1,16 @@
 """TCP client for the hub's LAN channel (no Home Assistant imports here).
 
-    connect to <host>:8484, send  "hello <token>"
-    hub answers                    "ok <hub id>" | "denied" | "busy"
-    then both ways                 "<cmd hex2> <payload hex>", and the hub sends "ping" every 30 s
+    v2 (the token never goes over the wire, firmware v0.10+):
+      -> "hello2 <cn>"          cn = 32 hex random
+      <- "chal <sn>"            sn = the hub's random
+      -> "auth <HMAC-SHA256(token, 'c|cn|sn')>"
+      <- "ok <hub id> <HMAC-SHA256(token, 's|sn|cn|hub id')>" | "denied" | "busy"
+    v1 (pairing a new token, older firmware):
+      -> "hello <token>"        <- "ok <hub id>" | "denied" | "busy"
+    then both ways              "<cmd hex2> <payload hex>", and the hub sends "ping" every 30 s
+
+Once a hub has answered v2, we never send it the token in plain text again (something on the LAN that pretends to be
+the hub — answering "denied" or acting like old firmware — must not be able to collect the token).
 
 A new token is only accepted for three minutes after a short press on the hub's button (pairing).
 The hub keeps at most four tokens and serves two clients at a time.
@@ -12,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import hashlib
+import hmac
 import logging
 import secrets
 
@@ -44,25 +54,64 @@ class HubWrongId(HubError):
     """Something answered, but it is not the hub we were set up with."""
 
 
+class HubLegacy(HubError):
+    """The hub does not speak v2 (older firmware): it closed without a challenge."""
+
+
 def new_token() -> str:
     return secrets.token_hex(16)
 
 
-async def _open(host: str, port: int, token: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str]:
-    """Connect and say hello. Returns the streams and the hub id."""
+def proof(token: str, *parts: str) -> str:
+    """HMAC-SHA256(token, 'a|b|…') in hex — the same as hub_lan.c / hub_lan.py."""
+    return hmac.new(token.encode(), "|".join(parts).encode(), hashlib.sha256).hexdigest()
+
+
+async def _line(reader: asyncio.StreamReader) -> str:
+    return (await asyncio.wait_for(reader.readline(), HELLO_TIMEOUT)).decode(errors="replace").strip()
+
+
+async def _open(
+    host: str, port: int, token: str, v1: bool = False
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str, bool]:
+    """Connect and authenticate. Returns the streams, the hub id and whether it was v2 (the hub proved it knows the
+    token). v1=True sends the token itself (pairing, older firmware) — callers only do that before any v2 success."""
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), CONNECT_TIMEOUT)
     except (OSError, asyncio.TimeoutError) as err:
         raise HubError(f"cannot connect to {host}:{port}: {err}") from err
     try:
-        writer.write(f"hello {token}\n".encode())
-        await writer.drain()
-        first = (await asyncio.wait_for(reader.readline(), HELLO_TIMEOUT)).decode(errors="replace").strip()
-    except (OSError, asyncio.TimeoutError) as err:
+        if v1:
+            writer.write(f"hello {token}\n".encode())
+            await writer.drain()
+            first = await _line(reader)
+            if first.startswith("ok ") and first[3:].isalnum():
+                return reader, writer, first[3:], False
+        else:
+            cn = secrets.token_hex(16)
+            writer.write(f"hello2 {cn}\n".encode())
+            await writer.drain()
+            chal = await _line(reader)
+            sn = chal[5:].lower() if chal.startswith("chal ") else ""
+            if len(sn) != 32 or any(c not in "0123456789abcdef" for c in sn):
+                if not chal:
+                    raise HubLegacy("the hub closed without a challenge (older firmware)")
+                first = chal
+            else:
+                writer.write(f"auth {proof(token, 'c', cn, sn)}\n".encode())
+                await writer.drain()
+                first = await _line(reader)
+                parts = first.split(" ")
+                if len(parts) == 3 and parts[0] == "ok" and parts[1].isalnum():
+                    if hmac.compare_digest(parts[2], proof(token, "s", sn, cn, parts[1])):
+                        return reader, writer, parts[1], True
+                    raise HubWrongId(f"{host}:{port} does not know our token (its proof does not match)")
+    except (OSError, asyncio.TimeoutError, ValueError) as err:
         writer.close()
         raise HubError(f"no answer from {host}:{port}: {err}") from err
-    if first.startswith("ok ") and first[3:].isalnum():
-        return reader, writer, first[3:]
+    except HubError:
+        writer.close()
+        raise
     writer.close()
     if first == "denied":
         raise HubDenied("the hub rejected the token")
@@ -71,15 +120,30 @@ async def _open(host: str, port: int, token: str) -> tuple[asyncio.StreamReader,
     raise HubError(f"unexpected answer from {host}:{port}: {first!r}")
 
 
-async def try_pair(host: str, port: int, token: str) -> str:
-    """One connection attempt for the config flow. Returns the hub id or raises."""
-    _reader, writer, hub_id = await _open(host, port, token)
+async def _close(writer: asyncio.StreamWriter) -> None:
     writer.close()
     try:
         await writer.wait_closed()
     except OSError:
         pass
-    return hub_id
+
+
+async def try_pair(host: str, port: int, token: str) -> tuple[str, bool]:
+    """Connection attempts for the config flow (a new token, so the hub cannot know it yet).
+    Returns (hub id, v2): v2 = the hub proved it knows the token, so we never send it in plain text again."""
+    try:
+        _reader, writer, hub_id, v2 = await _open(host, port, token)
+    except (HubDenied, HubLegacy):
+        _reader, writer, hub_id, v2 = await _open(host, port, token, v1=True)   # registers it (pairing window)
+        await _close(writer)
+        try:                                                                    # newer firmware: confirm v2 now
+            _reader, writer, hub_id2, v2 = await _open(host, port, token)
+            if hub_id2 != hub_id:
+                raise HubWrongId(f"expected hub {hub_id}, got {hub_id2}")
+        except (HubDenied, HubLegacy):
+            return hub_id, False
+    await _close(writer)
+    return hub_id, v2
 
 
 class _SsdpProtocol(asyncio.DatagramProtocol):
@@ -93,7 +157,7 @@ class _SsdpProtocol(asyncio.DatagramProtocol):
             if sep:
                 headers[key.strip().lower()] = value.strip()
         hub_id, port = headers.get("lynnai-id"), headers.get("lynnai-port", "")
-        if hub_id and hub_id.isalnum() and port.isdigit():
+        if hub_id and hub_id.isalnum() and len(hub_id) <= 32 and port.isdigit() and 1 <= int(port) <= 65535:
             self.found[hub_id] = (addr[0], int(port))
 
 
@@ -130,6 +194,8 @@ class HubClient:
         on_message: Callable[[int, bytes], None],
         on_connection: Callable[[bool, str | None], None],
         find_host: Callable[[], Awaitable[tuple[str, int] | None]] | None = None,
+        v2_seen: bool = False,
+        on_verified: Callable[[str, int], None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -138,6 +204,10 @@ class HubClient:
         self._on_message = on_message
         self._on_connection = on_connection
         self._find_host = find_host
+        self.v2_seen = v2_seen              # the hub has proved itself once: never send the token in plain text
+        self._on_verified = on_verified     # called after a v2 connection to a new address (persist it)
+        self._try_v1 = False
+        self._verified_at: tuple[str, int] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._task: asyncio.Task | None = None
         self.connected = False
@@ -178,10 +248,16 @@ class HubClient:
         while True:
             reason: str | None = None
             try:
-                reader, writer, hub_id = await _open(self.host, self.port, self._token)
+                use_v1, self._try_v1 = self._try_v1 and not self.v2_seen, False
+                reader, writer, hub_id, v2 = await _open(self.host, self.port, self._token, v1=use_v1)
                 if hub_id != self._hub_id:
                     writer.close()
                     raise HubWrongId(f"expected hub {self._hub_id}, {self.host} is {hub_id}")
+                if v2 and (not self.v2_seen or self._verified_at != (self.host, self.port)):
+                    self.v2_seen = True
+                    self._verified_at = (self.host, self.port)
+                    if self._on_verified:
+                        self._on_verified(self.host, self.port)
                 self._writer = writer
                 self.connected = True
                 backoff = BACKOFF_FIRST
@@ -189,8 +265,12 @@ class HubClient:
                 self._on_connection(True, None)
                 await self._read(reader)
                 reason = "connection lost"
+            except HubLegacy as err:
+                reason = str(err)
+                self._try_v1 = not self.v2_seen         # older firmware: v1 next time (never after a v2 success)
             except HubDenied:
                 reason, backoff = "pairing needed", BACKOFF_REJECTED
+                self._try_v1 = not self.v2_seen         # the hub does not know the token yet: v1 registers it
             except HubBusy:
                 reason, backoff = "hub busy", BACKOFF_REJECTED
             except HubWrongId as err:
@@ -199,6 +279,11 @@ class HubClient:
             except HubError as err:
                 reason = str(err)
                 await self._relocate()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - nothing may end the reconnect loop for good
+                _LOGGER.exception("Unexpected error talking to hub %s", self._hub_id)
+                reason = f"unexpected error: {err}"
             finally:
                 was = self.connected
                 self._drop()

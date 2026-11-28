@@ -5,6 +5,7 @@ MANUFACTURER = "Lynnai"
 
 CONF_HUB_ID = "hub_id"
 CONF_TOKEN = "token"
+CONF_V2 = "v2"                  # the hub has proved it knows the token: never send it in plain text again
 
 DEFAULT_PORT = 8484
 SSDP_ST = "urn:lynnai-com:device:hub:1"

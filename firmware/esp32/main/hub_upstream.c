@@ -762,6 +762,7 @@ bool hub_upstream_apply(const char *form, char *msg, size_t len)
         return true;
     }
     if (httpd_query_key_value(form, "conn", v, sizeof(v)) == ESP_OK) {
+        hub_lan_guest_repair();
         snprintf(msg, len, "중심 허브에 다시 연결합니다");
         return true;
     }

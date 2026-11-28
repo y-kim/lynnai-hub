@@ -9,7 +9,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .client import HubClient, discover
-from .const import CONF_HUB_ID, CONF_TOKEN, DEFAULT_PORT, DOMAIN, MANUFACTURER, SIGNAL_NEW, SIGNAL_UPDATE
+from .const import CONF_HUB_ID, CONF_TOKEN, CONF_V2, DEFAULT_PORT, DOMAIN, MANUFACTURER, SIGNAL_NEW, SIGNAL_UPDATE
 from .hub import LynnaiHub
 
 PLATFORMS = [
@@ -31,6 +31,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry) -> bo
     async def find_host() -> tuple[str, int] | None:
         return (await discover()).get(hub.hub_id)
 
+    @callback
+    def verified(host: str, port: int) -> None:
+        """The hub proved itself (v2) at host:port: remember that, and the address (it may have moved)."""
+        new = {**entry.data, CONF_HOST: host, CONF_PORT: port, CONF_V2: True}
+        if new != dict(entry.data):
+            hass.config_entries.async_update_entry(entry, data=new)
+
     hub.client = HubClient(
         entry.data[CONF_HOST],
         entry.data.get(CONF_PORT, DEFAULT_PORT),
@@ -39,6 +46,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry) -> bo
         hub.handle_message,
         hub.handle_connection,
         find_host,
+        v2_seen=entry.data.get(CONF_V2, False),
+        on_verified=verified,
     )
 
     @callback

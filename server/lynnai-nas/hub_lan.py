@@ -5,12 +5,18 @@ hub_lan.py (대응 ESP32: hub_lan.c) -- SmartThings LAN Edge 드라이버가 붙
 찾기(SSDP): 239.255.255.250:1900 의 M-SEARCH(ST: urn:lynnai-com:device:hub:1 / ssdp:all)에
   HTTP/1.1 200 OK + LYNNAI-ID + LYNNAI-PORT 로 답한다.
 연결(TCP 8484, 줄 단위):
+  [v2 — 토큰을 선에 싣지 않는다, ESP32 hub_lan.c 와 같음]
+  드라이버 → "hello2 <cn32hex>"   허브 → "chal <sn32hex>"
+  드라이버 → "auth <HMAC-SHA256(토큰, 'c|cn|sn') 64hex>"
+  허브 → "ok <id> <HMAC-SHA256(토큰, 's|sn|cn|id')>" | "denied"(1초 늦게) | "busy"
+  [v1 — 페어링(새 토큰 등록)과 옛 드라이버]
   드라이버 → "hello <토큰32hex>"   허브 → "ok <id>" | "denied"(1초 늦게) | "busy"
   이후 양쪽 "<명령 16진 2자리> <내용 16진>\n",  허브는 30초마다 "ping"
 토큰: 새 드라이버는 페어링 창(pairing_open, NAS 는 LAN_PAIR=1 로 시작하면 처음 600초)에서만 등록(첫 설치도 같음).
   최대 4개, 꽉 차면 가장 오래 전에 등록한 것부터 바꾼다. 토큰 파일을 못 읽으면(없는 것 말고) 등록도 안 받는다.
 인증 전 연결은 동시에 MAX_PREAUTH 개, 5초 안에 hello 없으면 끊음. 보내기는 기다리지 않는다(읽지 않는 상대는 끊음).
 """
+import hashlib
 import hmac
 import json
 import os
@@ -34,6 +40,11 @@ _Selector = getattr(selectors, "PollSelector", selectors.DefaultSelector)
 
 def _token_ok(t):
     return isinstance(t, str) and len(t) == 32 and all(c in _HEX for c in t)
+
+
+def proof(token, *parts):
+    """HMAC-SHA256(토큰, 'a|b|…') 16진 — v2 인증(ESP32 hub_lan.c hmac_hex 와 같은 계산)."""
+    return hmac.new(token.encode(), "|".join(parts).encode(), hashlib.sha256).hexdigest()
 
 
 class LanUplink:
@@ -133,16 +144,38 @@ class LanUplink:
                     self.clients.remove(w)
 
     # ---- TCP ----
-    def _hello(self, conn, addr, line):
-        """인증 전 첫 줄. 통과하면 clients 에 넣고 True."""
-        if line.startswith("hello ") and self._accept_token(line[6:]):
+    def _token_by_proof(self, cn, sn, cp):
+        """cp 를 만든 저장 토큰(없으면 None). 토큰마다 끝까지 계산해 시간 차이를 줄인다."""
+        hit = None
+        with self.lock:
+            for t in self.tokens:
+                if hmac.compare_digest(proof(t, "c", cn, sn), cp) and hit is None:
+                    hit = t
+        return hit
+
+    def _hello(self, conn, addr, line, st):
+        """인증 전 줄. 통과하면 clients 에 넣고 True, 더 기다리면 None(v2 첫 줄), 끊으면 False.
+        st = 이 연결의 v2 상태 {"cn", "sn"}."""
+        tok, v2 = None, False
+        if not st.get("sn") and line.startswith("hello2 "):
+            cn = line[7:].split(" ", 1)[0].lower()
+            if len(cn) == 32 and all(c in _HEX for c in cn):
+                st["cn"], st["sn"] = cn, os.urandom(16).hex()
+                self._send_now(conn, ("chal %s\n" % st["sn"]).encode())
+                return None
+        elif st.get("sn") and line.startswith("auth "):
+            tok, v2 = self._token_by_proof(st["cn"], st["sn"], line[5:].strip().lower()), True
+        elif not st.get("sn") and line.startswith("hello ") and self._accept_token(line[6:].split(" ", 1)[0]):
+            tok = line[6:].split(" ", 1)[0]
+        if tok:
             with self.lock:
                 if len(self.clients) >= MAX_CLIENTS:
                     self._send_now(conn, b"busy\n")
                     return False
-                self._send_now(conn, ("ok %s\n" % self.id).encode())   # 등록 전에 보내 다른 줄과 섞이지 않게
+                ok = ("ok %s %s\n" % (self.id, proof(tok, "s", st["sn"], st["cn"], self.id))) if v2 else ("ok %s\n" % self.id)
+                self._send_now(conn, ok.encode())   # 등록 전에 보내 다른 줄과 섞이지 않게
                 self.clients.append(conn)
-            self.log(f"[lan] 드라이버 연결 {addr[0]}")
+            self.log(f"[lan] 드라이버 연결 {addr[0]}" + (" (v2)" if v2 else ""))
             return True
         time.sleep(DENY_DELAY)                       # 토큰 맞히기 늦추기
         self._send_now(conn, b"denied\n")
@@ -152,6 +185,7 @@ class LanUplink:
     def _client(self, conn, addr):
         conn.settimeout(1)                           # 인증 전엔 1초마다 깨어 5초 기한을 본다
         authed, pre = False, True                    # pre = 인증 전 연결 수에 들어가 있음
+        st = {}                                      # v2 난수(cn·sn)
         buf = b""
         t0 = last_ping = time.monotonic()
         try:
@@ -171,7 +205,10 @@ class LanUplink:
                     line, buf = buf.split(b"\n", 1)
                     line = line.strip().decode("latin1")
                     if not authed:
-                        if not self._hello(conn, addr, line):
+                        r = self._hello(conn, addr, line, st)
+                        if r is None:
+                            continue
+                        if not r:
                             return
                         authed = True
                         with self.lock:

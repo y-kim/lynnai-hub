@@ -37,6 +37,7 @@ async def test_pairing_needs_the_button(hass: HomeAssistant, fake_hub):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"]["hub_id"] == HUB_ID and result["data"]["token"] in fake_hub.tokens
     assert result["result"].unique_id == HUB_ID
+    assert result["data"]["v2"] is True                 # paired with v1, then the hub proved itself with v2
 
 
 async def test_unreachable_host(hass: HomeAssistant):
@@ -81,4 +82,17 @@ async def test_discovered_by_ssdp(hass: HomeAssistant, fake_hub):
         result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "ssdp"}, data=info2)
         await hass.async_block_till_done()
     assert result["type"] is FlowResultType.ABORT and result["reason"] == "already_configured"
-    assert hass.config_entries.async_entries(DOMAIN)[0].data["host"] == "127.0.0.2"
+    # an announcement is not proof: the address is not moved by it (the running client re-finds a moved hub itself)
+    assert hass.config_entries.async_entries(DOMAIN)[0].data["host"] == "127.0.0.1"
+
+
+async def test_pairing_with_older_firmware(hass: HomeAssistant, fake_hub):
+    """Firmware without v2 closes on 'hello2': pairing falls back to v1 and the entry is not marked v2."""
+    fake_hub.legacy = True
+    fake_hub.pairing_open = True
+    with patch("custom_components.lynnai_hub.config_flow.discover", return_value={}):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"host": "127.0.0.1", "port": fake_hub.port})
+    with patch("custom_components.lynnai_hub.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY and result["data"]["v2"] is False

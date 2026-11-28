@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import secrets
 
 import pytest
 
@@ -23,10 +26,20 @@ def f09(z1: int = 0x83, z2: int = 0x81, living: int = 0x83) -> str:
     return b.hex()
 
 
+def _proof(token: str, *parts: str) -> str:
+    return hmac.new(token.encode(), "|".join(parts).encode(), hashlib.sha256).hexdigest()
+
+
 class FakeHub:
-    """Accepts 'hello <token>' and then exchanges '<cmd> <hex>' lines, like firmware/esp32/main/hub_lan.c."""
+    """Speaks the LAN channel like firmware/esp32/main/hub_lan.c: v2 ('hello2' → 'chal' → 'auth' → 'ok <id> <proof>')
+    and v1 ('hello <token>', pairing). legacy=True acts like firmware before v2 (closes on 'hello2').
+    impostor=True knows no token: answers v2 with a wrong proof and records any token it is sent in plain text."""
 
     def __init__(self) -> None:
+        self.legacy = False
+        self.impostor = False
+        self.plain_tokens: list[str] = []               # tokens received in plain text ("hello <token>")
+        self.v2_logins = 0
         self.tokens: set[str] = set()
         self.pairing_open = False
         self.requests: list[str] = []
@@ -50,15 +63,38 @@ class FakeHub:
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         line = (await reader.readline()).decode().strip()
-        token = line[6:] if line.startswith("hello ") else ""
-        if token and self.pairing_open:
-            self.tokens.add(token)
-        if token not in self.tokens:
-            writer.write(b"denied\n")
+        ok = f"ok {HUB_ID}\n"
+        if line.startswith("hello2 "):
+            if self.legacy:                             # older firmware does not know hello2: closes
+                writer.close()
+                return
+            cn, sn = line[7:].split(" ")[0], secrets.token_hex(16)
+            writer.write(f"chal {sn}\n".encode())
             await writer.drain()
-            writer.close()
-            return
-        writer.write(f"ok {HUB_ID}\n".encode())
+            auth = (await reader.readline()).decode().strip()
+            cp = auth[5:] if auth.startswith("auth ") else ""
+            token = next((t for t in self.tokens if hmac.compare_digest(_proof(t, "c", cn, sn), cp)), None)
+            if self.impostor:
+                token = "0" * 32                        # pretends to accept, cannot prove
+            if token is None:
+                writer.write(b"denied\n")
+                await writer.drain()
+                writer.close()
+                return
+            self.v2_logins += 1
+            ok = f"ok {HUB_ID} {_proof(token, 's', sn, cn, HUB_ID)}\n"
+        else:
+            token = line[6:] if line.startswith("hello ") else ""
+            if token:
+                self.plain_tokens.append(token)
+            if token and self.pairing_open:
+                self.tokens.add(token)
+            if token not in self.tokens:
+                writer.write(b"denied\n")
+                await writer.drain()
+                writer.close()
+                return
+        writer.write(ok.encode())
         self.writers.append(writer)
         for cmd, payload in self.on_hello:
             writer.write(f"{cmd:02x} {payload.hex()}\n".encode())

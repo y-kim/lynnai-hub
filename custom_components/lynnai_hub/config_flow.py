@@ -11,7 +11,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT
 
 from .client import HubBusy, HubDenied, HubError, discover, new_token, try_pair
-from .const import CONF_HUB_ID, CONF_TOKEN, DEFAULT_PORT, DOMAIN
+from .const import CONF_HUB_ID, CONF_TOKEN, CONF_V2, DEFAULT_PORT, DOMAIN
 
 
 class LynnaiHubConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -60,7 +60,10 @@ class LynnaiHubConfigFlow(ConfigFlow, domain=DOMAIN):
             port = DEFAULT_PORT
 
         await self.async_set_unique_id(hub_id)
-        self._abort_if_unique_id_configured(updates={CONF_HOST: host, CONF_PORT: port})
+        # An announcement is not proof: do not move a configured hub to the announced address (anything on the LAN can
+        # announce our hub id). The running client finds a moved hub itself and keeps the address only after the hub
+        # has proved it knows the token.
+        self._abort_if_unique_id_configured()
         self._host, self._port, self._expect_id = host, port, hub_id
         self.context["title_placeholders"] = {"hub_id": hub_id}
         return await self.async_step_pair()
@@ -70,7 +73,7 @@ class LynnaiHubConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                hub_id = await try_pair(self._host, self._port, self._token)
+                hub_id, v2 = await try_pair(self._host, self._port, self._token)
             except HubDenied:
                 errors["base"] = "denied"
             except HubBusy:
@@ -85,7 +88,8 @@ class LynnaiHubConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._abort_if_unique_id_configured()
                     return self.async_create_entry(
                         title=f"LYNNAI Hub {hub_id}",
-                        data={CONF_HOST: self._host, CONF_PORT: self._port, CONF_TOKEN: self._token, CONF_HUB_ID: hub_id},
+                        data={CONF_HOST: self._host, CONF_PORT: self._port, CONF_TOKEN: self._token, CONF_HUB_ID: hub_id,
+                              CONF_V2: v2},
                     )
         return self.async_show_form(
             step_id="pair",
