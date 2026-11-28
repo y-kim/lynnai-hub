@@ -536,19 +536,20 @@ static esp_err_t admin_page(httpd_req_t *req, const char *msg, bool ok)
     cat_esc(b, cap, s_st->sta_ssid);
     strlcat(b, "\" required>"
                "<label>집 Wi-Fi 암호</label><input class=wpw type=password name=sta_pass maxlength=63 "
-               "autocomplete=off data-1p-ignore data-lpignore=true data-bwignore data-form-type=other value=\"", cap);
-    cat_esc(b, cap, s_st->sta_pass);
+               "autocomplete=off data-1p-ignore data-lpignore=true data-bwignore data-form-type=other placeholder=\"", cap);
+    /* 암호는 화면에 싣지 않는다(응답이 평문 HTTP 로 오가고, 디버그 키 요청에도 화면이 나갔다) — 비우면 지금 암호 그대로 */
+    strlcat(b, s_st->sta_pass[0] ? "저장된 암호 그대로(바꿀 때만 입력)" : "암호 없음(개방형)", cap);
     strlcat(b, "\">"
+               "<label class=chk><input type=checkbox name=sta_open value=1> 암호 없는 Wi-Fi(개방형)</label>"
                "<label>허브 네트워크 이름</label><input name=ap_ssid maxlength=32 autocapitalize=off value=\"", cap);
     cat_esc(b, cap, s_st->ap_ssid);
     strlcat(b, "\" required>"
                "<label>허브 Wi-Fi 암호 (8자 이상)</label><input class=wpw type=password name=ap_pass minlength=8 maxlength=63 "
-               "autocomplete=off data-1p-ignore data-lpignore=true data-bwignore data-form-type=other value=\"", cap);
-    cat_esc(b, cap, s_st->ap_pass);
-    strlcat(b, "\" required>"
+               "autocomplete=off data-1p-ignore data-lpignore=true data-bwignore data-form-type=other "
+               "placeholder=\"저장된 암호 그대로(바꿀 때만 입력)\">"
                "<label class=chk><input type=checkbox onclick=\"var c=this.checked;document.querySelectorAll('.wpw').forEach(function(e){e.type=c?'text':'password'})\"> 암호 보기</label>"
                "<button>Wi-Fi 바꾸기</button></form>"
-               "<p class=muted>집 Wi-Fi 이름·암호와 허브 자체 AP 이름·암호입니다. 암호는 '암호 보기'로 확인할 수 있습니다.</p></div>", cap);
+               "<p class=muted>집 Wi-Fi 이름·암호와 허브 자체 AP 이름·암호입니다. 저장된 암호는 보여 주지 않습니다 — 암호 칸을 비워 두면 그대로 두고, 집 Wi-Fi 이름을 바꿀 때는 새 암호를 적어야 합니다.</p></div>", cap);
     FLUSH();
     strlcat(b, "<h2>관리자 암호</h2><div class=card><form method=post action=/admin/password autocomplete=off>"
                "<label>현재 암호</label><input type=password name=cur autocomplete=current-password required>"
@@ -1019,7 +1020,22 @@ static esp_err_t wifi_post(httpd_req_t *req)
         form_get(body, "sta_pass", sp, PB);
         form_get(body, "ap_ssid", as, SB);
         form_get(body, "ap_pass", ap, PB);
-        if (hub_state_set_wifi(s_st, ss, sp, as, ap, err, sizeof(err)) != ESP_OK) {
+        char open_[4] = "";
+        form_get(body, "sta_open", open_, sizeof(open_));
+        /* 화면은 저장된 암호를 싣지 않는다: 비운 칸 = 지금 암호 그대로. 단 집 Wi-Fi 이름이 바뀌면 옛 암호를 새 망에 쓰지 않는다 */
+        if (!sp[0] && !open_[0]) {
+            if (strcmp(ss, s_st->sta_ssid)) {
+                msg = "집 Wi-Fi 이름을 바꿀 때는 새 암호를 적어 주세요(암호 없는 망이면 '암호 없는 Wi-Fi' 선택)";
+            } else {
+                strlcpy(sp, s_st->sta_pass, PB);
+            }
+        }
+        if (!ap[0]) {
+            strlcpy(ap, s_st->ap_pass, PB);
+        }
+        if (msg) {
+            /* 위에서 거절 */
+        } else if (hub_state_set_wifi(s_st, ss, sp, as, ap, err, sizeof(err)) != ESP_OK) {
             msg = err;
         } else {
             ok = true;
@@ -1082,9 +1098,19 @@ static esp_err_t system_post(httpd_req_t *req)
     if (read_body(req, body, sizeof(body)) >= 0) {
         form_get(body, "op", op, sizeof(op));
     }
+    bool admin = authed(req);
     if (!strcmp(op, "reboot")) {
         hub_ota_schedule_reboot();         /* 응답(아래 페이지)을 먼저 보낸 뒤 1.5초 있다 재시작 */
+        if (!admin) {                      /* 디버그 키: 관리 화면 전체(설정값)를 내주지 않고 짧은 글자만 */
+            httpd_resp_set_type(req, "text/plain; charset=utf-8");
+            return httpd_resp_sendstr(req, "재부팅합니다");
+        }
         return admin_page(req, "재부팅합니다 — 10~20초 뒤 관리 화면을 새로고침하세요. Zigbee 가 다시 가입됩니다.", true);
+    }
+    if (!admin) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        return httpd_resp_sendstr(req, "잘못된 요청");
     }
     return admin_page(req, "잘못된 요청", false);
 }
