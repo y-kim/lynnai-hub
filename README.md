@@ -123,7 +123,8 @@ SmartThings 앱에서 보이는 화면입니다(실제 화면을 따라 그린 �
 ## 보안
 
 - **펌웨어 이미지에 비밀값이 없다**: 기기 접속용 TLS 인증서·키는 허브마다 첫 부팅 때 직접 만든다(RSA-2048).
-  펌웨어에 들어 있는 인증서는 공개 정보인 린나이 클라우드 CA 뿐이다.
+  펌웨어에 들어 있는 인증서는 공개 정보뿐이다: 린나이 클라우드 CA(`cloud_ca.crt`)와 가스 요금 서버 검증용 공개 루트
+  CA(`gas_ca.pem`, Google Trust Services Root R4).
 - **클라우드 검증**: 허브(와 NAS 프록시)는 린나이 클라우드 인증서를 사설 CA "ckstack" 과 인증서 이름
   (`dev2.ckpush.com`)으로 검증하고, 검증할 수 없으면 붙지 않는다.
 - **받는 쪽 제한**: 기기용 MQTT(8883)·`/key/server` 는 허브 AP 대역에서만 받는다. 허브 AP 에 붙었더라도 등록된 기기(버튼 등록,
@@ -178,9 +179,21 @@ and returns to proxy on its own.
 Tested with: Rinnai **WF-S6000** boiler controller, Rinnai **RICH-WCR(N)** room thermostat, ESP32‑C6‑DevKitC‑1 v1.2,
 SmartThings Station and Smart Home Hub (V4). Other models are untested.
 
-The firmware image carries no secrets: each hub generates its own device‑facing TLS key on first boot, and verifies
-the Rinnai cloud against its private CA. Stored data can optionally be encrypted (NVS, HMAC key burned into an eFuse block
-chosen on the admin page — irreversible, off by default).
+This is an **unofficial**, reverse‑engineered project with no affiliation to Rinnai. Use at your own risk.
+
+Security notes (details in [docs/esp32-hub.md §7](docs/esp32-hub.md#7-보안-메모), Korean):
+- The firmware image carries no secrets: each hub generates its own device‑facing TLS key on first boot, and verifies
+  the Rinnai cloud against its private CA. Stored data can optionally be encrypted (NVS, HMAC key burned into an eFuse
+  block chosen on the admin page — irreversible, off by default).
+- The admin page and the LAN channel are plain HTTP/TCP on your home network. Drivers, Home Assistant and satellite hubs
+  authenticate with an HMAC challenge–response (the token is never sent after pairing). The remote debug key is as
+  powerful as the admin password (it can upload unsigned firmware).
+- What the hub sends out: the Rinnai cloud traffic it relays (proxy mode only); the gas‑tariff server `gas.yangsu.kim`
+  (only with a gas meter or boiler — rates for the chosen region, and at the end of each billing period that period's
+  usage and region to get the bill); NTP. Nothing else leaves your LAN.
+
+Gas bill: with a pulse gas meter on the hub — or, without one, the boiler's own hourly totals — the hub estimates this
+billing period's gas and bill and shows them on the admin page, the SmartThings boiler card and Home Assistant.
 
 License: MIT (see `LICENSE`) for this repository's source. The firmware binary also contains third-party components
 — notably wolfSSL under GPL-3.0 — see `NOTICE`.

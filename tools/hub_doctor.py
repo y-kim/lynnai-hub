@@ -122,8 +122,15 @@ def check_stats(host, token):
     c = s.get("count", {})
     up_min = s.get("up", 0) / 60000
 
-    # 2. Zigbee
-    if s.get("zb_joined_now"):
+    # 2. Zigbee — 연결 방식에서 Zigbee 를 끈 허브(위성 허브·LAN 전용)는 스택을 띄우지 않으므로 미가입이 정상
+    zb_used = True
+    try:
+        zb_used = bool(get_json(host, "/api/v1/state", token).get("zigbee", {}).get("ready", True))
+    except Exception:
+        pass
+    if not zb_used:
+        add("OK", "Zigbee 를 쓰지 않음(연결 방식 — 위성 허브·LAN 전용)")
+    elif s.get("zb_joined_now"):
         add("OK", "Zigbee 가입됨")
     else:
         detail = f"가동 {up_min:.0f}분 · 가입 실패 {c.get('zb_join_fail', 0)}회 · 성공 {c.get('zb_joined', 0)}회"

@@ -394,8 +394,8 @@ SmartThings 허브의 Zigbee 채널을 바꾸는 것으로 나아질 수 있습�
 ### 6.3 네트워크 진단
 
 ```sh
-python3 tools/hub_doctor.py                    # 허브 API 로 점검(기본 192.168.0.50, --host 로 변경)
-python3 tools/hub_doctor.py --token <토큰>     # 관리 화면에서 API 토큰을 켠 경우
+python3 tools/hub_doctor.py --host <허브 IP>    # 허브 API 로 점검(--host 가 없으면 API 점검은 건너뜀)
+python3 tools/hub_doctor.py --host <허브 IP> --token <토큰>   # 관리 화면에서 API 토큰을 켠 경우
 python3 tools/hub_doctor.py --st               # SmartThings CLI 로 ST 기기 상태도 점검
 ```
 
