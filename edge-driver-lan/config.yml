@@ -1,6 +1,6 @@
 name: 'LYNNAI Hub (LAN)'
 packageKey: 'lynnai.hub.lan'
-description: 'LYNNAI boiler hub over the home LAN — unofficial, not affiliated with Rinnai (v0.9)'
+description: 'LYNNAI boiler hub over the home LAN — unofficial, not affiliated with Rinnai (v1.0)'
 permissions:
   lan: {}
   discovery: {}
