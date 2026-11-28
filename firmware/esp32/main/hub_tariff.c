@@ -33,6 +33,7 @@
 #include "hub_plugins.h"
 #include "hub_rinnai.h"
 #include "hub_tariff.h"
+#include "hub_wifi.h"
 
 static const char *TAG = "HUB_TARIFF";
 
@@ -261,12 +262,37 @@ static esp_err_t on_http(esp_http_client_event_t *e)
     return ESP_OK;
 }
 
+/* 전역 리졸버가 허브 AP 의 캡티브 DNS(클라우드 이름만 답함)로 잡혀 있을 수 있어, 조회 직전 집 쪽 DNS 로 맞춘다.
+ * 공용 DNS(1.1.1.1 등)로 바꾸지 않는다 — 외부 DNS 를 막은 집에서도 되고, 집 DNS 의 설정(린나이 주소 고정 등)도
+ * 그대로 따른다(프록시의 클라우드 이름 조회와 같은 후보: DHCP 로 받은 DNS → 보조 → 공유기, 허브 AP 주소는 뺀다). */
 static void use_sta_dns(void)
 {
-    ip_addr_t d1 = IPADDR4_INIT_BYTES(1, 1, 1, 1);
-    ip_addr_t d2 = IPADDR4_INIT_BYTES(8, 8, 8, 8);
-    dns_setserver(0, &d1);
-    dns_setserver(1, &d2);
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!sta) {
+        return;
+    }
+    uint32_t ap = hub_wifi_ap_ip(), cand[3] = { 0 };
+    int nc = 0;
+    esp_netif_dns_info_t d;
+    for (int k = 0; k < 2; k++) {
+        if (esp_netif_get_dns_info(sta, k == 0 ? ESP_NETIF_DNS_MAIN : ESP_NETIF_DNS_BACKUP, &d) == ESP_OK &&
+            d.ip.type == ESP_IPADDR_TYPE_V4 && d.ip.u_addr.ip4.addr && d.ip.u_addr.ip4.addr != ap) {
+            cand[nc++] = d.ip.u_addr.ip4.addr;
+        }
+    }
+    esp_netif_ip_info_t ip;
+    if (esp_netif_get_ip_info(sta, &ip) == ESP_OK && ip.gw.addr) {
+        cand[nc++] = ip.gw.addr;                     /* 공유기(대개 DNS 중계도 함) */
+    }
+    for (int i = 0, slot = 0; i < nc && slot < 2; i++) {
+        bool dup = false;
+        for (int j = 0; j < i; j++) dup |= cand[j] == cand[i];
+        if (dup) continue;
+        ip_addr_t a = { 0 };
+        a.type = IPADDR_TYPE_V4;
+        ip4_addr_set_u32(ip_2_ip4(&a), cand[i]);
+        dns_setserver(slot++, &a);
+    }
 }
 
 /* 성공하면 받은 바이트 수, 실패 -1. */
@@ -660,6 +686,12 @@ static void tariff_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(FIRST_DELAY_S * 1000));
     int64_t last_fetch_us = 0;
     for (;;) {
+        /* 요금 서버(구역 목록·단가 받기, 기간 끝 청구액 확인)는 셀 것이 있을 때만 — 가스 계량기 플러그인을 켰거나
+         * 보일러를 아는 허브. 위성 허브(방만)·센서만 쓰는 허브는 밖으로 아무것도 보내지 않는다 */
+        if (!hub_plugin_enabled("gas") && !hub_rinnai_has_boiler(NULL)) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(60 * 1000));
+            continue;
+        }
         if (!s_regs_got) fetch_regions();
         months_update();
         bool need_retry = false;
