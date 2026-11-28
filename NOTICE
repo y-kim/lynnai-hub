@@ -1,0 +1,20 @@
+LYNNAI Hub — third-party components
+
+This repository's own source code is licensed under the MIT License (see LICENSE).
+
+The ESP32-C6 hub firmware *binary* (release images and OTA files) is built with third-party
+components that keep their own licenses:
+
+| Component | Used for | License |
+|---|---|---|
+| wolfSSL 5.8.2 (`wolfssl/wolfssl`, ESP Component Registry) | TLS 1.1 server toward the Rinnai devices (they cannot do TLS 1.2) | GPL-3.0-or-later, or a commercial license from wolfSSL Inc. |
+| ESP-IDF 5.5 (incl. lwIP, FreeRTOS, mbedTLS, esp-tls) | operating system, network stack, TLS 1.2 client toward the cloud | Apache-2.0 (and the licenses of its bundled parts) |
+| esp-zigbee-lib 2.1 (`espressif/esp-zigbee-lib`) | Zigbee stack | Espressif license: binary library, for use on Espressif chips |
+| led_strip (`espressif/led_strip`) | status LED | Apache-2.0 |
+
+Because wolfSSL is linked into the firmware under the GPL-3.0, distributing the firmware binary is subject to the
+GPL-3.0 terms (the complete corresponding source is this repository plus the component versions pinned in
+`firmware/esp32/dependencies.lock`). This note is information, not legal advice.
+
+The SmartThings Edge drivers, the Home Assistant integration and the NAS server contain no third-party code beyond
+their platforms' own libraries.

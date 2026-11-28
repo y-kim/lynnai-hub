@@ -1,7 +1,7 @@
 ## IDF Component Manager Manifest File
 dependencies:
   espressif/led_strip: "^3.0.0"
-  wolfssl/wolfssl: "*"
+  wolfssl/wolfssl: "==5.8.2~1"        # 고정(락 파일과 같음) — 기기 쪽 TLS 1.1 서버. GPLv3, NOTICE 참고
   ## Required IDF version
   idf:
     version: ">=5.2"

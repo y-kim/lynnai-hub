@@ -56,6 +56,6 @@ direct_dependencies:
 - switch_driver
 - temp_sensor_driver
 - wolfssl/wolfssl
-manifest_hash: b2ab049cf39143abc6858d5849e89a44fa9a9fea292698261fced86dcb97f48c
+manifest_hash: 105bb0353ef05f10cc26b03b20d1f2e7802ffb52a5e15030d89f97ff1956b1e4
 target: esp32c6
 version: 2.0.0

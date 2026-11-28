@@ -179,4 +179,5 @@ The firmware image carries no secrets: each hub generates its own device‑facin
 the Rinnai cloud against its private CA. Stored data can optionally be encrypted (NVS, HMAC key burned into an eFuse block
 chosen on the admin page — irreversible, off by default).
 
-License: MIT (see `LICENSE`).
+License: MIT (see `LICENSE`) for this repository's source. The firmware binary also contains third-party components
+— notably wolfSSL under GPL-3.0 — see `NOTICE`.
