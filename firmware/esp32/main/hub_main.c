@@ -178,14 +178,23 @@ static uint8_t rjtry_get(void)
     return v;
 }
 
-static void rjtry_set(uint8_t v)
+/* 저장하고 다시 읽어 맞는지까지. 못 쓰면 false — 횟수 제한이 재부팅을 넘어 지켜지지 않으므로 되살리기를 하지 않는다 */
+static bool rjtry_set(uint8_t v)
 {
     nvs_handle_t h;
-    if (nvs_open("zbmark", NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_u8(h, "rjtry", v);
-        nvs_commit(h);
+    esp_err_t r = nvs_open("zbmark", NVS_READWRITE, &h);
+    if (r == ESP_OK) {
+        r = nvs_set_u8(h, "rjtry", v);
+        if (r == ESP_OK) {
+            r = nvs_commit(h);
+        }
         nvs_close(h);
     }
+    if (r != ESP_OK || rjtry_get() != v) {
+        ESP_LOGE("zbmark", "되살리기 횟수 저장 실패(%s)", esp_err_to_name(r));
+        return false;
+    }
+    return true;
 }
 
 static const char *TAG = "TEMPERATURE_SENSOR";
@@ -334,15 +343,33 @@ static const uint32_t ZB_RESTORE_WAIT_MS[ZB_RESTORE_MAX] = { 5000, 60000, 300000
 static volatile bool s_restore_pending;
 static volatile int64_t s_restore_at_us;
 
+/* 되쓴 뒤 플래시에서 다시 읽어 '스냅샷 항목이 모두 있다'가 확인될 때만 재시작한다. 재시작하면 RAM 스냅샷이 사라지므로,
+ * 쓰기가 안 됐는데 재시작하면 가입 정보를 영영 잃는다. 확인이 안 되면 재시작하지 않고 간격을 늘려 다시(스냅샷은 RAM 에
+ * 그대로), ZB_RESTORE_VERIFY_MAX 번 안 되면 포기한다(그때는 '기기 추가' — 재시작은 하지 않는다). */
+#define ZB_RESTORE_VERIFY_MAX 6
 static void zb_restore_task(void *arg)
 {
     uint32_t wait_ms = (uint32_t)(uintptr_t)arg;
     int n = hub_crypt_zb_restore_missing();
-    ESP_LOGW(TAG, "Zigbee 가입 데이터 %d개 되살림 — %lu초 뒤 재시작해 재가입을 다시 시도", n, (unsigned long)(wait_ms / 1000));
+    ESP_LOGW(TAG, "Zigbee 가입 데이터 %d개 되살림 — %lu초 뒤 확인하고 재시작해 재가입을 다시 시도", n, (unsigned long)(wait_ms / 1000));
     vTaskDelay(pdMS_TO_TICKS(wait_ms));
-    hub_crypt_zb_restore_missing();                 /* 기다리는 사이 더 지워진 게 있으면 마저 */
-    hub_ota_planned_reboot();                       /* 의도한 재시작 — 새 펌웨어 시험 부팅 실패로 세지 않게 */
-    esp_restart();
+    for (int k = 0; k < ZB_RESTORE_VERIFY_MAX; k++) {
+        int r = hub_crypt_zb_restore_missing();     /* 기다리는 사이 더 지워진 게 있으면 마저 */
+        int miss = hub_crypt_zb_missing();
+        if (r >= 0 && miss == 0) {
+            hub_ota_planned_reboot();               /* 의도한 재시작 — 새 펌웨어 시험 부팅 실패로 세지 않게 */
+            esp_restart();
+        }
+        uint32_t again_ms = 30000u << k;            /* 30초, 1·2·4·8·16분 */
+        ESP_LOGE(TAG, "가입 데이터 되살리기 확인 실패(쓰기 %d, 빠진 항목 %d) — 재시작하지 않고 %lu초 뒤 다시 (%d/%d)",
+                 r, miss, (unsigned long)(again_ms / 1000), k + 1, ZB_RESTORE_VERIFY_MAX);
+        hub_bbox_radio("restore_fail");
+        s_restore_at_us = esp_timer_get_time() + (int64_t)again_ms * 1000;
+        vTaskDelay(pdMS_TO_TICKS(again_ms));
+    }
+    ESP_LOGE(TAG, "가입 데이터를 플래시에 되쓰지 못해 포기 — SmartThings 에서 '기기 추가' 필요");
+    s_restore_pending = false;                      /* 스택을 다시 움직이게(새 가입 탐색) */
+    vTaskDelete(NULL);
 }
 
 /* 망에 붙은 뒤 조금 있다가 스냅샷을 새로 뜬다(스택이 저장을 끝낸 뒤). 다음 재가입 실패에 쓸 최신본. */
@@ -708,9 +735,8 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
                  * 표식을 남겨 경보가 뜨게 하고(다음 부팅에도), 언제 일어났는지 플래시에 적는다. */
                 zb_loss_note(1, leave_params->leave_type);
                 uint8_t tries = rjtry_get();
-                if (hub_crypt_zb_snapshot_joined() && tries < ZB_RESTORE_MAX && !s_restore_pending) {
+                if (hub_crypt_zb_snapshot_joined() && tries < ZB_RESTORE_MAX && !s_restore_pending && rjtry_set(tries + 1)) {
                     uint32_t wait = ZB_RESTORE_WAIT_MS[tries];
-                    rjtry_set(tries + 1);
                     s_restore_at_us = esp_timer_get_time() + (int64_t)wait * 1000;
                     s_restore_pending = true;
                     ESP_LOGE(TAG, "재가입 실패로 스택이 가입 정보를 지움 — 되살려 다시 시도 (%d/%d)", tries + 1, ZB_RESTORE_MAX);

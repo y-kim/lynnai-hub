@@ -34,6 +34,7 @@ esp_err_t hub_crypt_boot(bool *zb_reset);
 int  hub_crypt_zb_snapshot(void);            /* 지금 내용을 RAM 에 복사. 항목 수, 실패 -1(예전 것 유지) */
 bool hub_crypt_zb_snapshot_joined(void);     /* 스냅샷에 가입 데이터가 들어 있나 */
 int  hub_crypt_zb_restore_missing(void);     /* 지워진 항목만 되씀. 되쓴 개수, 실패 -1 */
+int  hub_crypt_zb_missing(void);             /* 스냅샷에 있는데 zb_nvs 에 없는 항목 수(0 = 다 있음), 못 열면 -1 */
 bool hub_crypt_on(void);                 /* 이번 부팅에 암호화된 저장소를 쓰나 */
 int hub_crypt_key_block(void);           /* 쓰는 키 블록 0~5, 없으면 -1 */
 

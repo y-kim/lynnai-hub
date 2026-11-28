@@ -352,6 +352,32 @@ int hub_crypt_zb_restore_missing(void)
     return done;
 }
 
+/* 스냅샷 항목 가운데 지금 zb_nvs 에 없는 개수(0 = 모두 있음 — 되살리기 확인용). 열지 못하면 -1 */
+int hub_crypt_zb_missing(void)
+{
+    int miss = 0;
+    snap_lock();
+    for (const ent_t *e = s_zb_snap; e; e = e->next) {
+        nvs_handle_t h;
+        esp_err_t r = nvs_open_from_partition(PART_ZB, e->ns, NVS_READONLY, &h);
+        if (r == ESP_ERR_NVS_NOT_FOUND) {           /* 네임스페이스째 없음 */
+            miss++;
+            continue;
+        }
+        if (r != ESP_OK) {
+            miss = -1;
+            break;
+        }
+        nvs_type_t t;
+        if (nvs_find_key(h, e->key, &t) != ESP_OK) {
+            miss++;
+        }
+        nvs_close(h);
+    }
+    snap_unlock();
+    return miss;
+}
+
 /* 파티션을 지우고 cfg(NULL=평문)로 다시 열어 목록을 되쓴다 */
 static esp_err_t rewrite(const char *part, nvs_sec_cfg_t *cfg, const ent_t *l)
 {
