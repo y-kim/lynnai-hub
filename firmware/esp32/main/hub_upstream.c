@@ -762,14 +762,21 @@ bool hub_upstream_apply(const char *form, char *msg, size_t len)
         return true;
     }
     if (httpd_query_key_value(form, "conn", v, sizeof(v)) == ESP_OK) {
-        hub_lan_guest_reconnect();
         snprintf(msg, len, "중심 허브에 다시 연결합니다");
         return true;
     }
 
-    char label[LABEL_MAX + 1] = "", ip[40] = "", mode[8] = "0";
+    /* URL 인코딩된 값은 한 바이트가 %XX 세 글자 — 받는 칸을 3배로(작으면 httpd_query_key_value 가 아무것도 안 써서
+     * 한글 3자 이상 라벨이 빈 값으로 저장됐다). 풀고 나서 LABEL_MAX 바이트로 자르되 UTF-8 글자 중간에서 끊지 않는다 */
+    char label[LABEL_MAX * 3 + 1] = "", ip[40] = "", mode[8] = "0";
     if (httpd_query_key_value(form, "label", label, sizeof(label)) == ESP_OK) {
         url_dec(label);
+        size_t n = strlen(label);
+        if (n > LABEL_MAX) {
+            n = LABEL_MAX;
+            while (n > 0 && ((unsigned char)label[n] & 0xC0) == 0x80) n--;   /* 이어지는 바이트면 글자 앞까지 */
+            label[n] = 0;
+        }
     }
     if (httpd_query_key_value(form, "ip", ip, sizeof(ip)) == ESP_OK) {
         url_dec(ip);

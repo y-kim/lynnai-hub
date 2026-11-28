@@ -84,6 +84,11 @@ int hub_dbgkey_create(const char *alias, char out[33])
     }
     if (alias && alias[0]) {
         strlcpy(e->alias, alias, sizeof(e->alias));
+        size_t n = strlen(e->alias);
+        if (strlen(alias) > n) {                     /* 잘렸으면 UTF-8 글자 중간에서 끊지 않게 그 글자째 뺀다 */
+            while (n > 0 && ((unsigned char)alias[n] & 0xC0) == 0x80) n--;
+            e->alias[n] = 0;
+        }
     } else {
         strlcpy(e->alias, "(이름 없음)", sizeof(e->alias));
     }

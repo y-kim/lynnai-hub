@@ -1174,7 +1174,7 @@ static esp_err_t dbgkey_post(httpd_req_t *req)
     if (read_body(req, body, sizeof(body)) >= 0) {
         form_get(body, "op", op, sizeof(op));
         if (!strcmp(op, "new")) {
-            char alias[24] = "";
+            char alias[24 * 3 + 1] = "";            /* URL 인코딩(한글 9바이트/자)으로 받는 칸 — 자르기는 hub_dbgkey_create 가 */
             form_get(body, "alias", alias, sizeof(alias));
             made = ok = hub_dbgkey_create(alias, tok) != 0;
             note = ok ? "" : "키를 만들지 못했습니다 (가득 찼거나 저장 실패)";
