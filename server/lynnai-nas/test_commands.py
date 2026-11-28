@@ -177,6 +177,11 @@ def main():
     i6 = core6.cmd_info()
     check(i6["reverted"] == 0 and i6["pending"] == 0 and len(sent6) == n6, "되돌림 0·재전송 없음, 창 지나면 비움")
 
+    print("[11] 대문자 16진 값(드라이버·HA 는 %02X 로 보낸다)도 소문자로 바꿔 보낸다")
+    core7, ln7, sent7, _ = setup(tmp)
+    core7.command("F06@A1B2C3 D4=1C")
+    check(len(sent7) == 1 and b'"d4","data":"1c"' in sent7[0], "d4=1C → 패킷 1개, 값은 1c")
+
     print(f"\n== {'실패 %d' % fails if fails else '모두 통과'} ==")
     sys.exit(1 if fails else 0)
 

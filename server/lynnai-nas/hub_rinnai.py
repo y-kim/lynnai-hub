@@ -361,6 +361,7 @@ class HubCore:
             self._command_one(one.strip())
 
     def _command_one(self, s):
+        s = s.lower()          # 드라이버·HA 는 값을 %02X(대문자)로 보낸다 — 기기는 소문자 16진(펌웨어도 검사 전에 소문자로)
         m = re.match(r"^f0([69])(?:@([0-9a-f]{6}))? (.+)$", s)
         if not m:
             self.log(f"[core] 모르는 명령: {s}")
