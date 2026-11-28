@@ -10,6 +10,7 @@
 #include <time.h>
 #include <ctype.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -496,6 +497,82 @@ static void learn_base(hub_link_tap_t *t, const char *topic, const char *slash)
     kick();
 }
 
+/* 보일러가 약 1시간마다 올리는 사용량 누계(stg). 프록시·단독 모두 허브가 받는다 — 단독이면 클라우드가 없으므로
+ * 이 기록이 유일한 원천이다. 본문 예: {"mnt":{"sum":6,"data":[{"label":"d20","value":"003f"},...]}}
+ * d20/d21 = 난방/온수 버너 누계 시간, d26/d27 = 난방/온수 가스 누계 ㎥ (모두 정수, 16진). d24/d25 = 펌웨어 버전. */
+#define MAX_STG 3
+static hub_stg_t s_stg[MAX_STG];                     /* 보일러마다(MAC끝3). lock() 으로 보호 */
+
+static int stg_value(const uint8_t *pl, int plen, const char *label)
+{
+    char key[40];
+    int kl = snprintf(key, sizeof(key), "\"label\":\"%s\",\"value\":\"", label);
+    for (int i = 0; i + kl < plen; i++) {
+        if (memcmp(pl + i, key, kl)) {
+            continue;
+        }
+        int v = 0, nd = 0;
+        for (int j = i + kl; j < plen && isxdigit(pl[j]) && nd < 8; j++, nd++) {
+            char c = (char)pl[j];
+            v = v * 16 + (c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+        }
+        return nd && nd <= 6 && i + kl + nd < plen && pl[i + kl + nd] == '"' ? v : -1;
+    }
+    return -1;
+}
+
+static void record_stg(hub_link_tap_t *t, const uint8_t *pl, int plen)
+{
+    int hh = stg_value(pl, plen, "d20"), wh = stg_value(pl, plen, "d21");
+    int hg = stg_value(pl, plen, "d26"), wg = stg_value(pl, plen, "d27");
+    if (hh < 0 || wh < 0 || hg < 0 || wg < 0 || hh > 0xffff || wh > 0xffff || hg > 0xffff || wg > 0xffff) {
+        ESP_LOGW(TAG, "stg: 누계를 못 읽음 (%d바이트)", plen);
+        return;
+    }
+    lock();
+    hub_stg_t *e = NULL;
+    for (int i = 0; i < MAX_STG && !e; i++) {          /* 같은 보일러 자리 → 빈자리 → 가장 오래된 자리 */
+        if (s_stg[i].have && !memcmp(s_stg[i].mac3, t->mac3, 3)) e = &s_stg[i];
+    }
+    for (int i = 0; i < MAX_STG && !e; i++) {
+        if (!s_stg[i].have) e = &s_stg[i];
+    }
+    if (!e) {
+        e = &s_stg[0];
+        for (int i = 1; i < MAX_STG; i++) if (s_stg[i].up_ms < e->up_ms) e = &s_stg[i];
+    }
+    e->have = true;
+    e->t = time(NULL);
+    e->up_ms = esp_timer_get_time() / 1000;
+    memcpy(e->mac3, t->mac3, 3);
+    e->heat_burn_h = hh;
+    e->hw_burn_h = wh;
+    e->heat_gas_m3 = hg;
+    e->hw_gas_m3 = wg;
+    unlock();
+    uint8_t m6[6] = { t->mac3[0], t->mac3[1], t->mac3[2], 0, 0, 0 };
+    hub_event(EV_BOIL_STG, m6, (int32_t)((uint32_t)hg | ((uint32_t)wg << 16)), (int32_t)((uint32_t)hh | ((uint32_t)wh << 16)));
+    ESP_LOGI(TAG, "stg: 난방 가스 %d ㎥·온수 가스 %d ㎥·난방 %d h·온수 %d h", hg, wg, hh, wh);
+}
+
+bool hub_rinnai_stg_of(const uint8_t mac3[3], hub_stg_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!s_lock) return false;
+    lock();
+    for (int i = 0; i < MAX_STG; i++) {
+        if (!s_stg[i].have) continue;
+        if (mac3 ? !memcmp(s_stg[i].mac3, mac3, 3) : (!out->have || s_stg[i].up_ms > out->up_ms)) {
+            *out = s_stg[i];
+            if (mac3) break;
+        }
+    }
+    unlock();
+    return out->have;
+}
+
+bool hub_rinnai_stg(hub_stg_t *out) { return hub_rinnai_stg_of(NULL, out); }
+
 /* 단독 모드: 기기의 시간 요청(stg, 약 1시간마다)에 클라우드처럼 set 72 = 현재 한국 시각으로 답한다
  * (캡처: 클라우드가 40ms 안에 {"rpc":[{"id":"72","data":"YYYYMMDDTHHMMSS"}]} 를 <base>/set 으로 보냄). */
 static void answer_time(hub_link_tap_t *t)
@@ -555,6 +632,9 @@ static void on_down_packet(hub_link_tap_t *t, const uint8_t *p, int n, int h)
     const char *slash = strrchr(topic, '/');
     if (slash && !strcmp(slash, "/stg")) {
         learn_base(t, topic, slash);
+        if (t->kind == HUB_KIND_F06) {
+            record_stg(t, p + off, n - off);          /* 각방(f09) stg 는 펌웨어 버전뿐이라 안 본다 */
+        }
         if (t->kind && hub_proxy_local()) {
             answer_time(t);
         }

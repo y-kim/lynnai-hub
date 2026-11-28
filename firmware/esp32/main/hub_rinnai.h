@@ -1,4 +1,5 @@
 #pragma once
+#include <time.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -63,6 +64,18 @@ typedef struct {
     char last_revert[48];               /* 반영됐다 되돌아간 마지막 명령 */
 } hub_cmd_info_t;
 void hub_rinnai_cmd_info(hub_cmd_info_t *out);
+
+/* 보일러가 약 1시간마다 올리는 사용량 누계(stg 의 d20/d21/d26/d27, 정수). 받은 적 없으면 false */
+typedef struct {
+    bool have;
+    time_t t;                           /* 받은 벽시계 시각(시계가 안 맞았으면 1970 근처) */
+    int64_t up_ms;                      /* 받은 때의 부팅 후 ms */
+    uint8_t mac3[3];
+    uint16_t heat_burn_h, hw_burn_h;    /* 난방/온수 버너 누계 시간 */
+    uint16_t heat_gas_m3, hw_gas_m3;    /* 난방/온수 가스 누계 ㎥ */
+} hub_stg_t;
+bool hub_rinnai_stg(hub_stg_t *out);                                  /* 가장 최근에 받은 보일러 것 */
+bool hub_rinnai_stg_of(const uint8_t mac3[3], hub_stg_t *out);        /* 그 보일러 것(mac3 NULL = 가장 최근) */
 void hub_rinnai_render(char *o, size_t cap);                          /* 관리 화면 카드 "보일러 명령" */
 bool hub_rinnai_apply(const char *form, char *msg, size_t msglen);   /* POST /admin/boiler (bmode=1 난방수 / 2 온돌·실내) */
 esp_err_t hub_rinnai_set_boil_mode(uint8_t m);                      /* 1 난방수 / 2 온돌·실내(초기 설정·관리 화면) */

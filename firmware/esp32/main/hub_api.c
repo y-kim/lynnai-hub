@@ -386,8 +386,16 @@ static esp_err_t state_get(httpd_req_t *req)
               bo.power ? "true" : "false", bo.heat ? "true" : "false", bo.outing ? "true" : "false",
               bo.hotwater ? "true" : "false", bo.preheat ? "true" : "false", bo.indoor ? "indoor" : "ondol");
         CHUNK("\"heat_burn\":%s,\"hw_burn\":%s,", bo.heat_burn ? "true" : "false", bo.hw_burn ? "true" : "false");
-        CHUNK("\"heat_set\":%d,\"ondol_set\":%d,\"room_set\":%d,\"hw_set\":%d,\"raw\":\"%s\"},",
+        CHUNK("\"heat_set\":%d,\"ondol_set\":%d,\"room_set\":%d,\"hw_set\":%d,\"raw\":\"%s\",",
               bo.indoor ? bo.room_set : bo.ondol_set, bo.ondol_set, bo.room_set, bo.hw_set, raw);
+        hub_stg_t sg;                 /* 보일러가 1시간마다 올리는 사용량 누계(정수) — 받기 전이면 null */
+        if (hub_rinnai_stg(&sg)) {
+            CHUNK("\"usage\":{\"age_s\":%lld,\"heat_gas_m3\":%u,\"hw_gas_m3\":%u,\"heat_burn_h\":%u,\"hw_burn_h\":%u}},",
+                  (long long)((esp_timer_get_time() / 1000 - sg.up_ms) / 1000), sg.heat_gas_m3, sg.hw_gas_m3,
+                  sg.heat_burn_h, sg.hw_burn_h);
+        } else {
+            CHUNK("\"usage\":null},");
+        }
     } else {
         CHUNK("\"boiler\":null,");
     }
@@ -593,6 +601,21 @@ static esp_err_t metrics_get(httpd_req_t *req)
         CHUNK("lynnai_boiler_on{mac=\"%s\",what=\"heat_burn\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"hw_burn\"} %d\n", m, bo.heat_burn, m, bo.hw_burn);
         CHUNK("lynnai_boiler_on{mac=\"%s\",what=\"outing\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"hotwater\"} %d\nlynnai_boiler_on{mac=\"%s\",what=\"preheat\"} %d\n",
               m, bo.outing, m, bo.hotwater, m, bo.preheat);
+    }
+    {
+        hub_stg_t sg;                 /* 보일러 자체 누계(stg, 1시간마다·정수). 전원이 끊겨도 보일러 쪽 값은 유지된다 */
+        if (hub_rinnai_stg(&sg)) {
+            char m[7];
+            snprintf(m, sizeof(m), "%02x%02x%02x", sg.mac3[0], sg.mac3[1], sg.mac3[2]);
+            CHUNK("# TYPE lynnai_boiler_gas_cubic_meters counter\n"
+                  "lynnai_boiler_gas_cubic_meters{mac=\"%s\",what=\"heat\"} %u\nlynnai_boiler_gas_cubic_meters{mac=\"%s\",what=\"hotwater\"} %u\n",
+                  m, sg.heat_gas_m3, m, sg.hw_gas_m3);
+            CHUNK("# TYPE lynnai_boiler_burn_hours counter\n"
+                  "lynnai_boiler_burn_hours{mac=\"%s\",what=\"heat\"} %u\nlynnai_boiler_burn_hours{mac=\"%s\",what=\"hotwater\"} %u\n",
+                  m, sg.heat_burn_h, m, sg.hw_burn_h);
+            CHUNK("# TYPE lynnai_boiler_usage_age_seconds gauge\nlynnai_boiler_usage_age_seconds %lld\n",
+                  (long long)((esp_timer_get_time() / 1000 - sg.up_ms) / 1000));
+        }
     }
     CHUNK("# TYPE lynnai_boiler_setpoint_celsius gauge\n");
     for (int i = 0; i < nd; i++) {
