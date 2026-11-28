@@ -39,5 +39,7 @@ services:
       - LAN_PAIR=${LAN_PAIR:-}                     # 1이면 시작 후 600초 동안 새 LAN 드라이버 등록(첫 설치 포함). 끝나면 지울 것
       - UPSTREAM_CA=${UPSTREAM_CA:-/app/lynnai-nas/cloud_ca.crt}   # 클라우드 CA(컨테이너 안 경로, 바꾸려면 /data 아래에)
       - UPSTREAM_CN=${UPSTREAM_CN:-dev2.ckpush.com}                # 클라우드 인증서 CN
+      - AUTO_FALLBACK=${AUTO_FALLBACK:-1}          # 프록시인데 린나이 서버가 안 되면 그동안 직접 받기(0 = 끔)
+      - LYNNAI_LABEL=${LYNNAI_LABEL:-}             # 이 허브 라벨(층, 예 1층) — 방 이름 앞에 붙는다
     volumes:
       - ./data:/data

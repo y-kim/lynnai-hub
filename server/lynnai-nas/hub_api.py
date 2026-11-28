@@ -429,11 +429,13 @@ def serve(core, hub_id, port, token, log=print):
             self._page(status, view=devices_view(), msg=msg, edit=True, token=form.get("token", ""))
 
         def _send_xml(self, status, body):
+            # 머리와 본문을 한 번에 쓴다(ESP32 와 같음): 기기 모듈이 첫 조각만 읽는다고 보고, 두 조각으로 나가지 않게
             self.send_response(status)
             self.send_header("Content-Type", "application/xml; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._headers_buffer.append(b"\r\n")
+            self.wfile.write(b"".join(self._headers_buffer) + body)
+            self._headers_buffer = []
 
         def _bootstrap(self):
             src = self.client_address[0]
@@ -457,9 +459,12 @@ def serve(core, hub_id, port, token, log=print):
             if STANDALONE:
                 log("[api] /key/server(단독): 허브가 만든 답")
                 return self._send_xml(200, BOOT_LOCAL)
-            if hub_proxy.FB.active and cached:   # 서버에 닿지 않아 직접 받는 중: 묻지 않고 받아 둔 답(돌아갈 때 그대로 쓰인다)
-                log("[api] /key/server(폴백 중): 이 기기의 저장된 답")
-                return self._send_xml(200, cached)
+            if hub_proxy.FB.active:              # 서버에 닿지 않아 직접 받는 중: 닿지 않는 클라우드에 묻지 않는다
+                if cached:                        # 받아 둔 답(돌아갈 때 그대로 쓰인다)
+                    log("[api] /key/server(폴백 중): 이 기기의 저장된 답")
+                    return self._send_xml(200, cached)
+                log("[api] /key/server(폴백 중): 저장된 답 없음 — 허브가 만든 답")   # ESP32 와 같음(502 대신)
+                return self._send_xml(200, BOOT_LOCAL)
             status = body = None
             try:
                 import hub_bootstrap

@@ -252,6 +252,8 @@ class HubCore:
             ln.mac3 = _mac3(seg[0])
             mm = _MODEL.search(seg[0] + "/")
             if mm and len(ln.mac3) == 3:
+                if len(self.models) >= MAX_STATE and (kind, bytes(ln.mac3)) not in self.models:
+                    self.models.pop(next(iter(self.models)))            # 가장 먼저 넣은 것부터(상태표와 같은 상한)
                 self.models[(kind, bytes(ln.mac3))] = int(mm.group(1), 16)
             self.log(f"[core] 링크 = f0{kind} {ln.mac3.hex()} ({ln.base})")
             self._send_links()
@@ -319,6 +321,9 @@ class HubCore:
                     self._pre_dirty = True
                 self.pre_off_at.pop(key, None)
             elif key not in self.pre_on:
+                for t in (self.pre_on, self.pre_try, self.pre_off_at):     # 상태표와 같은 상한 — 넘으면 오래된 것부터
+                    while len(t) >= MAX_STATE:
+                        t.pop(next(iter(t)))
                 now = time.monotonic()
                 self.pre_on[key] = now
                 self.pre_off_at[key] = now + self.preheat_off * 60 if self.preheat_off else None   # 기본값으로
