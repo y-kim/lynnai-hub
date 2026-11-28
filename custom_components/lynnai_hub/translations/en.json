@@ -172,6 +172,12 @@
       "gas_last_hour": {
         "name": "Last hour"
       },
+      "gas_period": {
+        "name": "Gas this billing period"
+      },
+      "gas_period_cost": {
+        "name": "Estimated gas bill"
+      },
       "hub_temperature": {
         "name": "Internal temperature"
       },

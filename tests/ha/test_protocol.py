@@ -105,6 +105,16 @@ def test_labels_decode():
     assert p.decode_labels(bytes([9]) + bytes.fromhex("d4e5f6") + b"\x05ab") == {}
 
 
+def test_bill_decode():
+    # [basis 1 meter|2 boiler][litres u32][won u32]; [0] or short = unknown
+    import struct
+    assert p.decode_bill(bytes([2]) + struct.pack("<II", 37000, 48720)) == p.BillState("boiler", 37.0, 48720)
+    assert p.decode_bill(bytes([1]) + struct.pack("<II", 123456, 160300)) == p.BillState("meter", 123.46, 160300)
+    assert p.decode_bill(bytes([0])) is None
+    assert p.decode_bill(bytes([2]) + b"\x00\x00") is None
+    assert p.decode_bill(bytes([3]) + struct.pack("<II", 1, 1)) is None
+
+
 def test_half_degree_hot_water():
     raw = list(F06_ON)
     raw[10:13] = "255"                              # 0x25 = 37 and tenths 5

@@ -250,6 +250,25 @@ async def test_hub_temperature_appears_when_the_hub_sends_it(hass: HomeAssistant
     await _settle(hass, lambda: hass.states.get(temp).state == "40.2")
 
 
+async def test_gas_bill_on_the_boiler(hass: HomeAssistant, entry, fake_hub):
+    """This billing period's gas and estimated bill (CMD 0x0F) appear on the boiler device; [0] makes them unavailable."""
+    use = f"sensor.boiler_{BOILER}_gas_this_billing_period"
+    cost = f"sensor.boiler_{BOILER}_estimated_gas_bill"
+    assert hass.states.get(cost) is None                              # nothing until the hub sends it
+    await fake_hub.push(0x0F, bytes([2]) + struct.pack("<II", 37000, 48720))
+    await _settle(hass, lambda: hass.states.get(cost) is not None)
+    assert float(hass.states.get(use).state) == 37
+    assert hass.states.get(use).attributes["basis"] == "boiler"
+    assert hass.states.get(use).attributes["unit_of_measurement"] == "m³"
+    assert float(hass.states.get(cost).state) == 48720
+    assert hass.states.get(cost).attributes["unit_of_measurement"] == "KRW"
+    await fake_hub.push(0x0F, bytes([1]) + struct.pack("<II", 123456, 160300))
+    await _settle(hass, lambda: hass.states.get(use).attributes.get("basis") == "meter")
+    assert float(hass.states.get(use).state) == 123.46
+    await fake_hub.push(0x0F, bytes([0]))
+    await _settle(hass, lambda: hass.states.get(cost).state == "unavailable")
+
+
 async def test_hub_mode_can_be_seen_and_changed(hass: HomeAssistant, entry, fake_hub):
     hub = f"lynnai_hub_{HUB_ID.lower()}"
     mode, fallback, auto = f"select.{hub}_operating_mode", f"binary_sensor.{hub}_running_without_the_cloud", \

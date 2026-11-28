@@ -1,4 +1,4 @@
-"""Sensors wired to the hub (room temperature/humidity, gas meter) and the hub's own status."""
+"""Sensors wired to the hub (room temperature/humidity, gas meter), the boiler's gas bill and the hub's own status."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from . import LynnaiConfigEntry, protocol as p
-from .entity import HubEntity, HubModeEntity, PluginEntity, setup_dynamic
+from .entity import BoilerEntity, HubEntity, HubModeEntity, PluginEntity, setup_dynamic
 from .hub import LynnaiHub
 
 
@@ -81,6 +81,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: LynnaiConfigEntry, async
             out.append(HubStatus(hass, hub, entry.entry_id))
         if hub.chip_temp is not None:
             out.append(HubTemperature(hub, entry.entry_id))
+        if hub.bill is not None:
+            for mac in hub.boilers:
+                out += [BillUsage(hass, hub, entry.entry_id, mac), BillCost(hass, hub, entry.entry_id, mac)]
         return out
 
     entry.async_on_unload(setup_dynamic(hass, entry.entry_id, async_add_entities, make))
@@ -96,6 +99,46 @@ class HubSensor(PluginEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         return self.entity_description.value(self.hub)
+
+
+class _Bill(BoilerEntity, SensorEntity):
+    """This billing period's gas and its estimated bill, on the boiler device (SmartThings shows them on the boiler card).
+    The hub counts them with what its admin page picks: the gas meter, or the boiler's own totals (whole m3, hourly)."""
+
+    _attr_state_class = SensorStateClass.TOTAL       # starts again from 0 each billing period
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.hub.connected and self.hub.bill is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str] | None:
+        return {"basis": self.hub.bill.basis} if self.hub.bill else None
+
+
+class BillUsage(_Bill):
+    _attr_device_class = SensorDeviceClass.GAS
+    _attr_native_unit_of_measurement = UnitOfVolume.CUBIC_METERS
+
+    def __init__(self, hass: HomeAssistant, hub: LynnaiHub, entry_id: str, mac: str) -> None:
+        super().__init__(hass, hub, entry_id, mac, "gas_period")
+
+    @property
+    def native_value(self) -> float | None:
+        return self.hub.bill.m3 if self.hub.bill else None
+
+
+class BillCost(_Bill):
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = "KRW"
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, hass: HomeAssistant, hub: LynnaiHub, entry_id: str, mac: str) -> None:
+        super().__init__(hass, hub, entry_id, mac, "gas_period_cost")
+
+    @property
+    def native_value(self) -> int | None:
+        return self.hub.bill.won if self.hub.bill else None
 
 
 # The status is a sentence with a time in it, which Home Assistant cannot translate; pick by the configured language.

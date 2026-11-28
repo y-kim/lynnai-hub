@@ -172,6 +172,12 @@
       "gas_last_hour": {
         "name": "1시간 사용량"
       },
+      "gas_period": {
+        "name": "이번 청구 기간 가스"
+      },
+      "gas_period_cost": {
+        "name": "예상 가스 요금"
+      },
       "hub_temperature": {
         "name": "내부 온도"
       },

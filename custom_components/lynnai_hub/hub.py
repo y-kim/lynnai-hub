@@ -32,6 +32,7 @@ class LynnaiHub:
         self.labels: dict[str, str] = {}                        # thermostat mac -> hub/floor label ("1층"), from hub v0.9
         self.room: p.RoomSensorState | None = None
         self.gas: p.GasState | None = None
+        self.bill: p.BillState | None = None                    # this billing period's gas and estimated bill (hub v0.10)
         self.plugins = p.PluginState()
         self.chip_temp: float | None = None                     # the hub's own temperature, when it sends one
         self.mode: p.HubMode | None = None                      # None until the hub told us (older firmware never does)
@@ -105,6 +106,12 @@ class LynnaiHub:
         elif cmd == p.CMD_GAS:
             new = self.gas is None
             self.gas = p.decode_gas(payload) or self.gas
+        elif cmd == p.CMD_BILL:
+            bill = p.decode_bill(payload)
+            if bill == self.bill:
+                return
+            new = self.bill is None
+            self.bill = bill
         elif cmd == p.CMD_PLUGINS:
             self.plugins = p.decode_plugins(payload)
         elif cmd == p.CMD_PAIRS:

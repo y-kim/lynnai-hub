@@ -38,6 +38,7 @@ CMD_MODE = 0x0B
 CMD_BOILCFG = 0x0C   # boiler settings: [hot water preheat auto-off, minutes, 0 = never]
 CMD_MODELS = 0x0D    # model codes: ([kind][mac3][code]) * n — picks the temperature tables
 CMD_LABELS = 0x0E    # hub labels: ([kind][mac3][len][utf8 label]) * n — floor label, prefixed to room names (hub v0.9)
+CMD_BILL = 0x0F      # this billing period's gas: [basis 1 meter|2 boiler][litres u32][estimated bill, won u32]; [0] = unknown
 
 KIND_BOILER = 6
 KIND_THERMOSTAT = 9
@@ -217,6 +218,23 @@ class GasState:
     def total_m3(self) -> float:
         """Meter reading if calibrated, else pulses x 0.01 m3 (the usual pulse size)."""
         return self.meter_m3 if self.meter_m3 is not None else round(self.pulses * 0.01, 2)
+
+
+@dataclass(frozen=True)
+class BillState:
+    """Gas used in the current billing period and its estimated bill, as the hub counts it (its admin page's last bar).
+    basis: "meter" (the gas meter's pulses) or "boiler" (the boiler's own hourly totals, whole m3, an estimate)."""
+    basis: str
+    m3: float
+    won: int
+
+
+def decode_bill(payload: bytes) -> BillState | None:
+    """None when the hub has nothing to count with (no meter, no boiler total yet, clock not set)."""
+    if len(payload) < 9 or payload[0] not in (1, 2):
+        return None
+    litres, won = struct.unpack_from("<II", payload, 1)
+    return BillState("meter" if payload[0] == 1 else "boiler", round(litres / 1000, 2), won)
 
 
 @dataclass
