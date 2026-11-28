@@ -26,3 +26,6 @@ secrets.*
 review*-no-commit.md
 # tools/hub_doctor.py 가 현재 폴더에 쓰는 진단 결과(SSID·BSSID·단말 MAC 이 들어 있음)
 hub_diag_*.txt
+
+# build_all.sh release 가 만드는 체크섬(릴리즈 첨부물)
+firmware/esp32/lynnai-hub-esp32c6-*-SHA256SUMS

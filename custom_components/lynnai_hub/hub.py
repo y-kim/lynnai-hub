@@ -40,7 +40,7 @@ class LynnaiHub:
         self.labels: dict[str, str] = {}                        # thermostat mac -> hub/floor label ("1층"), from hub v0.9
         self.room: p.RoomSensorState | None = None
         self.gas: p.GasState | None = None
-        self.bill: p.BillState | None = None                    # this billing period's gas and estimated bill (hub v0.10)
+        self.bill: p.BillState | None = None                    # this billing period's gas and estimated bill (hub v1.0)
         self.plugins = p.PluginState()
         self.plugins_seen = False                               # a plugin notice arrived (older firmware never sends one)
         self.gas_reset: datetime | None = None                  # the meter reading was set (jump that is not gas use)

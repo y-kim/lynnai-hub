@@ -172,7 +172,7 @@ and returns to proxy on its own.
   Install via the channel invite <https://bestow-regional.api.smartthings.com/invite/Qrjp9gnaJbMq>.
 - `server/lynnai-nas/` — the same hub as a LAN‑only Docker container for a NAS; `server/lynnai-hub-watch/` records
   the hub API into SQLite.
-- `custom_components/lynnai_hub/` — Home Assistant custom integration (experimental, installable from the Marketplace or HACS) that
+- `custom_components/lynnai_hub/` — Home Assistant custom integration (experimental, listed in the Home Assistant Marketplace and HACS) that
   talks to the hub's LAN channel: [docs/home-assistant.md](docs/home-assistant.md) (Korean).
 - `tools/hub_doctor.py` — diagnostics from a PC (API, SmartThings CLI, USB serial).
 
