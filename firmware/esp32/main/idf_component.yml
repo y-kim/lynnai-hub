@@ -6,10 +6,6 @@ dependencies:
   idf:
     version: ">=5.2"
   espressif/esp-zigbee-lib:
-    version: ">=2.0.0"
-  example_common:
-    path: "../components/example_common"
-  temp_sensor_driver:
-    path: "../components/temp_sensor_driver"
-  switch_driver:
-    path: "../components/switch_driver"
+    version: "==2.1.0"   # 고정 — 재가입 실패 우회(가입 정보 되살리기)가 2.1.0 의 동작에 맞춰져 있다(락 파일과 같음)
+  # example_common·temp_sensor_driver·switch_driver 는 프로젝트의 components/ 에 있어 ESP-IDF 가 저절로 찾는다
+  # (여기 path 로 적으면 dependencies.lock 에 빌드한 PC 의 절대 경로가 들어갔다)
